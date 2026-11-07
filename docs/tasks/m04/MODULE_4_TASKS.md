@@ -6,6 +6,37 @@ Phân công: **FE** — nhóm trưởng; **BE** — thành viên còn lại; **C
 
 Cập nhật tiến độ: đánh dấu `[x]` khi hoàn thành; sửa trạng thái thành **Đang làm**, **Đang chờ**, **Cần kiểm tra** hoặc **Hoàn thành**; thêm liên kết PR và ghi chú trong mỗi mục. Chỉ đánh dấu hoàn thành khi đạt tiêu chí bên dưới.
 
+## Mốc Pull Request sang dự án chính
+
+Đây là kế hoạch đề xuất, không cần đợi hoàn thành toàn bộ Module 4. Hai bạn xác nhận nhánh đích, quyền và người review với trưởng dự án trước khi gửi PR. Có thể tách PR FE và BE nếu nhóm chính muốn review riêng; ghi rõ PR nào phụ thuộc PR nào.
+
+| Mốc | Task liên quan | Điều kiện đề xuất để gửi sang dự án chính | Trạng thái / liên kết PR |
+| --- | --- | --- | --- |
+| PR 1 — Báo cáo Lead | 01–05 | Chốt nghiệp vụ và API; FE–BE kết nối; kiểm tra số liệu, bộ lọc, chi tiết và quyền. | Chưa làm · PR: — |
+| PR 2 — Marketing & Ads | 06–07 | FE–BE kết nối; đối chiếu dữ liệu nguồn, KPI, quyền và trạng thái đồng bộ; ghi rõ dữ liệu thử nghiệm nếu còn dùng. | Chưa làm · PR: — |
+| PR 3 — Dashboard Design | 08–09 | Thống nhất với Module 5; FE–BE hoạt động theo quyền; nêu rõ dữ liệu hoặc tích hợp còn chờ. | Chưa làm · PR: — |
+| PR 4 — Xuất báo cáo | 10–11 | Kiểm tra xuất theo bộ lọc và quyền; ghi rõ kết quả Excel và tình trạng tích hợp Google Sheets. | Chưa làm · PR: — |
+| Bàn giao toàn module | 12 | Kiểm thử lại các luồng đã tích hợp; ghi lỗi, phụ thuộc và phần chưa hoàn thành. | Chưa làm · PR: — |
+
+### Quy trình làm việc của hai thành viên
+
+1. Cùng thực hiện task 01–02; thống nhất API và dữ liệu mẫu trước khi code song song.
+2. Mỗi người tạo nhánh riêng từ `main` của repository nhóm; FE và BE làm các task được phân công.
+3. Push nhánh của mình, tạo PR vào repository nhóm để người còn lại xem và kiểm tra tích hợp.
+4. Khi một mốc ở bảng trên sẵn sàng, đối chiếu thay đổi mới từ dự án chính, xử lý xung đột và đề xuất PR sang nhánh đích đã thống nhất.
+5. Cập nhật trạng thái, đường dẫn PR và việc còn chờ vào bảng và task tương ứng; nhóm trưởng có thể phụ trách cập nhật file để giảm xung đột.
+
+### Checklist trước mỗi PR sang dự án chính
+
+- [ ] Chức năng trong PR đã được kiểm thử phù hợp và hai bạn đã đối chiếu kết quả FE–BE nếu có liên quan.
+- [ ] Đã kiểm tra quyền, dữ liệu rỗng và lỗi liên quan đến phần thay đổi.
+- [ ] Đã đối chiếu nhánh đích, thay đổi mới từ dự án chính và xử lý xung đột nếu có.
+- [ ] Nội dung PR nêu mục đích, thay đổi, cách kiểm thử, kết quả và phụ thuộc hoặc giới hạn còn lại.
+- [ ] Không đưa mật khẩu, file cấu hình cá nhân hoặc dữ liệu khách hàng thật vào Git.
+- [ ] Áp dụng kiểm tra phạm vi và quy trình review của dự án chính; chỉ merge khi người có quyền chấp thuận.
+
+Task 12 là kiểm thử tổng thể và bàn giao; mỗi PR trước đó vẫn phải tự kiểm thử phần việc của mình. Repository nhóm hiện là bản sao riêng: cần xác nhận cách tạo PR giữa hai repository hoặc cách đưa nhánh sang dự án chính với người quản lý repository.
+
 ## 01 — Chốt nghiệp vụ và phụ thuộc
 
 **Phụ trách:** Chung, FE điều phối · **Trạng thái:** Chưa làm
