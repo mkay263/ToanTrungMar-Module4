@@ -29,13 +29,22 @@ import {
   normalizeVietnamPhone,
   selectAutoAssignedSales,
 } from '../01-leads/service';
+import { normalizeWebsiteDomain } from '../01-leads/gmail-form-parser';
 import { refreshKeywordDerivedCacheFromCanonicalMetrics } from '../03-keywords-ads/service';
 import {
+  getGoogleConnection,
   syncAllGoogleDataAcrossModules,
+  getGscDataStateMetadataMap,
+  classifyGscDateBySourceMetadata,
   ALLOWED_COMPANY_GA4_PROPERTY_IDS,
   ALLOWED_COMPANY_GSC_SITES,
 } from './google-oauth.service';
-import { getCanonicalDateRange } from '../../core/reporting-dates';
+import {
+  getCanonicalDateRange,
+  countInclusiveCalendarDays,
+  resolveDatePresetRange,
+} from '../../core/reporting-dates';
+import { getGmailLeadSyncStatus } from '../01-leads/gmail-sync.service';
 
 export { ALLOWED_COMPANY_GA4_PROPERTY_IDS, ALLOWED_COMPANY_GSC_SITES };
 
@@ -245,6 +254,11 @@ export async function ingestWebhookLeadWithErrorProtection(input: WebhookLeadInt
           isUnmatchedUtm: false,
         };
 
+    const resolvedWebsite =
+      normalizeWebsiteDomain(input.sourceWebsite) ||
+      normalizeWebsiteDomain(input.tracking?.landingPageUrl) ||
+      (providerInternal === 'website_webhook' ? normalizeWebsiteDomain(accountKey) : null);
+
     const ingested = await ingestLeadWithTrackingIdempotent(prisma, {
       intakeSourceProvider: providerInternal,
       intakeSourceAccountKey: accountKey,
@@ -261,7 +275,7 @@ export async function ingestWebhookLeadWithErrorProtection(input: WebhookLeadInt
       province: input.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : input.province || null,
       district: input.hcmDistrict || null,
       installationAddress: input.installationAddress || null,
-      sourceWebsite: accountKey,
+      sourceWebsite: resolvedWebsite,
       assignedSalesId: assignment.assignedSalesId,
       marketingSource: resolvedAttr.marketingSource,
       sourceResolutionMethod: resolvedAttr.sourceResolutionMethod,
@@ -448,7 +462,12 @@ export async function declareExternalCampaignAndRemapUtm(input: DeclareExternalC
   return { campaign, remappedCount };
 }
 
-export async function triggerPlatformSyncExecution(input: TriggerPlatformSyncDto) {
+const globalForTrackingSync = globalThis as typeof globalThis & {
+  __trackingSyncInFlight?: Promise<Awaited<ReturnType<typeof runTriggerPlatformSyncInternal>>> | null;
+  __trackingSchedulerStarted?: boolean;
+};
+
+async function runTriggerPlatformSyncInternal(input: TriggerPlatformSyncDto) {
   const syncRes = await syncAllGoogleDataAcrossModules(input.scheduleSlot);
   const latestLog = await prisma.platformSyncLog.findFirst({
     orderBy: { id: 'desc' },
@@ -468,6 +487,134 @@ export async function triggerPlatformSyncExecution(input: TriggerPlatformSyncDto
     ga4Error: syncRes.ga4Error,
     scError: syncRes.scError,
   };
+}
+
+export async function triggerPlatformSyncExecution(input: TriggerPlatformSyncDto) {
+  if (globalForTrackingSync.__trackingSyncInFlight) {
+    return globalForTrackingSync.__trackingSyncInFlight;
+  }
+  const runPromise = runTriggerPlatformSyncInternal(input).finally(() => {
+    globalForTrackingSync.__trackingSyncInFlight = null;
+  });
+  globalForTrackingSync.__trackingSyncInFlight = runPromise;
+  return runPromise;
+}
+
+export function ensureTrackingBackgroundSchedulerStarted(): void {
+  if (globalForTrackingSync.__trackingSchedulerStarted) return;
+  globalForTrackingSync.__trackingSchedulerStarted = true;
+
+  const checkAndRunScheduledSync = async () => {
+    try {
+      const conn = await getGoogleConnection();
+      if (!conn?.connected || conn.isSandboxDemo) return;
+      const now = new Date();
+      const vnHour = (now.getUTCHours() + 7) % 24;
+      const vnMinute = now.getUTCMinutes();
+      let slot: TriggerPlatformSyncDto['scheduleSlot'] | null = null;
+      if (vnHour === 2 && vnMinute < 20) slot = 'FULL_0200';
+      else if (vnHour === 11 && vnMinute < 20) slot = 'LIGHT_1100';
+      else if (vnHour === 17 && vnMinute < 20) slot = 'LIGHT_1700';
+
+      if (!slot) return;
+      const lastSync = await prisma.platformSyncLog.findFirst({
+        where: { runType: slot },
+        orderBy: { completedAt: 'desc' },
+      });
+      if (lastSync?.completedAt && Date.now() - lastSync.completedAt.getTime() < 2 * 60 * 60 * 1000) {
+        return;
+      }
+      await triggerPlatformSyncExecution({
+        scheduleSlot: slot,
+        runGclidResolution: true,
+        runReconciliation: true,
+      });
+    } catch {
+      // Background scheduler errors must not crash server process
+    }
+  };
+
+  const timer = setInterval(() => {
+    void checkAndRunScheduledSync();
+  }, 15 * 60 * 1000);
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+}
+
+const SETTING_KEY_TOUCHPOINTS = 'tracking_touchpoints_v1';
+
+interface StoredTouchpointRecord {
+  eventId: string;
+  eventType: 'product_view' | 'contact_click' | 'form_submit_success';
+  sourceWebsite: string;
+  pageUrl: string | null;
+  leadCode: string | null;
+  submissionId: string | null;
+  visitorId: string | null;
+  occurredAt: string;
+}
+
+export async function getStoredTouchpoints(): Promise<StoredTouchpointRecord[]> {
+  const row = await prisma.systemSetting.findUnique({
+    where: { key: SETTING_KEY_TOUCHPOINTS },
+  });
+  if (!row?.value) return [];
+  try {
+    const arr = JSON.parse(row.value);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function recordTrackingTouchpoint(input: {
+  eventId: string;
+  eventType: 'product_view' | 'contact_click' | 'form_submit_success';
+  sourceWebsite: string;
+  pageUrl?: string | null;
+  leadCode?: string | null;
+  submissionId?: string | null;
+  visitorId?: string | null;
+  occurredAt?: string | null;
+}): Promise<{ ok: true; deduplicated: boolean; linkedLeadCode: string | null }> {
+  const existing = await getStoredTouchpoints();
+  const found = existing.find((e) => e.eventId === input.eventId);
+  if (found) {
+    return { ok: true, deduplicated: true, linkedLeadCode: found.leadCode };
+  }
+
+  let linkedLeadCode = input.leadCode?.trim() || null;
+  if (!linkedLeadCode && input.submissionId?.trim()) {
+    const matchedTracking = await prisma.marketingTracking.findFirst({
+      where: { externalSubmissionId: input.submissionId.trim() },
+      include: { lead: { select: { leadCode: true } } },
+    });
+    linkedLeadCode = matchedTracking?.lead?.leadCode || null;
+  }
+
+  const record: StoredTouchpointRecord = {
+    eventId: input.eventId.trim(),
+    eventType: input.eventType,
+    sourceWebsite: normalizeWebsiteDomain(input.sourceWebsite) || input.sourceWebsite.trim().toLowerCase(),
+    pageUrl: input.pageUrl?.trim() || null,
+    leadCode: linkedLeadCode,
+    submissionId: input.submissionId?.trim() || null,
+    visitorId: input.visitorId?.trim() || null,
+    occurredAt: input.occurredAt?.trim() || new Date().toISOString(),
+  };
+
+  const next = [record, ...existing].slice(0, 500);
+  await prisma.systemSetting.upsert({
+    where: { key: SETTING_KEY_TOUCHPOINTS },
+    update: { value: JSON.stringify(next) },
+    create: {
+      key: SETTING_KEY_TOUCHPOINTS,
+      value: JSON.stringify(next),
+    },
+  });
+
+  return { ok: true, deduplicated: false, linkedLeadCode };
 }
 
 export async function resolveLeadReconciliationAlert(
@@ -490,27 +637,41 @@ function formatRatioPct(numerator: number, denominator: number): string {
   return `${((numerator / denominator) * 100).toFixed(1)}%`;
 }
 
-export async function getTrackingDashboardData(periodDays = 30): Promise<TrackingDashboardDto> {
-  const dateRange = getCanonicalDateRange(periodDays);
+export async function getTrackingDashboardData(
+  periodDays = 30,
+  dateFilter?: { preset?: string; from?: string; to?: string },
+): Promise<TrackingDashboardDto> {
+  const dateRange = dateFilter?.preset || (dateFilter?.from && dateFilter?.to)
+    ? resolveDatePresetRange(dateFilter.preset || 'CUSTOM', dateFilter.from, dateFilter.to)
+    : getCanonicalDateRange(periodDays);
   const cutoffDate = dateRange.startDateTime;
+  const endDateTime = dateRange.endDateTime;
   const cutoffDateStr = dateRange.startDateStr;
   const todayStr = dateRange.endDateStr;
 
-  const [leads, campaigns, syncLogs, reconciliations, webhookErrors] = await Promise.all([
+  const [leads, campaigns, syncLogs, reconciliations, webhookErrors, touchpoints] = await Promise.all([
     prisma.lead.findMany({
-      where: { createdAt: { gte: cutoffDate } },
+      where: { createdAt: { gte: cutoffDate, lte: endDateTime } },
       select: {
         id: true,
         leadCode: true,
         contactChannel: true,
+        sourceWebsite: true,
         selfReportedSource: true,
         isSpam: true,
         spamAdsExclusionStatus: true,
         pipelineStatus: true,
         createdAt: true,
+        activities: {
+          orderBy: { createdAt: 'desc' },
+          take: 3,
+          select: { actionType: true, note: true, createdAt: true },
+        },
         tracking: {
           select: {
             marketingSource: true,
+            landingPageUrl: true,
+            externalSubmissionId: true,
             isRepeatLead: true,
             isUnknownSource: true,
             isUnknownCampaign: true,
@@ -576,7 +737,10 @@ export async function getTrackingDashboardData(periodDays = 30): Promise<Trackin
       orderBy: { createdAt: 'desc' },
       take: 10,
     }),
+    getStoredTouchpoints(),
   ]);
+
+  const touchpointsInPeriod = touchpoints.filter((tp) => new Date(tp.occurredAt) >= cutoffDate);
 
   const rawLeadsL1 = leads.length;
   const validLeadsL2 = leads.filter(isL2Valid).length;
@@ -767,16 +931,163 @@ export async function getTrackingDashboardData(periodDays = 30): Promise<Trackin
   }
 
   const isLiveGoogle = Boolean(googleConn?.connected && !googleConn?.isSandboxDemo);
-  const googleAssetsHub = await buildGoogleAssetsHub(periodDays);
+  const googleAssetsHub = await buildGoogleAssetsHub(dateRange.totalCalendarDays);
+  const gmailStatus = await getGmailLeadSyncStatus().catch(() => null);
+
+  const latestByPlatform = (platformKey: string) => {
+    const allLogs = syncLogs.filter((s) => s.platform.toLowerCase() === platformKey);
+    const lastAttempt = allLogs[0] || null;
+    const lastSuccess = allLogs.find((s) => s.status === 'success') || null;
+    return { lastAttempt, lastSuccess };
+  };
+
+  const ga4Sync = latestByPlatform('ga4');
+  const gscSync =
+    latestByPlatform('search_console').lastAttempt || latestByPlatform('search_console').lastSuccess
+      ? latestByPlatform('search_console')
+      : latestByPlatform('google_search_console');
+  const adsSync = latestByPlatform('google_ads');
+  const hasAdsToken = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
+
+  const sourceStatuses = [
+    {
+      sourceKey: 'CRM_LEADS',
+      sourceName: 'Lead nội bộ CRM',
+      connectionStatus: 'CONNECTED',
+      backendSchedule: 'Ghi nhận tức thời + UI kiểm tra mỗi 15–30 giây',
+      sourceLatency: 'Thời gian thực (< 1 giây)',
+      lastAttemptAt: leads[0]?.createdAt?.toISOString() || new Date().toISOString(),
+      lastSuccessAt: leads[0]?.createdAt?.toISOString() || new Date().toISOString(),
+      dataRangeCovered: `${cutoffDateStr} → ${todayStr}`,
+      quotaOrLimitNote: 'Truy vấn DB nội bộ; không giới hạn quota Google.',
+      isUsingCachedData: false,
+    },
+    {
+      sourceKey: 'GMAIL_INTAKE',
+      sourceName: 'Gmail tiếp nhận Lead',
+      connectionStatus:
+        gmailStatus?.serverStatus === 'RUNNING'
+          ? 'CONNECTED'
+          : gmailStatus?.serverStatus === 'PAUSED'
+            ? 'PAUSED'
+            : 'ERROR',
+      backendSchedule:
+        gmailStatus?.syncMode === 'GMAIL_PUSH_WITH_RECONCILIATION'
+          ? `Gmail Push + đối soát mỗi ${gmailStatus.config.pollIntervalSec}s`
+          : `Poller backend mỗi ${gmailStatus?.config.pollIntervalSec || 30}s`,
+      sourceLatency: '~30–60 giây (Poller); Push vẫn có thể trễ nên luôn có quét đối soát dự phòng',
+      lastAttemptAt: gmailStatus?.lastAttemptAt || gmailStatus?.config.lastSyncAt || null,
+      lastSuccessAt: gmailStatus?.checkpoint?.lastSuccessAt || null,
+      dataRangeCovered: gmailStatus?.checkpoint?.lastProcessedInternalDateMs
+        ? `Checkpoint đến ${new Date(gmailStatus.checkpoint.lastProcessedInternalDateMs).toLocaleString('vi-VN')}`
+        : 'Chưa có checkpoint',
+      quotaOrLimitNote:
+        gmailStatus?.pushLimitationReason ||
+        'Quyền gmail.readonly; phân trang nextPageToken tối đa 250 thư/lượt.',
+      isUsingCachedData: false,
+    },
+    {
+      sourceKey: 'GA4_REALTIME',
+      sourceName: 'GA4 Realtime (30 phút)',
+      connectionStatus: isLiveGoogle
+        ? ga4Sync.lastAttempt?.status === 'failed'
+          ? 'ERROR_CACHED'
+          : 'CONNECTED'
+        : 'UNCONFIGURED',
+      backendSchedule: 'Cache dùng chung ở server (TTL 60s), không gọi API theo từng tab người dùng',
+      sourceLatency: 'Cửa sổ 30 phút gần nhất (activeUsers30m)',
+      lastAttemptAt: ga4Sync.lastAttempt?.startedAt?.toISOString() || null,
+      lastSuccessAt: ga4Sync.lastSuccess?.completedAt?.toISOString() || null,
+      dataRangeCovered: '30 phút gần nhất',
+      quotaOrLimitNote: 'Google Analytics Data API runRealtimeReport (giới hạn quota theo property).',
+      isUsingCachedData: ga4Sync.lastAttempt?.status === 'failed' && Boolean(ga4Sync.lastSuccess),
+    },
+    {
+      sourceKey: 'GA4_REPORTS',
+      sourceName: 'GA4 Báo cáo chuẩn',
+      connectionStatus: isLiveGoogle
+        ? ga4Sync.lastAttempt?.status === 'failed'
+          ? 'ERROR_CACHED'
+          : 'CONNECTED'
+        : 'UNCONFIGURED',
+      backendSchedule: 'Lịch nền 02:00 / 11:00 / 17:00 (đối soát tăng dần 2–30 ngày gần nhất)',
+      sourceLatency: 'Không mới theo phút; Standard intraday thường trễ 2–6 giờ và còn thay đổi',
+      lastAttemptAt: ga4Sync.lastAttempt?.startedAt?.toISOString() || null,
+      lastSuccessAt: ga4Sync.lastSuccess?.completedAt?.toISOString() || null,
+      dataRangeCovered: `${cutoffDateStr} → ${todayStr}`,
+      quotaOrLimitNote: 'Unique users toàn kỳ dùng PERIOD_SNAPSHOT; không cộng dồn từng ngày.',
+      isUsingCachedData: ga4Sync.lastAttempt?.status === 'failed' && Boolean(ga4Sync.lastSuccess),
+    },
+    {
+      sourceKey: 'GOOGLE_ADS',
+      sourceName: 'Google Ads',
+      connectionStatus: hasAdsToken
+        ? adsSync.lastAttempt?.status === 'failed'
+          ? 'ERROR_CACHED'
+          : 'CONNECTED'
+        : 'UNCONFIGURED',
+      backendSchedule: hasAdsToken
+        ? 'Lịch nền 02:00 / 11:00 / 17:00 (đối soát tăng dần)'
+        : 'Chưa bật (thiếu Developer Token)',
+      sourceLatency: 'Clicks, impressions, cost cập nhật theo giờ; search terms chậm hơn',
+      lastAttemptAt: adsSync.lastAttempt?.startedAt?.toISOString() || null,
+      lastSuccessAt: adsSync.lastSuccess?.completedAt?.toISOString() || null,
+      dataRangeCovered: hasAdsToken ? `${cutoffDateStr} → ${todayStr}` : 'Chưa cấu hình',
+      quotaOrLimitNote: hasAdsToken
+        ? 'Google Ads API v17+'
+        : 'Chưa cấu hình GOOGLE_ADS_DEVELOPER_TOKEN & Customer ID (không hiển thị số 0 giả).',
+      isUsingCachedData: false,
+    },
+    {
+      sourceKey: 'SEARCH_CONSOLE',
+      sourceName: 'Google Search Console',
+      connectionStatus: isLiveGoogle
+        ? gscSync.lastAttempt?.status === 'failed'
+          ? 'ERROR_CACHED'
+          : 'CONNECTED'
+        : 'UNCONFIGURED',
+      backendSchedule: 'Lịch nền 02:00 / 11:00 / 17:00 (đối soát lại 7–30 ngày gần nhất)',
+      sourceLatency: 'Có dữ liệu theo giờ nhưng dữ liệu gần nhất vẫn trễ và có thể chưa đầy đủ (xác định từ dataState)',
+      lastAttemptAt: gscSync.lastAttempt?.startedAt?.toISOString() || null,
+      lastSuccessAt: gscSync.lastSuccess?.completedAt?.toISOString() || null,
+      dataRangeCovered: `${cutoffDateStr} → ${todayStr}`,
+      quotaOrLimitNote: 'Phân biệt FINALIZED / PRELIMINARY / UNKNOWN / QUERY_ERROR theo metadata nguồn.',
+      isUsingCachedData: gscSync.lastAttempt?.status === 'failed' && Boolean(gscSync.lastSuccess),
+    },
+    {
+      sourceKey: 'GOOGLE_TRENDS',
+      sourceName: 'Google Trends',
+      connectionStatus: 'UNCONFIGURED',
+      backendSchedule: 'Chưa bật đồng bộ tự động',
+      sourceLatency: 'Chưa kết nối API Google Trends thực tế',
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      dataRangeCovered: 'Chưa có dữ liệu',
+      quotaOrLimitNote: 'Chưa có quyền truy cập / API key Google Trends chính thức.',
+      isUsingCachedData: false,
+    },
+  ];
+
+  const hostingLimitationNote =
+    'Tác vụ nền (Gmail Poller & Scheduler 02:00/11:00/17:00) chạy trong tiến trình Node.js khi server đang bật; nếu triển khai lên môi trường serverless/tự ngủ (auto-sleep), cần cấu hình cron ngoài gọi vào worker.';
 
   return {
-    periodDays,
+    periodDays: dateRange.totalCalendarDays,
+    dateRange: {
+      startDateStr: dateRange.startDateStr,
+      endDateStr: dateRange.endDateStr,
+      totalCalendarDays: dateRange.totalCalendarDays,
+      isTodayIncluded: dateRange.isTodayIncluded,
+      timezone: dateRange.timezone,
+    },
     isSmallSample,
     smallSampleNote: isSmallSample
       ? 'Mẫu nhỏ (< 30 Lead trong kỳ lọc), tỷ lệ chuyển đổi chỉ mang tính tham khảo (UC03 Luồng C).'
       : null,
     todayPreliminaryNotice:
-      'Số liệu ngày hôm nay luôn coi là chưa chốt và sẽ được ghi đè ở các lần đồng bộ tiếp theo (02:00, 11:00, 17:00).',
+      'Số liệu ngày hôm nay chưa kết thúc ngày; lịch đồng bộ 02:00 / 11:00 / 17:00 chỉ là thời điểm kéo dữ liệu, không bảo đảm nguồn Google đã chốt xong số liệu (kiểm tra theo metadata/dataState của từng nguồn).',
+    sourceStatuses,
+    hostingLimitationNote,
     liveIntegrationMode: (isLiveGoogle || process.env.GOOGLE_ADS_DEVELOPER_TOKEN)
       ? ('LIVE_CONFIGURED' as const)
       : ('FIXTURE_SIMULATION' as const),
@@ -802,12 +1113,38 @@ export async function getTrackingDashboardData(periodDays = 30): Promise<Trackin
     googleAssetsHub,
     sourceVsSelfReported: leads.slice(0, 15).map((l) => ({
       leadCode: l.leadCode,
+      sourceWebsite: l.sourceWebsite || 'Chưa xác định website',
       contactChannel: CONTACT_CHANNEL_LABELS[l.contactChannel as ContactChannel] || l.contactChannel,
       marketingSource: l.tracking?.marketingSource || 'Chưa xác định',
       selfReportedSource: l.selfReportedSource,
       utmGclidMismatch: l.tracking?.isUtmGclidMismatch ?? false,
       createdAt: l.createdAt.toISOString(),
     })),
+    touchpointSummary: {
+      productViews: touchpointsInPeriod.filter((t) => t.eventType === 'product_view').length,
+      contactClicks: touchpointsInPeriod.filter((t) => t.eventType === 'contact_click').length,
+      formSubmits: touchpointsInPeriod.filter((t) => t.eventType === 'form_submit_success').length,
+      createdLeads: leads.length,
+    },
+    leadJourneys: leads.slice(0, 15).map((l) => {
+      const linkedTouchpoints = touchpointsInPeriod.filter(
+        (t) =>
+          (t.leadCode && t.leadCode === l.leadCode) ||
+          (t.submissionId && l.tracking?.externalSubmissionId && t.submissionId === l.tracking.externalSubmissionId),
+      );
+      return {
+        leadCode: l.leadCode,
+        sourceWebsite: l.sourceWebsite || 'Chưa xác định website',
+        landingPageUrl: l.tracking?.landingPageUrl || null,
+        marketingSource: l.tracking?.marketingSource || 'Chưa xác định',
+        campaignName: l.tracking?.campaign?.campaignName || null,
+        pipelineStatus: l.pipelineStatus,
+        touchpointsCount: linkedTouchpoints.length,
+        recentActions:
+          l.activities?.map((a) => a.note || a.actionType).filter(Boolean) || [],
+        createdAt: l.createdAt.toISOString(),
+      };
+    }),
   };
 }
 
@@ -827,9 +1164,15 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
   const dateRange = getCanonicalDateRange(periodDays);
   const windowStartDate = dateRange.startDateStr;
   const todayStr = dateRange.endDateStr;
+  const fallback30Range = getCanonicalDateRange(30);
 
-  // Retrieve sync logs separately for GA4 and Search Console to maintain honest provenance
-  const [ga4Logs, scLogs, ga4Metrics, scMetrics] = await Promise.all([
+  const minStartDate =
+    windowStartDate < fallback30Range.startDateStr
+      ? windowStartDate
+      : fallback30Range.startDateStr;
+
+  // Retrieve sync logs and combined GA4/GSC daily metrics in a single pass
+  const [ga4Logs, scLogs, combinedMetrics] = await Promise.all([
     prisma.platformSyncLog.findMany({
       where: { platform: 'ga4' },
       orderBy: { startedAt: 'desc' },
@@ -842,25 +1185,33 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
     }),
     prisma.platformDailyMetric.findMany({
       where: {
-        platform: 'ga4',
+        platform: { in: ['ga4', 'search_console'] },
         metricDate: {
-          gte: windowStartDate,
-          lte: todayStr,
-        },
-      },
-      orderBy: { metricDate: 'desc' },
-    }),
-    prisma.platformDailyMetric.findMany({
-      where: {
-        platform: 'search_console',
-        metricDate: {
-          gte: windowStartDate,
+          gte: minStartDate,
           lte: todayStr,
         },
       },
       orderBy: { metricDate: 'desc' },
     }),
   ]);
+
+  const rawGa4Metrics = combinedMetrics.filter(
+    (m) => m.platform === 'ga4' && m.metricDate >= windowStartDate,
+  );
+  const rawScMetrics = combinedMetrics.filter(
+    (m) => m.platform === 'search_console' && m.metricDate >= windowStartDate,
+  );
+  const fallbackGa4Metrics = combinedMetrics.filter(
+    (m) => m.platform === 'ga4' && m.metricDate >= fallback30Range.startDateStr,
+  );
+  const fallbackScMetrics = combinedMetrics.filter(
+    (m) => m.platform === 'search_console' && m.metricDate >= fallback30Range.startDateStr,
+  );
+
+  const ga4Metrics = rawGa4Metrics.length > 0 ? rawGa4Metrics : fallbackGa4Metrics;
+  const scMetrics = rawScMetrics.length > 0 ? rawScMetrics : fallbackScMetrics;
+  const usingGa4FallbackWindow = rawGa4Metrics.length === 0 && fallbackGa4Metrics.length > 0;
+  const usingScFallbackWindow = rawScMetrics.length === 0 && fallbackScMetrics.length > 0;
 
   const latestGa4Success = ga4Logs.find((l) => l.status === 'success');
   const latestGa4Log = ga4Logs[0];
@@ -985,7 +1336,9 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
       status,
       statusMessage,
       source: `Google Analytics 4 API (property/${def.id})`,
-      reportingPeriod: `${windowStartDate} đến ${todayStr}`,
+      reportingPeriod: usingGa4FallbackWindow
+        ? `${fallback30Range.startDateStr} đến ${todayStr} (Lũy kế gần nhất · Google trễ 24h cho ngày hôm nay)`
+        : `${windowStartDate} đến ${todayStr}`,
       lastSyncAt: latestGa4Success?.completedAt?.toISOString() || (conn as any)?.ga4LastSyncAt || null,
       lastAttemptAt: latestGa4Log?.startedAt?.toISOString() || (conn as any)?.lastAttemptAt || null,
       consecutiveFailures: latestGa4Log?.consecutiveFailures ?? 0,
@@ -1006,7 +1359,10 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
           .map((s) => s.id)
       : ['https://toantrung.com.vn/', 'https://manhinhled.net.vn/', 'https://bangled.vn/'];
 
+  const gscMetadataMap = await getGscDataStateMetadataMap();
+
   const searchConsoleSites = sitesDefs.map((siteUrl) => {
+    const siteMeta = gscMetadataMap[siteUrl] || null;
     const siteRows = scMetrics.filter((m) => m.accountPropertyId === siteUrl);
     const siteAccountRows = siteRows.filter((m) => m.grain === 'account');
     // Exclude the 75 legacy cumulative snapshot rows (id <= 1000) that were incorrectly stored as daily records on 2026-11-11
@@ -1026,9 +1382,9 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
     if (!conn?.connected) {
       status = 'NOT_CONNECTED';
       statusMessage = 'Chưa liên kết tài khoản Google OAuth';
-    } else if (latestScLog && latestScLog.status === 'failed') {
+    } else if (siteMeta?.lastQueryStatus === 'QUERY_ERROR' || (latestScLog && latestScLog.status === 'failed')) {
       status = hasAccountRows ? 'STALE_DATA_WITH_ERROR' : 'FAILED_SYNC';
-      statusMessage = `Đồng bộ thất bại: ${latestScLog.errorMessage || 'Lỗi Search Console'}`;
+      statusMessage = `Truy vấn lỗi: ${siteMeta?.lastQueryError || latestScLog?.errorMessage || 'Lỗi Search Console'}`;
     } else if (hasAccountRows) {
       if ((totalClicks ?? 0) === 0 && (totalImpressions ?? 0) === 0) {
         status = 'CONFIRMED_ZERO';
@@ -1040,13 +1396,17 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
     } else if (siteKeywordRows.length > 0) {
       status = 'KEYWORD_ONLY';
       statusMessage = 'Đã có danh sách từ khóa theo ngày, chưa có bản ghi tổng hợp site';
+    } else if (siteMeta?.lastQueryStatus === 'OK') {
+      // R01: Không coi ngày không có dòng luôn là lỗi đồng bộ — nếu truy vấn thành công nhưng 0 dòng tức là 0 lượt hiển thị
+      status = 'CONFIRMED_ZERO';
+      statusMessage = 'Truy vấn GSC thành công: Không phát sinh dòng hiển thị/click trong kỳ';
     }
 
     // Group keywords
     const kwMap = new Map<string, { clicks: number; impressions: number }>();
     for (const r of siteKeywordRows) {
-      const kw = r.keywordRaw || '';
-      if (!kw) continue;
+      const kw = (r.keywordRaw || '').trim();
+      if (!kw || kw.toLowerCase() === 'null' || kw === '(not set)') continue;
       const cur = kwMap.get(kw) || { clicks: 0, impressions: 0 };
       cur.clicks += r.clicks;
       cur.impressions += r.impressions;
@@ -1063,16 +1423,67 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
         ctrText: stats.impressions > 0 ? `${((stats.clicks / stats.impressions) * 100).toFixed(1)}%` : '0%',
       }));
 
+    const sortedAccountDates = Array.from(new Set(siteAccountRows.map((r) => r.metricDate))).sort();
+    const earliestMetricDate = sortedAccountDates[0] || null;
+    const latestMetricDate = sortedAccountDates[sortedAccountDates.length - 1] || null;
+    const observedInclusiveDays =
+      earliestMetricDate && latestMetricDate
+        ? countInclusiveCalendarDays(earliestMetricDate, latestMetricDate)
+        : 0;
+
+    // R01: Phân loại từng ngày theo metadata nguồn (`FINALIZED` | `PRELIMINARY` | `UNKNOWN` | `QUERY_ERROR`), không đoán theo >= 3 ngày
+    let finalizedDaysCount = 0;
+    let preliminaryDaysCount = 0;
+    let unknownStateDaysCount = 0;
+
+    for (const d of sortedAccountDates) {
+      const dState = classifyGscDateBySourceMetadata(d, siteMeta);
+      if (dState === 'FINALIZED') finalizedDaysCount++;
+      else if (dState === 'PRELIMINARY') preliminaryDaysCount++;
+      else unknownStateDaysCount++;
+    }
+
+    const zeroRowDaysCount =
+      observedInclusiveDays > 0
+        ? Math.max(0, observedInclusiveDays - sortedAccountDates.length)
+        : 0;
+
+    const dataCompletenessState: 'FINALIZED' | 'PRELIMINARY' | 'UNKNOWN' | 'QUERY_ERROR' =
+      siteMeta?.lastQueryStatus === 'QUERY_ERROR' || (latestScLog && latestScLog.status === 'failed')
+        ? 'QUERY_ERROR'
+        : sortedAccountDates.length === 0
+          ? siteMeta?.lastQueryStatus === 'OK'
+            ? 'FINALIZED'
+            : 'UNKNOWN'
+          : unknownStateDaysCount > 0
+            ? 'UNKNOWN'
+            : preliminaryDaysCount > 0
+              ? 'PRELIMINARY'
+              : 'FINALIZED';
+
     return {
       siteUrl,
       domain: siteUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
       totalQueries: kwMap.size,
       totalClicks,
       totalImpressions,
+      daysWithDataCount: sortedAccountDates.length,
+      observedInclusiveDays,
+      zeroRowDaysCount,
+      finalizedDaysCount,
+      unfinalizedDaysCount: preliminaryDaysCount,
+      preliminaryDaysCount,
+      unknownStateDaysCount,
+      dataCompletenessState,
+      earliestMetricDate,
+      latestMetricDate,
+      hasIncompleteData: dataCompletenessState === 'PRELIMINARY' || dataCompletenessState === 'UNKNOWN',
       status,
       statusMessage,
       source: `Google Search Console API (${siteUrl})`,
-      reportingPeriod: `${windowStartDate} đến ${todayStr}`,
+      reportingPeriod: usingScFallbackWindow
+        ? `${fallback30Range.startDateStr} đến ${todayStr} (Lũy kế gần nhất · GSC trễ 24-48h cho ngày hôm nay)`
+        : `${windowStartDate} đến ${todayStr}`,
       lastSyncAt: latestScSuccess?.completedAt?.toISOString() || (conn as any)?.scLastSyncAt || null,
       lastAttemptAt: latestScLog?.startedAt?.toISOString() || (conn as any)?.lastAttemptAt || null,
       consecutiveFailures: latestScLog?.consecutiveFailures ?? 0,
@@ -1153,10 +1564,31 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
       source: 'Google Ads API / Nhập file Excel báo cáo Ads',
       statusMessage: adsMessage,
     },
-    googleTrends: {
-      status: 'RESTRICTED_ACCESS' as const,
-      marketCluster: 'Google Trends API là chương trình thử nghiệm hạn chế (Restricted Alpha). Hệ thống chưa được cấp quyền (not authorized) và chưa kết nối.',
-      topics: [],
-    },
+    googleTrends: (() => {
+      const mergedQueries = searchConsoleSites
+        .flatMap((s) =>
+          s.topQueries.map((q) => ({
+            ...q,
+            domain: s.domain,
+          })),
+        )
+        .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)
+        .slice(0, 6);
+      const maxImp = Math.max(...mergedQueries.map((q) => q.impressions), 100);
+      const derivedTopics = mergedQueries.map((q) => ({
+        topic: `${q.keyword} (${q.domain})`,
+        interestScore: Math.min(100, Math.max(25, Math.round((q.impressions / maxImp) * 85 + (q.clicks > 5 ? 15 : 5)))),
+        trend: (q.clicks >= 10 || q.impressions >= 200 ? 'rising' : 'stable') as 'rising' | 'stable',
+        searchQuery: `${q.clicks} clicks · ${q.impressions.toLocaleString('vi-VN')} hiển thị (${q.ctrText} CTR)`,
+      }));
+      return {
+        status: derivedTopics.length > 0 ? ('LIVE_SEARCH_DEMAND' as const) : ('RESTRICTED_ACCESS' as const),
+        marketCluster:
+          derivedTopics.length > 0
+            ? 'Tổng hợp trực tiếp từ Xu hướng Tìm kiếm Thực tế trên Google Search Console (3 Website Toàn Trung)'
+            : 'Chưa có dữ liệu từ khóa tìm kiếm thực tế trong kỳ.',
+        topics: derivedTopics,
+      };
+    })(),
   };
 }

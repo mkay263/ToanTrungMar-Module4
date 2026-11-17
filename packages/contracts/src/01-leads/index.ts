@@ -212,6 +212,8 @@ export interface PriceCheckAlertDto {
 export interface LeadTrackingSummaryDto {
   marketingSource: string;
   attributionMethod: string;
+  intakeProvider?: string | null;
+  intakeAccountKey?: string | null;
   utmSource: string | null;
   utmMedium: string | null;
   utmCampaign: string | null;
@@ -260,6 +262,7 @@ export interface LeadItemDto {
   email: string | null;
   isPhoneNormalized: boolean;
   contactChannel: ContactChannel;
+  sourceWebsite: string | null;
   selfReportedSource: string | null;
   areaType: AreaType | null;
   hcmDistrict: string | null;
@@ -427,3 +430,5 @@ export const CreatePriceCheckAlertSchema = z.object({
 });
 
 export type CreatePriceCheckAlertDto = z.infer<typeof CreatePriceCheckAlertSchema>;
+
+export * from './vietnam-address';

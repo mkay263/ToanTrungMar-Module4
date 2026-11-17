@@ -672,9 +672,10 @@ export async function getScopedReportsDashboard(
         ? maskCustomerCompanyForReport(rawCompanyOrContact)
         : rawCompanyOrContact,
       phone: anonymized ? maskPhoneForReport(lead.phone) : lead.phone || 'Chưa có SĐT',
+      sourceWebsite: lead.sourceWebsite || 'Chưa xác định website',
       contactChannel:
         CONTACT_CHANNEL_LABELS[lead.contactChannel as ContactChannel] ?? lead.contactChannel,
-      marketingSource: lead.tracking?.marketingSource ?? lead.selfReportedSource ?? 'Nhập tay',
+      marketingSource: lead.tracking?.marketingSource ?? 'Chưa xác định',
       productsText:
         lead.leadProducts.map((lp) => lp.product.productName).join(', ') ||
         'Chưa chọn dòng sản phẩm LED',
@@ -700,7 +701,7 @@ export async function getScopedReportsDashboard(
       ? 'Lưu ý mẫu dữ liệu nhỏ (< 30 Lead trong kỳ lọc): Tỷ lệ chốt (Win Rate) và CPL chỉ mang tính tham khảo.'
       : null,
     todayPreliminaryNotice:
-      'Số liệu phát sinh trong ngày hôm nay là số liệu sơ bộ (Realtime/Light Sync 11:00 & 17:00), được chốt đối soát chính thức sau phiên đồng bộ 02:00 sáng hôm sau.',
+      'Số liệu phát sinh trong ngày hôm nay chưa kết thúc ngày; lịch đồng bộ 02:00 / 11:00 / 17:00 chỉ là thời điểm kéo dữ liệu, không bảo đảm nguồn Google đã xử lý xong.',
     lastSyncedAt: latestSync?.completedAt ? latestSync.completedAt.toISOString() : null,
     overview: {
       totalLeadsL1,
@@ -871,6 +872,7 @@ export async function generateScopedReportExportBuffer(
         { header: 'Sales phụ trách', key: 'assignedSalesName', width: 22, type: 'string' },
         { header: 'Khách hàng / Công ty', key: 'companyOrCustomer', width: 32, type: 'string' },
         { header: 'Số điện thoại', key: 'phone', width: 16, type: 'string' },
+        { header: 'Website tạo Lead', key: 'sourceWebsite', width: 20, type: 'string' },
         { header: 'Kênh liên hệ', key: 'contactChannel', width: 16, type: 'string' },
         { header: 'Nguồn Marketing', key: 'marketingSource', width: 18, type: 'string' },
         { header: 'Sản phẩm LED quan tâm', key: 'productsText', width: 30, type: 'string' },
@@ -884,6 +886,7 @@ export async function generateScopedReportExportBuffer(
         assignedSalesName: r.assignedSalesName,
         companyOrCustomer: r.companyOrCustomer,
         phone: r.phone,
+        sourceWebsite: r.sourceWebsite,
         contactChannel: r.contactChannel,
         marketingSource: r.marketingSource,
         productsText: r.productsText,

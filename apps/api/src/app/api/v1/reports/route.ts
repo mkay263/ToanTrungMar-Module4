@@ -6,6 +6,7 @@ import {
 } from '../../../../core/notifications/service';
 import { requirePermissionSession } from '../../../../core/permissions';
 import { getScopedReportsDashboard } from '../../../../modules/04-reports/service';
+import { getM04ResultsReportSpec } from '../../../../modules/04-reports/m04-spec.service';
 
 export async function GET(request: Request) {
   const auth = await requirePermissionSession(request, 'DASHBOARD_VIEW');
@@ -13,6 +14,17 @@ export async function GET(request: Request) {
 
   try {
     const url = new URL(request.url);
+    if (url.searchParams.get('view') === 'spec') {
+      const m04 = await getM04ResultsReportSpec(auth.user, {
+        websiteId: url.searchParams.get('websiteId'),
+        preset: url.searchParams.get('preset'),
+        from: url.searchParams.get('from') || url.searchParams.get('fromDate'),
+        to: url.searchParams.get('to') || url.searchParams.get('toDate'),
+        page: Number(url.searchParams.get('page') || 1),
+        pageSize: Number(url.searchParams.get('pageSize') || 20),
+      });
+      return jsonSuccess(m04);
+    }
     const preset = url.searchParams.get('preset') ?? '30d';
     const fromDate = url.searchParams.get('fromDate') ?? undefined;
     const toDate = url.searchParams.get('toDate') ?? undefined;

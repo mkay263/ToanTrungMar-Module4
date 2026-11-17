@@ -5,6 +5,7 @@ import {
   getGmailLeadSyncStatus,
   saveGmailLeadSyncConfig,
   syncLeadsFromGmail,
+  type MockGmailMessageInput,
 } from '../../../../../modules/01-leads/gmail-sync.service';
 
 export async function GET(req: Request) {
@@ -37,7 +38,10 @@ export async function POST(req: Request) {
       enabled?: boolean;
       query?: string;
       maxMessages?: number;
+      pollIntervalSec?: number;
       onlyLeadKeywords?: boolean;
+      mockMessages?: MockGmailMessageInput[];
+      mockConnectedEmail?: string;
     };
 
     if (body.action === 'save_config') {
@@ -45,6 +49,8 @@ export async function POST(req: Request) {
         enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
         query: typeof body.query === 'string' ? body.query : undefined,
         maxMessages: typeof body.maxMessages === 'number' ? body.maxMessages : undefined,
+        pollIntervalSec:
+          typeof body.pollIntervalSec === 'number' ? body.pollIntervalSec : undefined,
         onlyLeadKeywords:
           typeof body.onlyLeadKeywords === 'boolean' ? body.onlyLeadKeywords : undefined,
       });
@@ -56,12 +62,15 @@ export async function POST(req: Request) {
       typeof body.enabled === 'boolean' ||
       typeof body.query === 'string' ||
       typeof body.maxMessages === 'number' ||
+      typeof body.pollIntervalSec === 'number' ||
       typeof body.onlyLeadKeywords === 'boolean'
     ) {
       await saveGmailLeadSyncConfig({
         enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
         query: typeof body.query === 'string' ? body.query : undefined,
         maxMessages: typeof body.maxMessages === 'number' ? body.maxMessages : undefined,
+        pollIntervalSec:
+          typeof body.pollIntervalSec === 'number' ? body.pollIntervalSec : undefined,
         onlyLeadKeywords:
           typeof body.onlyLeadKeywords === 'boolean' ? body.onlyLeadKeywords : undefined,
       });
@@ -71,6 +80,8 @@ export async function POST(req: Request) {
       query: body.query,
       maxMessages: body.maxMessages,
       onlyLeadKeywords: body.onlyLeadKeywords,
+      mockMessages: Array.isArray(body.mockMessages) ? body.mockMessages : undefined,
+      mockConnectedEmail: body.mockConnectedEmail,
     });
     const status = await getGmailLeadSyncStatus();
 

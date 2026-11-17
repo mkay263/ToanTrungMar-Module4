@@ -10,7 +10,7 @@ import type {
   SelectGoogleResourcesDto,
 } from '@toantrung/contracts';
 import { encryptSecret, decryptSecret, maskSecret } from '../../core/security/vault';
-import { getCanonicalDateRange } from '../../core/reporting-dates';
+import { getCanonicalDateRange, countInclusiveCalendarDays } from '../../core/reporting-dates';
 import { retryUnresolvedGclids } from './service';
 import { refreshKeywordDerivedCacheFromCanonicalMetrics } from '../03-keywords-ads/service';
 
@@ -1237,6 +1237,83 @@ async function syncRealGoogleAnalytics(
   return { success: true, synced, isEmpty: synced === 0 };
 }
 
+export type GscDataCompletenessState = 'FINALIZED' | 'PRELIMINARY' | 'UNKNOWN' | 'QUERY_ERROR';
+
+export interface GscSiteDataStateMetadata {
+  siteUrl: string;
+  queriedStartDate: string | null;
+  queriedEndDate: string | null;
+  queriedInclusiveDays: number;
+  finalizedDates: string[];
+  preliminaryDates: string[];
+  lastQueryStatus: 'OK' | 'QUERY_ERROR';
+  lastQueryError: string | null;
+  updatedAt: string;
+}
+
+export const SETTING_KEY_GSC_DATA_STATE_METADATA = 'gsc_data_state_metadata_v1';
+
+export async function getGscDataStateMetadataMap(): Promise<Record<string, GscSiteDataStateMetadata>> {
+  try {
+    const row = await prisma.systemSetting.findUnique({
+      where: { key: SETTING_KEY_GSC_DATA_STATE_METADATA },
+    });
+    if (!row?.value) return {};
+    const parsed = JSON.parse(row.value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveGscSiteDataStateMetadata(meta: GscSiteDataStateMetadata): Promise<void> {
+  const current = await getGscDataStateMetadataMap();
+  current[meta.siteUrl] = meta;
+  await prisma.systemSetting.upsert({
+    where: { key: SETTING_KEY_GSC_DATA_STATE_METADATA },
+    update: { value: JSON.stringify(current) },
+    create: { key: SETTING_KEY_GSC_DATA_STATE_METADATA, value: JSON.stringify(current) },
+  });
+}
+
+/**
+ * R01: Không tự suy diễn dữ liệu đã hoàn chỉnh chỉ vì cách hiện tại >= 3 ngày.
+ * Chỉ đánh dấu FINALIZED khi ngày đó có mặt trong tập kết quả truy vấn `dataState: 'final'` từ GSC API,
+ * PRELIMINARY khi có trong `dataState: 'all'` nhưng chưa có trong `dataState: 'final'`,
+ * QUERY_ERROR khi truy vấn GSC trả lỗi, và UNKNOWN khi thiếu metadata nguồn đối chứng.
+ */
+export function classifyGscDateBySourceMetadata(
+  metricDateStr: string,
+  siteMeta?: GscSiteDataStateMetadata | null,
+): GscDataCompletenessState {
+  if (!siteMeta) return 'UNKNOWN';
+  if (siteMeta.finalizedDates?.includes(metricDateStr)) {
+    return 'FINALIZED';
+  }
+  if (siteMeta.preliminaryDates?.includes(metricDateStr)) {
+    return 'PRELIMINARY';
+  }
+  if (siteMeta.lastQueryStatus === 'QUERY_ERROR') {
+    return 'QUERY_ERROR';
+  }
+  return 'UNKNOWN';
+}
+
+export function isGscDateFinalized(
+  metricDateStr: string,
+  sourceFinalizedDatesOrMeta?: Set<string> | GscSiteDataStateMetadata | string | null,
+): boolean {
+  if (!metricDateStr || !sourceFinalizedDatesOrMeta) return false;
+  if (sourceFinalizedDatesOrMeta instanceof Set) {
+    return sourceFinalizedDatesOrMeta.has(metricDateStr);
+  }
+  if (typeof sourceFinalizedDatesOrMeta === 'object') {
+    return classifyGscDateBySourceMetadata(metricDateStr, sourceFinalizedDatesOrMeta) === 'FINALIZED';
+  }
+  // R01: Khi chỉ truyền chuỗi ngày tham chiếu mà không có metadata `dataState: 'final'` từ GSC, tuyệt đối không tự khẳng định đã chốt theo khoảng cách >= 3 ngày.
+  return false;
+}
+
 async function syncRealSearchConsole(
   token: string,
   conn: StoredGoogleConnection | null,
@@ -1296,29 +1373,72 @@ async function syncRealSearchConsole(
     let siteSynced = 0;
     let siteError: string | undefined;
     const siteSecondaryErrors: string[] = [];
+    const finalizedDateSet = new Set<string>();
+    const allDateSet = new Set<string>();
 
-    // 1. Query daily site performance with dimension "date"
+    // 1. Query daily site performance with `dataState: 'final'` AND `dataState: 'all'` to distinguish FINALIZED vs PRELIMINARY from source metadata
     try {
-      const dailyResp = await fetch(
-        `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site.siteUrl)}/searchAnalytics/query`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'application/json',
+      const [finalResp, dailyResp] = await Promise.all([
+        fetch(
+          `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site.siteUrl)}/searchAnalytics/query`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              startDate: startStr,
+              endDate: todayStr,
+              dimensions: ['date'],
+              dataState: 'final',
+              rowLimit: 100,
+            }),
           },
-          body: JSON.stringify({
-            startDate: startStr,
-            endDate: todayStr,
-            dimensions: ['date'],
-            rowLimit: 100,
-          }),
-        },
-      );
+        ),
+        fetch(
+          `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site.siteUrl)}/searchAnalytics/query`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              startDate: startStr,
+              endDate: todayStr,
+              dimensions: ['date'],
+              dataState: 'all',
+              rowLimit: 100,
+            }),
+          },
+        ),
+      ]);
+
+      if (finalResp.ok) {
+        const finalData = (await finalResp.json()) as {
+          rows?: Array<{ keys: string[] }>;
+        };
+        for (const r of finalData.rows || []) {
+          const d = r.keys?.[0];
+          if (d) finalizedDateSet.add(d);
+        }
+      }
 
       if (!dailyResp.ok) {
         const errText = await dailyResp.text();
         siteError = `Daily HTTP ${dailyResp.status}: ${errText.slice(0, 150)}`;
+        await saveGscSiteDataStateMetadata({
+          siteUrl: site.siteUrl,
+          queriedStartDate: startStr,
+          queriedEndDate: todayStr,
+          queriedInclusiveDays: countInclusiveCalendarDays(startStr, todayStr),
+          finalizedDates: [],
+          preliminaryDates: [],
+          lastQueryStatus: 'QUERY_ERROR',
+          lastQueryError: siteError,
+          updatedAt: new Date().toISOString(),
+        });
       } else {
         const dailyData = (await dailyResp.json()) as {
           rows?: Array<{
@@ -1333,6 +1453,7 @@ async function syncRealSearchConsole(
         for (const row of dailyData.rows || []) {
           const rowDate = row.keys?.[0];
           if (!rowDate) continue;
+          allDateSet.add(rowDate);
           await upsertPlatformMetricIdempotent(prisma, {
             platform: 'search_console',
             accountPropertyId: site.siteUrl,
@@ -1341,14 +1462,38 @@ async function syncRealSearchConsole(
             clicks: row.clicks,
             impressions: row.impressions,
             avgPosition: Math.round(row.position * 10) / 10,
-            isFinalized: false,
+            isFinalized: isGscDateFinalized(rowDate, finalizedDateSet),
           });
           siteSynced++;
           synced++;
         }
+
+        const preliminaryDates = Array.from(allDateSet).filter((d) => !finalizedDateSet.has(d)).sort();
+        await saveGscSiteDataStateMetadata({
+          siteUrl: site.siteUrl,
+          queriedStartDate: startStr,
+          queriedEndDate: todayStr,
+          queriedInclusiveDays: countInclusiveCalendarDays(startStr, todayStr),
+          finalizedDates: Array.from(finalizedDateSet).sort(),
+          preliminaryDates,
+          lastQueryStatus: 'OK',
+          lastQueryError: null,
+          updatedAt: new Date().toISOString(),
+        });
       }
     } catch (err) {
       siteError = err instanceof Error ? err.message : 'Lỗi kết nối Search Console Daily';
+      await saveGscSiteDataStateMetadata({
+        siteUrl: site.siteUrl,
+        queriedStartDate: startStr,
+        queriedEndDate: todayStr,
+        queriedInclusiveDays: countInclusiveCalendarDays(startStr, todayStr),
+        finalizedDates: [],
+        preliminaryDates: [],
+        lastQueryStatus: 'QUERY_ERROR',
+        lastQueryError: siteError,
+        updatedAt: new Date().toISOString(),
+      });
     }
 
     // 2. Query daily keyword facts with dimensions ["date", "query"] so keywords retain their TRUE source date
@@ -1366,6 +1511,7 @@ async function syncRealSearchConsole(
               startDate: startStr,
               endDate: todayStr,
               dimensions: ['date', 'query'], // Both date and query dimensions
+              dataState: 'all',
               rowLimit: 250,
             }),
           },
@@ -1399,7 +1545,7 @@ async function syncRealSearchConsole(
               clicks: row.clicks,
               impressions: row.impressions,
               avgPosition: Math.round(row.position * 10) / 10,
-              isFinalized: false,
+              isFinalized: isGscDateFinalized(rowDate, finalizedDateSet),
             });
             siteSynced++;
             synced++;
@@ -1453,6 +1599,61 @@ async function syncRealSearchConsole(
         }
       } catch (err) {
         siteSecondaryErrors.push(`Từ khóa lỗi kết nối: ${err instanceof Error ? err.message : 'Unknown'}`);
+      }
+
+      // 3. Query daily page facts with dimensions ["date", "page"] (M02-03)
+      try {
+        const pResp = await fetch(
+          `https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site.siteUrl)}/searchAnalytics/query`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              startDate: startStr,
+              endDate: todayStr,
+              dimensions: ['date', 'page'],
+              dataState: 'all',
+              rowLimit: 200,
+            }),
+          },
+        );
+        if (pResp.ok) {
+          const pData = (await pResp.json()) as {
+            rows?: Array<{
+              keys: string[];
+              clicks: number;
+              impressions: number;
+              ctr: number;
+              position: number;
+            }>;
+          };
+          for (const row of pData.rows || []) {
+            const rowDate = row.keys?.[0];
+            const pageUrl = row.keys?.[1];
+            if (!rowDate || !pageUrl) continue;
+            await upsertPlatformMetricIdempotent(prisma, {
+              platform: 'search_console',
+              accountPropertyId: site.siteUrl,
+              metricDate: rowDate,
+              grain: 'page',
+              pageUrlRaw: pageUrl,
+              clicks: row.clicks,
+              impressions: row.impressions,
+              avgPosition: Math.round(row.position * 10) / 10,
+              isFinalized: isGscDateFinalized(rowDate, finalizedDateSet),
+            });
+            siteSynced++;
+            synced++;
+          }
+        } else {
+          const errText = await pResp.text();
+          siteSecondaryErrors.push(`Trang đích lỗi HTTP ${pResp.status}: ${errText.slice(0, 100)}`);
+        }
+      } catch (err) {
+        siteSecondaryErrors.push(`Trang đích lỗi kết nối: ${err instanceof Error ? err.message : 'Unknown'}`);
       }
     }
 

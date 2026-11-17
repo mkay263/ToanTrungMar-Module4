@@ -10,12 +10,25 @@ import {
   generateSeoArticleDraftByAi,
   listKeywordsAndArticlesForUser,
 } from '../../../../modules/03-keywords-ads/service';
+import { getM03AdsSeoDashboardSpec } from '../../../../modules/03-keywords-ads/m03-spec.service';
 
 export async function GET(req: Request) {
   const auth = await requirePermissionSession(req, 'AI_MARKETING_SEO');
   if (!auth.ok) return auth.response;
 
   try {
+    const url = new URL(req.url);
+    if (url.searchParams.get('view') === 'spec') {
+      const m03 = await getM03AdsSeoDashboardSpec({
+        websiteId: url.searchParams.get('websiteId'),
+        preset: url.searchParams.get('preset'),
+        from: url.searchParams.get('from'),
+        to: url.searchParams.get('to'),
+        page: Number(url.searchParams.get('page') || 1),
+        pageSize: Number(url.searchParams.get('pageSize') || 20),
+      });
+      return jsonSuccess(m03);
+    }
     const payload = await listKeywordsAndArticlesForUser(auth.user);
     return jsonSuccess(payload);
   } catch (err) {

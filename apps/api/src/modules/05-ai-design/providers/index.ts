@@ -483,11 +483,27 @@ export class AiDesignProviderFactory {
         check.errorMessage || 'Provider chỉ trả về văn bản hoặc thiếu dữ liệu ảnh hợp lệ.';
     }
 
-    if (
-      !res.errorMessage?.startsWith('FREE_TIER_IMAGE_LIMIT_0') &&
-      allowFallback &&
-      targetProviderId !== 'local_sandbox'
-    ) {
+    if (allowFallback && targetProviderId !== 'local_sandbox') {
+      // Step 1: If Google Free Tier blocked image generation, try configured Custom Gateway (e.g. gpt-image-2) first
+      if (
+        targetProviderId !== 'custom_endpoint' &&
+        config.providers.custom_endpoint?.apiKey &&
+        !process.env.NODE_TEST_CONTEXT
+      ) {
+        const customProv = this.getProvider(
+          'custom_endpoint',
+          config.providers.custom_endpoint.activeModel || 'gpt-image-2'
+        );
+        const customRes = await customProv.generatePerspectiveDraft({
+          ...input,
+          modelId: config.providers.custom_endpoint.activeModel || 'gpt-image-2',
+        });
+        if (customRes.status === 'success' && validateGeneratedImageBuffer(customRes.imageBuffer).isValid) {
+          return customRes;
+        }
+      }
+
+      // Step 2: Guaranteed instant Studio Engine composite fallback
       const fallback = new LocalSandboxAiProvider(input.modelId || provider.getStatusInfo().activeModel);
       const fallbackRes = await fallback.generatePerspectiveDraft(input);
       return {
@@ -495,7 +511,7 @@ export class AiDesignProviderFactory {
         provider: targetProviderId,
         modelUsed: input.modelId || provider.getStatusInfo().activeModel,
         fallbackNotice:
-          'Đã tự động kết xuất qua Toàn Trung Studio Engine (do AI đám mây chưa cấu hình API Key hoặc đang bảo trì).',
+          'Đã tự động kết xuất qua Toàn Trung Studio Engine.',
       };
     }
 
@@ -546,11 +562,27 @@ export class AiDesignProviderFactory {
         check.errorMessage || 'Provider chỉ trả về văn bản hoặc thiếu dữ liệu ảnh Banner hợp lệ.';
     }
 
-    if (
-      !res.errorMessage?.startsWith('FREE_TIER_IMAGE_LIMIT_0') &&
-      allowFallback &&
-      targetProviderId !== 'local_sandbox'
-    ) {
+    if (allowFallback && targetProviderId !== 'local_sandbox') {
+      // Step 1: If Google Free Tier blocked image generation, try configured Custom Gateway (e.g. gpt-image-2) first
+      if (
+        targetProviderId !== 'custom_endpoint' &&
+        config.providers.custom_endpoint?.apiKey &&
+        !process.env.NODE_TEST_CONTEXT
+      ) {
+        const customProv = this.getProvider(
+          'custom_endpoint',
+          config.providers.custom_endpoint.activeModel || 'gpt-image-2'
+        );
+        const customRes = await customProv.generateBannerDraft({
+          ...input,
+          modelId: config.providers.custom_endpoint.activeModel || 'gpt-image-2',
+        });
+        if (customRes.status === 'success' && validateGeneratedImageBuffer(customRes.imageBuffer).isValid) {
+          return customRes;
+        }
+      }
+
+      // Step 2: Guaranteed instant Studio Engine composite fallback
       const fallback = new LocalSandboxAiProvider(input.modelId || provider.getStatusInfo().activeModel);
       const fallbackRes = await fallback.generateBannerDraft(input);
       return {
@@ -558,7 +590,7 @@ export class AiDesignProviderFactory {
         provider: targetProviderId,
         modelUsed: input.modelId || provider.getStatusInfo().activeModel,
         fallbackNotice:
-          'Đã tự động kết xuất qua Toàn Trung Studio Engine (do AI đám mây chưa cấu hình API Key hoặc đang bảo trì).',
+          'Đã tự động kết xuất qua Toàn Trung Studio Engine.',
       };
     }
 

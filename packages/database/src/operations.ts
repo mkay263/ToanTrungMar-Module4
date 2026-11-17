@@ -175,9 +175,10 @@ export function validateLeadIntakeByChannel(input: WebhookLeadIntakeInput): void
 }
 
 function isUniqueConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
   return (
-    err instanceof Prisma.PrismaClientKnownRequestError &&
-    err.code === 'P2002'
+    (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') ||
+    (err as { code?: unknown }).code === 'P2002'
   );
 }
 

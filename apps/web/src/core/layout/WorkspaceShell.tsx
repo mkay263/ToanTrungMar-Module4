@@ -32,7 +32,7 @@ import {
 } from '@toantrung/contracts';
 import { apiRequest } from '../http/client';
 import { useSession } from '../session/SessionContext';
-import { RealtimeLiveMotionIndicator } from '@/components/common/RealtimeLiveMotionIndicator';
+import { SystemUpgradeSplash } from '@/components/common/SystemUpgradeSplash';
 
 interface NavItem {
   href: string;
@@ -223,8 +223,8 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const requiredPermForCurrentRoute = ROUTE_REQUIRED_PERMISSION[pathname];
   const isRouteUnauthorized = Boolean(
     user &&
-      requiredPermForCurrentRoute &&
-      !hasBaPermission(user.roleCode, requiredPermForCurrentRoute),
+    requiredPermForCurrentRoute &&
+    !hasBaPermission(user.roleCode, requiredPermForCurrentRoute),
   );
 
   useEffect(() => {
@@ -312,15 +312,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
-        <div className="bg-white border border-slate-200/80 rounded-2xl px-8 py-7 shadow-lg flex items-center gap-4">
-          <div className="w-5 h-5 rounded-full border-2 border-[#1E3A8A] border-t-transparent animate-spin" />
-          <div>
-            <p className="text-sm font-semibold text-slate-800">Đang khởi tạo Toàn Trung CRM...</p>
-            <p className="text-xs text-slate-400 mt-0.5">Vui lòng đợi trong giây lát</p>
-          </div>
-        </div>
-      </div>
+      <SystemUpgradeSplash
+        title="Hệ thống Toàn Trung CRM đang nâng cấp & khởi tạo"
+        subtitle="Đang đồng bộ phiên làm việc, dữ liệu thời gian thực và cấu hình phân hệ mới nhất. Vui lòng đợi trong giây lát..."
+        badgeText="ĐANG NÂNG CẤP & ĐỒNG BỘ HỆ THỐNG"
+      />
     );
   }
 
@@ -355,44 +351,38 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 prefetch={true}
                 onClick={() => setMobileOpen(false)}
                 title={item.label}
-                className={`group relative flex items-center gap-3.5 h-11 rounded-xl px-3.5 text-sm transition-all ${
-                  sidebarCollapsed
+                className={`group relative flex items-center gap-3.5 h-11 rounded-xl px-3.5 text-sm transition-all ${sidebarCollapsed
                     ? 'lg:justify-center lg:px-0'
                     : 'lg:justify-start lg:px-3.5'
-                } ${
-                  active
+                  } ${active
                     ? 'bg-[#1B2B48] text-white font-bold shadow-xs'
                     : 'text-[#94A3B8] font-medium hover:bg-white/[0.05] hover:text-white'
-                }`}
+                  }`}
               >
                 <Icon
-                  className={`w-5 h-5 shrink-0 transition-colors ${
-                    active ? 'text-white' : 'text-[#64748B] group-hover:text-slate-200'
-                  }`}
+                  className={`w-5 h-5 shrink-0 transition-colors ${active ? 'text-white' : 'text-[#64748B] group-hover:text-slate-200'
+                    }`}
                 />
                 <span
-                  className={`truncate flex-1 text-[14px] ${
-                    sidebarCollapsed ? 'lg:hidden' : 'lg:inline'
-                  }`}
+                  className={`truncate flex-1 text-[14px] ${sidebarCollapsed ? 'lg:hidden' : 'lg:inline'
+                    }`}
                 >
                   {item.label}
                 </span>
                 {item.badge !== undefined && item.badge > 0 && (
                   <span
-                    className={`inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 rounded-full bg-[#2563EB] text-white text-[11px] font-bold ${
-                      sidebarCollapsed
+                    className={`inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 rounded-full bg-[#2563EB] text-white text-[11px] font-bold ${sidebarCollapsed
                         ? 'lg:absolute lg:top-1 lg:right-1 lg:min-w-[16px] lg:h-4 lg:text-[9px] lg:px-1'
                         : 'lg:static'
-                    }`}
+                      }`}
                   >
                     {item.badge}
                   </span>
                 )}
                 {/* Hover Tooltip when Sidebar is Collapsed */}
                 <span
-                  className={`pointer-events-none fixed left-16 z-50 ml-2 hidden rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white shadow-lg opacity-0 transition-opacity group-hover:opacity-100 ${
-                    sidebarCollapsed ? 'lg:block' : 'lg:hidden'
-                  }`}
+                  className={`pointer-events-none fixed left-16 z-50 ml-2 hidden rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white shadow-lg opacity-0 transition-opacity group-hover:opacity-100 ${sidebarCollapsed ? 'lg:block' : 'lg:hidden'
+                    }`}
                 >
                   {item.label}
                 </span>
@@ -418,17 +408,14 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
 
       {/* Main Left Sidebar — Dark Navy Theme matching reference screenshot */}
       <aside
-        className={`group/sidebar fixed inset-y-0 left-0 z-50 lg:sticky lg:top-0 lg:h-screen bg-[#0B1426] text-white border-r border-slate-800/80 flex flex-col transition-all duration-200 shadow-xl ${
-          sidebarCollapsed ? 'lg:w-16' : 'lg:w-[248px]'
-        } w-[264px] ${
-          mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
-        }`}
+        className={`group/sidebar fixed inset-y-0 left-0 z-50 lg:sticky lg:top-0 lg:h-screen bg-[#0B1426] text-white border-r border-slate-800/80 flex flex-col transition-all duration-200 shadow-xl ${sidebarCollapsed ? 'lg:w-16' : 'lg:w-[248px]'
+          } w-[264px] ${mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
+          }`}
       >
         {/* Brand Header with TOÀN TRUNG Logo & Top Collapse/Expand Button */}
         <div
-          className={`relative h-16 flex items-center justify-between border-b border-white/[0.08] ${
-            sidebarCollapsed ? 'px-2 lg:justify-center' : 'px-5'
-          }`}
+          className={`relative h-16 flex items-center justify-between border-b border-white/[0.08] ${sidebarCollapsed ? 'px-2 lg:justify-center' : 'px-5'
+            }`}
         >
           {sidebarCollapsed ? (
             <div className="relative w-9 h-9 flex items-center justify-center">
@@ -499,9 +486,8 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           <Link
             href="/profile"
             title={`${user.fullName} (${user.email})`}
-            className={`flex items-center gap-3 rounded-xl p-1.5 hover:bg-white/[0.05] transition-colors ${
-              sidebarCollapsed ? 'lg:justify-center' : 'lg:justify-start'
-            }`}
+            className={`flex items-center gap-3 rounded-xl p-1.5 hover:bg-white/[0.05] transition-colors ${sidebarCollapsed ? 'lg:justify-center' : 'lg:justify-start'
+              }`}
           >
             {user.avatarUrl ? (
               <img
@@ -515,9 +501,8 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               </div>
             )}
             <div
-              className={`min-w-0 flex-1 ${
-                sidebarCollapsed ? 'lg:hidden' : 'lg:block'
-              }`}
+              className={`min-w-0 flex-1 ${sidebarCollapsed ? 'lg:hidden' : 'lg:block'
+                }`}
             >
               <p className="text-[13px] font-bold text-white truncate">{user.fullName}</p>
               <p className="text-[11px] text-[#94A3B8] truncate">{user.roleName}</p>
@@ -619,17 +604,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* System-wide Realtime Live Motion Heartbeat Indicator */}
-            <div className="hidden sm:block">
-              <RealtimeLiveMotionIndicator
-                size="sm"
-                intervalSec={15}
-                label="Realtime Live"
-                subLabel="Hệ thống kết nối liên tục"
-                showEqualizer={true}
-              />
-            </div>
-
             {/* Mobile Search Toggle */}
             <button
               type="button"
@@ -698,17 +672,15 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                             key={item.id}
                             href={item.actionUrl || '/notifications'}
                             onClick={() => setBellOpen(false)}
-                            className={`block px-4 py-3 hover:bg-slate-50 transition ${
-                              !item.isRead ? 'bg-blue-50/40' : ''
-                            }`}
+                            className={`block px-4 py-3 hover:bg-slate-50 transition ${!item.isRead ? 'bg-blue-50/40' : ''
+                              }`}
                           >
                             <div className="flex items-start gap-2.5">
                               <div
-                                className={`mt-0.5 w-7 h-7 rounded-lg grid place-items-center shrink-0 ${
-                                  isWarn
+                                className={`mt-0.5 w-7 h-7 rounded-lg grid place-items-center shrink-0 ${isWarn
                                     ? 'bg-amber-100 text-amber-700'
                                     : 'bg-blue-100 text-[#1E3A8A]'
-                                }`}
+                                  }`}
                               >
                                 {isWarn ? (
                                   <AlertTriangle className="w-3.5 h-3.5" />
@@ -857,9 +829,8 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`relative min-w-[60px] min-h-[44px] px-2 py-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors ${
-                  active ? 'text-[#2563EB]' : 'text-slate-500 hover:text-slate-900'
-                }`}
+                className={`relative min-w-[60px] min-h-[44px] px-2 py-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors ${active ? 'text-[#2563EB]' : 'text-slate-500 hover:text-slate-900'
+                  }`}
               >
                 <Icon className="w-5 h-5" />
                 <span>{item.label}</span>

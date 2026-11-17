@@ -120,7 +120,8 @@ function validateLeadIntakeByChannel(input) {
 }
 
 function isUniqueConstraintError(err) {
-  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+  if (!err || typeof err !== 'object') return false;
+  return (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') || err.code === 'P2002';
 }
 
 function isSqliteBusyError(err) {

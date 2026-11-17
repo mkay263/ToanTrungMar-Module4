@@ -6,11 +6,51 @@ import { Calendar, CheckCircle2, ChevronDown } from 'lucide-react';
 export type StandardDatePreset =
   | 'ALL'
   | 'TODAY'
+  | 'YESTERDAY'
   | '7D'
   | '30D'
   | '90D'
   | 'THIS_MONTH'
   | 'CUSTOM';
+
+function formatVnYmd(d: Date): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
+}
+
+export function resolvePresetDatesClient(
+  preset: StandardDatePreset,
+  customStartDate = '',
+  customEndDate = '',
+): { startDate: string; endDate: string; includesToday: boolean } | null {
+  const now = new Date();
+  const todayStr = formatVnYmd(now);
+  const noon = new Date(`${todayStr}T12:00:00+07:00`);
+  if (preset === 'ALL') return null;
+  if (preset === 'TODAY') return { startDate: todayStr, endDate: todayStr, includesToday: true };
+  if (preset === 'YESTERDAY') {
+    const yStr = formatVnYmd(new Date(noon.getTime() - 24 * 60 * 60 * 1000));
+    return { startDate: yStr, endDate: yStr, includesToday: false };
+  }
+  if (preset === '7D' || preset === '30D' || preset === '90D') {
+    const days = preset === '7D' ? 7 : preset === '30D' ? 30 : 90;
+    const sStr = formatVnYmd(new Date(noon.getTime() - (days - 1) * 24 * 60 * 60 * 1000));
+    return { startDate: sStr, endDate: todayStr, includesToday: true };
+  }
+  if (preset === 'THIS_MONTH') {
+    return { startDate: `${todayStr.slice(0, 7)}-01`, endDate: todayStr, includesToday: true };
+  }
+  if (preset === 'CUSTOM' && (customStartDate || customEndDate)) {
+    const s = customStartDate || customEndDate;
+    const e = customEndDate || customStartDate;
+    return { startDate: s, endDate: e, includesToday: e >= todayStr };
+  }
+  return null;
+}
 
 export interface StandardDateRangeDropdownProps {
   preset: StandardDatePreset;
@@ -62,6 +102,8 @@ export function StandardDateRangeDropdown({
     handleSelectPreset('ALL');
   };
 
+  const resolvedBounds = resolvePresetDatesClient(preset, customStartDate, customEndDate);
+
   // Label text formatting
   const getLabel = () => {
     if (preset === 'CUSTOM' && (customStartDate || customEndDate)) {
@@ -71,15 +113,19 @@ export function StandardDateRangeDropdown({
     }
     switch (preset) {
       case 'TODAY':
-        return 'Mốc thời gian: Hôm nay';
+        return 'Hôm nay (bao gồm hôm nay)';
+      case 'YESTERDAY':
+        return resolvedBounds
+          ? `Hôm qua (${resolvedBounds.startDate})`
+          : 'Hôm qua';
       case '7D':
-        return 'Mốc thời gian: 7 ngày qua';
+        return '7 ngày qua (gồm hôm nay)';
       case '30D':
-        return 'Mốc thời gian: 30 ngày qua';
+        return '30 ngày qua (gồm hôm nay)';
       case '90D':
-        return 'Mốc thời gian: 90 ngày qua';
+        return '90 ngày qua (gồm hôm nay)';
       case 'THIS_MONTH':
-        return 'Mốc thời gian: Tháng này';
+        return 'Tháng này (gồm hôm nay)';
       case 'ALL':
       default:
         return 'Mốc thời gian: Tất cả';
@@ -87,18 +133,29 @@ export function StandardDateRangeDropdown({
   };
 
   return (
-    <div className={`relative inline-block text-left ${className}`}>
+    <div
+      className={`relative inline-block text-left ${className}`}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' && open) setOpen(false);
+      }}
+    >
       {/* Trigger Button */}
       <div className="inline-flex items-center rounded-2xl border border-slate-200/90 bg-white hover:bg-slate-50 transition shadow-2xs">
         <button
           type="button"
+          aria-expanded={open}
+          aria-haspopup="dialog"
           onClick={() => setOpen((prev) => !prev)}
           className={`${
             size === 'sm' ? 'h-9 px-3.5 text-xs' : 'h-11 px-4 text-xs sm:text-sm'
           } font-bold inline-flex items-center gap-2.5 transition text-slate-800 ${
             isFiltered ? 'bg-blue-50/70 text-[#1E3A8A] rounded-2xl' : ''
           }`}
-          title="Chọn mốc thời gian"
+          title={
+            resolvedBounds
+              ? `Kỳ dữ liệu: ${resolvedBounds.startDate} → ${resolvedBounds.endDate} (${resolvedBounds.includesToday ? 'Bao gồm hôm nay' : 'Đã qua trọn ngày'})`
+              : 'Chọn mốc thời gian'
+          }
         >
           <Calendar className={`${size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} text-[#1E3A8A] shrink-0`} />
           <span className="font-semibold">{getLabel()}</span>
@@ -162,6 +219,7 @@ export function StandardDateRangeDropdown({
 
               {[
                 { id: 'TODAY' as const, label: 'Hôm nay' },
+                { id: 'YESTERDAY' as const, label: 'Hôm qua' },
                 { id: '7D' as const, label: '7 ngày qua' },
                 { id: '30D' as const, label: '30 ngày qua' },
                 ...(include90Days ? [{ id: '90D' as const, label: '90 ngày qua' }] : []),

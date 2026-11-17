@@ -89,8 +89,7 @@ function getCustomCanonicalDateRange(fromStr, toStr, timezone = 'Asia/Ho_Chi_Min
   const startDateTime = new Date(`${cleanFrom}T00:00:00.000+07:00`);
   const endDateTime = new Date(`${cleanTo}T23:59:59.999+07:00`);
 
-  const diffMs = endDateTime.getTime() - startDateTime.getTime();
-  const totalCalendarDays = Math.max(1, Math.round(diffMs / (24 * 60 * 60 * 1000)));
+  const totalCalendarDays = countInclusiveCalendarDays(cleanFrom, cleanTo);
 
   return {
     startDateStr: cleanFrom,
@@ -104,10 +103,76 @@ function getCustomCanonicalDateRange(fromStr, toStr, timezone = 'Asia/Ho_Chi_Min
   };
 }
 
+function countInclusiveCalendarDays(startDateStr, endDateStr) {
+  if (!startDateStr || !endDateStr) return 0;
+  const sMs = Date.parse(`${String(startDateStr).slice(0, 10)}T00:00:00Z`);
+  const eMs = Date.parse(`${String(endDateStr).slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(sMs) || !Number.isFinite(eMs) || eMs < sMs) return 0;
+  return Math.round((eMs - sMs) / (24 * 60 * 60 * 1000)) + 1;
+}
+
+function getYesterdayCanonicalDateRange(referenceDate = new Date(), timezone = 'Asia/Ho_Chi_Minh') {
+  const { dateStr: todayStr } = getVietnamDateParts(referenceDate);
+  const todayNoon = new Date(`${todayStr}T12:00:00+07:00`);
+  const yesterdayD = new Date(todayNoon.getTime() - 24 * 60 * 60 * 1000);
+  const { dateStr: yesterdayStr } = getVietnamDateParts(yesterdayD);
+
+  return {
+    startDateStr: yesterdayStr,
+    endDateStr: yesterdayStr,
+    startDateTime: new Date(`${yesterdayStr}T00:00:00.000+07:00`),
+    endDateTime: new Date(`${yesterdayStr}T23:59:59.999+07:00`),
+    totalCalendarDays: 1,
+    timezone,
+    isTodayIncluded: false,
+    isPartialDay: false,
+  };
+}
+
+function getThisMonthCanonicalDateRange(referenceDate = new Date(), timezone = 'Asia/Ho_Chi_Minh') {
+  const { year, month, dateStr: todayStr } = getVietnamDateParts(referenceDate);
+  const monthStr = String(month).padStart(2, '0');
+  const startDateStr = `${year}-${monthStr}-01`;
+  return getCustomCanonicalDateRange(startDateStr, todayStr, timezone);
+}
+
+function resolveDatePresetRange(
+  preset = '30D',
+  fromStr,
+  toStr,
+  referenceDate = new Date(),
+  timezone = 'Asia/Ho_Chi_Minh',
+) {
+  const norm = String(preset || '30D').toUpperCase();
+  if (norm === 'CUSTOM' && fromStr && toStr) {
+    return getCustomCanonicalDateRange(fromStr, toStr, timezone);
+  }
+  if (norm === 'TODAY' || norm === '1D') {
+    return getCanonicalDateRange(1, referenceDate, timezone);
+  }
+  if (norm === 'YESTERDAY') {
+    return getYesterdayCanonicalDateRange(referenceDate, timezone);
+  }
+  if (norm === '7D') {
+    return getCanonicalDateRange(7, referenceDate, timezone);
+  }
+  if (norm === '90D') {
+    return getCanonicalDateRange(90, referenceDate, timezone);
+  }
+  if (norm === 'THIS_MONTH') {
+    return getThisMonthCanonicalDateRange(referenceDate, timezone);
+  }
+  return getCanonicalDateRange(30, referenceDate, timezone);
+}
+
 module.exports = {
   getVietnamDateParts,
   formatVietnamDate,
   formatVietnamDateTime,
   getCanonicalDateRange,
   getCustomCanonicalDateRange,
+  getYesterdayCanonicalDateRange,
+  getThisMonthCanonicalDateRange,
+  resolveDatePresetRange,
+  countInclusiveCalendarDays,
 };

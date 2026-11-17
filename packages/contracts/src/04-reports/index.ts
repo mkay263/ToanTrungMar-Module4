@@ -47,6 +47,7 @@ export interface DetailedReportLeadRowDto {
   assignedSalesName: string;
   companyOrCustomer: string;
   phone: string;
+  sourceWebsite: string;
   contactChannel: string;
   marketingSource: string;
   productsText: string;

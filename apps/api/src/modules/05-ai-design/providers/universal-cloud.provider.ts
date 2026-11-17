@@ -156,8 +156,30 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
             Authorization: `Bearer ${this.apiKey}`,
           },
           body: form,
-          signal: AbortSignal.timeout(90000),
+          signal: AbortSignal.timeout(25000),
         });
+
+        // If the gateway does not support multipart /images/edits, automatically fall back to /images/generations
+        if (!response.ok) {
+          const fallbackBody: Record<string, unknown> = {
+            model: effectiveModel,
+            prompt,
+            n: 1,
+            size: isDiDiGateway ? '1024x1024' : widthPx >= heightPx ? '1792x1024' : '1024x1792',
+          };
+          if (!isDiDiGateway) {
+            fallbackBody.response_format = 'b64_json';
+          }
+          response = await fetch(this.apiEndpoint, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(fallbackBody),
+            signal: AbortSignal.timeout(25000),
+          });
+        }
       } else {
         const payloadBody: Record<string, unknown> = {
           model: effectiveModel,
@@ -176,7 +198,7 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(payloadBody),
-          signal: AbortSignal.timeout(90000),
+          signal: AbortSignal.timeout(25000),
         });
       }
 

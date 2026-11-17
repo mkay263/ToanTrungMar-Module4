@@ -29,6 +29,7 @@ import type { ImageCropConfig, PublicBrandingDto } from '@toantrung/contracts';
 import { apiRequest, ApiClientError } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { GoogleOAuthManager } from '@/components/google-oauth/GoogleOAuthManager';
+import { AdminSyncCenterPanel } from '@/components/settings/AdminSyncCenterPanel';
 
 interface AuditItem {
   id: number;
@@ -671,7 +672,7 @@ export default function SettingsPage() {
             }`}
           >
             <Globe className="w-3.5 h-3.5 text-blue-400" />
-            <span>Google OAuth 2.0 (Toàn dự án)</span>
+            <span>Đồng bộ Mail · GA4 · Ads</span>
           </button>
           <button
             type="button"
@@ -694,7 +695,10 @@ export default function SettingsPage() {
           SUB-TAB: GOOGLE OAUTH 2.0 INTEGRATION (MODULES 02, 03, 04)
       ===================================================================== */}
       {activeSettingsTab === 'google_integrations' && (
-        <GoogleOAuthManager returnPath="/settings" />
+        <div className="space-y-6">
+          <AdminSyncCenterPanel />
+          <GoogleOAuthManager returnPath="/settings" />
+        </div>
       )}
 
       {/* =====================================================================

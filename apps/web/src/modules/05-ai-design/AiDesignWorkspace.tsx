@@ -1334,22 +1334,109 @@ export function AiDesignWorkspace() {
           return canvas.toDataURL('image/jpeg', 0.92).split(',')[1] || null;
         }
 
-        try {
-          const posterBg = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new window.Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => resolve(img);
-            img.onerror = () => reject(new Error('No poster bg'));
-            img.src = '/brand/toantrung-nutifood-poster.jpg';
-          });
-          ctx.drawImage(posterBg, 0, 0, W, H);
-        } catch {
+        const promptLowerPoster = cleanCaption.toLowerCase();
+        const isVietnamFlagTheme =
+          /(?:lá\s*cờ|quốc\s*kỳ|cờ\s*đỏ|sao\s*vàng|việt\s*nam|quốc\s*khánh|tổ\s*quốc)/i.test(
+            cleanCaption
+          );
+        const isExplicitNutifood = /nutifood/i.test(cleanCaption);
+
+        if (isVietnamFlagTheme) {
+          // Draw vivid Vietnam National Flag (Red Background + Golden 5-Pointed Star)
+          const flagGrad = ctx.createRadialGradient(
+            W * 0.5,
+            H * 0.48,
+            Math.min(W, H) * 0.05,
+            W * 0.5,
+            H * 0.5,
+            Math.max(W, H) * 0.75
+          );
+          flagGrad.addColorStop(0, '#ef233c');
+          flagGrad.addColorStop(0.55, '#da251d');
+          flagGrad.addColorStop(1, '#991b1b');
+          ctx.fillStyle = flagGrad;
+          ctx.fillRect(0, 0, W, H);
+
+          // Draw golden 5-pointed star in the center
+          const cx = W * 0.5;
+          const cy = H * 0.46;
+          const outerR = Math.min(W, H) * 0.28;
+          const innerR = outerR * 0.382;
+
+          ctx.save();
+          ctx.shadowColor = 'rgba(255, 255, 0, 0.55)';
+          ctx.shadowBlur = 40;
+          ctx.beginPath();
+          for (let i = 0; i < 10; i++) {
+            const r = i % 2 === 0 ? outerR : innerR;
+            const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+            const sx = cx + Math.cos(angle) * r;
+            const sy = cy + Math.sin(angle) * r;
+            if (i === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+          }
+          ctx.closePath();
+          ctx.fillStyle = '#ffff00';
+          ctx.fill();
+          ctx.restore();
+        } else if (isExplicitNutifood) {
+          try {
+            const posterBg = await new Promise<HTMLImageElement>((resolve, reject) => {
+              const img = new window.Image();
+              img.crossOrigin = 'anonymous';
+              img.onload = () => resolve(img);
+              img.onerror = () => reject(new Error('No poster bg'));
+              img.src = '/brand/toantrung-nutifood-poster.jpg';
+            });
+            ctx.drawImage(posterBg, 0, 0, W, H);
+          } catch {
+            ctx.fillStyle = '#0284c7';
+            ctx.fillRect(0, 0, W, H);
+          }
+        } else {
+          // Dynamic themed studio graphic banner based on user's prompt
+          const isEventRed = /khai\s*trương|sự\s*kiện|tết|chúc\s*mừng|lễ\s*kỷ\s*niệm|đỏ/i.test(
+            promptLowerPoster
+          );
           const bgGrad = ctx.createLinearGradient(0, 0, W, H);
-          bgGrad.addColorStop(0, '#0284c7');
-          bgGrad.addColorStop(0.55, '#38bdf8');
-          bgGrad.addColorStop(1, '#15803d');
+          if (isEventRed) {
+            bgGrad.addColorStop(0, '#7f1d1d');
+            bgGrad.addColorStop(0.5, '#dc2626');
+            bgGrad.addColorStop(1, '#b45309');
+          } else {
+            bgGrad.addColorStop(0, '#09152b');
+            bgGrad.addColorStop(0.5, '#1e3a8a');
+            bgGrad.addColorStop(1, '#0284c7');
+          }
           ctx.fillStyle = bgGrad;
           ctx.fillRect(0, 0, W, H);
+
+          // Decorative light glow & geometric accents
+          const glow = ctx.createRadialGradient(W * 0.5, H * 0.45, 20, W * 0.5, H * 0.45, W * 0.5);
+          glow.addColorStop(0, 'rgba(253, 224, 71, 0.25)');
+          glow.addColorStop(1, 'rgba(15, 23, 42, 0)');
+          ctx.fillStyle = glow;
+          ctx.fillRect(0, 0, W, H);
+
+          ctx.save();
+          ctx.textAlign = 'center';
+          ctx.fillStyle = '#fde047';
+          ctx.font = `bold ${Math.max(16, Math.round(H * 0.032))}px sans-serif`;
+          ctx.fillText(
+            (currentProject?.projectName || 'TRÌNH CHIẾU MÀN HÌNH LED TOÀN TRUNG').toUpperCase(),
+            W * 0.5,
+            H * 0.34
+          );
+
+          ctx.fillStyle = '#ffffff';
+          ctx.font = `900 ${Math.max(26, Math.round(H * 0.064))}px sans-serif`;
+          const headline = cleanCaption
+            .replace(/^tạo\s*banner\s*quảng\s*cáo[^:]*:\s*/i, '')
+            .trim()
+            .slice(0, 38)
+            .toUpperCase();
+          ctx.fillText(headline || 'ẤN PHẨM TRÌNH CHIẾU LED 4K', W * 0.5, H * 0.5);
+          ctx.restore();
         }
 
         // Custom overlay badge if user typed specific poster content
@@ -1521,7 +1608,47 @@ export function AiDesignWorkspace() {
       ctx.closePath();
       ctx.clip();
 
-      if (mappedPosterImg) {
+      const isVietnamFlagOnScreen =
+        /(?:lá\s*cờ|quốc\s*kỳ|cờ\s*đỏ|sao\s*vàng|việt\s*nam|quốc\s*khánh|tổ\s*quốc)/i.test(
+          cleanCaption
+        );
+
+      if (isVietnamFlagOnScreen) {
+        const flagGrad = ctx.createRadialGradient(
+          minX + boxW * 0.5,
+          minY + boxH * 0.5,
+          Math.min(boxW, boxH) * 0.05,
+          minX + boxW * 0.5,
+          minY + boxH * 0.5,
+          Math.max(boxW, boxH) * 0.7
+        );
+        flagGrad.addColorStop(0, '#ef233c');
+        flagGrad.addColorStop(0.6, '#da251d');
+        flagGrad.addColorStop(1, '#991b1b');
+        ctx.fillStyle = flagGrad;
+        ctx.fillRect(minX, minY, boxW, boxH);
+
+        const cx = minX + boxW * 0.5;
+        const cy = minY + boxH * 0.5;
+        const outerR = Math.min(boxW, boxH) * 0.3;
+        const innerR = outerR * 0.382;
+        ctx.save();
+        ctx.shadowColor = 'rgba(255, 255, 0, 0.5)';
+        ctx.shadowBlur = 20;
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const r = i % 2 === 0 ? outerR : innerR;
+          const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+          const sx = cx + Math.cos(angle) * r;
+          const sy = cy + Math.sin(angle) * r;
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.closePath();
+        ctx.fillStyle = '#ffff00';
+        ctx.fill();
+        ctx.restore();
+      } else if (mappedPosterImg) {
         ctx.drawImage(mappedPosterImg, minX, minY, boxW, boxH);
       } else if (effectiveTheme === 'corp_navy') {
         const ledGrad = ctx.createLinearGradient(minX, minY, maxX, maxY);
@@ -2081,7 +2208,7 @@ export function AiDesignWorkspace() {
       /(?:ghép|chèn|đưa|đặt|lắp|thêm)\s*(?:thêm\s*)?(?:ảnh\s*)?(?:sản\s*phẩm|thiết\s*bị|màn\s*hình|bảng\s*hiệu|mẫu\s*này|ảnh\s*này)/i.test(
         trimmed
       ) ||
-      /(?:phối\s*cảnh|ghép\s*ảnh|tạo\s*ảnh|sửa\s*ảnh|chỉnh\s*ảnh|render\s*ảnh|vẽ\s*lại)/i.test(
+      /(?:phối\s*cảnh|ghép\s*ảnh|tạo\s*ảnh|taoj\s*ảnh|tao\s*anh|sửa\s*ảnh|chỉnh\s*ảnh|render\s*ảnh|vẽ\s*lại)/i.test(
         trimmed
       ) ||
       (activeProductPhotos.length > 0 &&
@@ -2157,8 +2284,7 @@ export function AiDesignWorkspace() {
       let preRenderedCompositeB64: string | undefined;
       if (
         effectiveMode === 'image_generator' &&
-        (isPosterTag || hasSurveyPhotoOnProject) &&
-        (taoAnhExecStrategy === 'smart_hybrid' || !hasExternalCloudApiKey)
+        (isPosterTag || hasSurveyPhotoOnProject)
       ) {
         const compositedB64 = await renderRealPhotoAiCompositeBase64(
           isPosterTag ? 'poster' : '3d_led',

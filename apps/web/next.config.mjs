@@ -4,6 +4,7 @@ const nextConfig = {
   transpilePackages: ['@toantrung/contracts', '@toantrung/api', '@toantrung/database'],
   experimental: {
     externalDir: true,
+    instrumentationHook: true,
     optimizePackageImports: ['lucide-react', '@toantrung/contracts'],
   },
   async headers() {

@@ -25,15 +25,17 @@ import {
 } from 'lucide-react';
 import {
   CreateManualLeadSchema,
-  HCM_DISTRICTS,
   PIPELINE_STATUS_LABELS,
   REASSIGN_REASONS,
-  VIETNAM_PROVINCES,
+  composeLeadDistrictField,
+  inferAreaTypeFromProvince,
+  splitLeadDistrictField,
   type LeadItemDto,
   type ProductCatalogDto,
   type SalesAssigneeOptionDto,
 } from '@toantrung/contracts';
 import { apiRequest } from '@/core/http/client';
+import { VietnamAddressFields } from './VietnamAddressFields';
 
 interface ProductCheckboxGridProps {
   products: ProductCatalogDto[];
@@ -76,10 +78,12 @@ const STATUS_BADGE_MAP: Record<string, string> = {
 const UNIFIED_LEAD_SOURCES: Array<{
   label: string;
   channel: 'hotline' | 'zalo' | 'email' | 'form_web';
+  sourceWebsite?: string;
 }> = [
   { label: 'SĐT / Hotline', channel: 'hotline' },
   { label: 'Zalo', channel: 'zalo' },
-  { label: 'Website Toàn Trung', channel: 'form_web' },
+  { label: 'Website Toàn Trung (toantrung.com.vn)', channel: 'form_web', sourceWebsite: 'toantrung.com.vn' },
+  { label: 'Website Bảng LED (bangled.vn)', channel: 'form_web', sourceWebsite: 'bangled.vn' },
   { label: 'Google Ads', channel: 'form_web' },
   { label: 'Fanpage Facebook', channel: 'zalo' },
   { label: 'Email Dự án', channel: 'email' },
@@ -341,9 +345,10 @@ export function ManualLeadModal({
   // Uncontrolled form refs for zero-lag 60fps typing
   const formRef = useRef<HTMLFormElement | null>(null);
   const [selectedSource, setSelectedSource] = useState<string>('SĐT / Hotline');
-  const [areaType, setAreaType] = useState<'hcm' | 'other_province'>('hcm');
-  const [district, setDistrict] = useState<string>(HCM_DISTRICTS[0]);
-  const [province, setProvince] = useState<string>(VIETNAM_PROVINCES[0]);
+  const [province, setProvince] = useState<string>('TP. Hồ Chí Minh');
+  const [district, setDistrict] = useState<string>('');
+  const [ward, setWard] = useState<string>('');
+  const [installationAddress, setInstallationAddress] = useState<string>('');
   const [selectedProductIds, setSelectedProductIds] = useState<number[]>([1]);
   const [customServiceItems, setCustomServiceItems] = useState<string[]>([]);
   const [tickReassign, setTickReassign] = useState(false);
@@ -377,17 +382,18 @@ export function ManualLeadModal({
     if (lead.email && elements.email) {
       elements.email.value = lead.email;
     }
-    if (lead.areaType) {
-      setAreaType(lead.areaType === 'hcm' ? 'hcm' : 'other_province');
-    }
     if (lead.province) {
       setProvince(lead.province);
+    } else if (lead.areaType === 'hcm') {
+      setProvince('TP. Hồ Chí Minh');
     }
     if (lead.hcmDistrict) {
-      setDistrict(lead.hcmDistrict);
+      const split = splitLeadDistrictField(lead.hcmDistrict);
+      setWard(split.ward);
+      setDistrict(split.district);
     }
-    if (lead.installationAddress && elements.installationAddress) {
-      elements.installationAddress.value = lead.installationAddress;
+    if (lead.installationAddress) {
+      setInstallationAddress(lead.installationAddress);
     }
     if (lead.products && lead.products.length > 0) {
       setSelectedProductIds(lead.products.map((p) => p.id));
@@ -402,6 +408,10 @@ export function ManualLeadModal({
       setLeadActionChoice('create_new');
       setTargetExistingLeadId(null);
       setFeedbackNote(null);
+      setProvince('TP. Hồ Chí Minh');
+      setDistrict('');
+      setWard('');
+      setInstallationAddress('');
     }
   }, [open]);
 
@@ -448,12 +458,16 @@ export function ManualLeadModal({
     setValidationError(null);
 
     const fd = new FormData(formRef.current);
-    const phone = String(fd.get('phone') || '').trim();
+    const phone = String(fd.get('phone') || '').replace(/\D/g, '').slice(0, 10);
+    if (!/^0\d{9}$/.test(phone)) {
+      setValidationError('Số điện thoại phải gồm đúng 10 chữ số và bắt đầu bằng số 0 (VD: 0909123456).');
+      return;
+    }
     const contactName = String(fd.get('contactName') || '').trim() || undefined;
     const companyName = String(fd.get('companyName') || '').trim() || undefined;
     const projectName = String(fd.get('projectName') || '').trim() || undefined;
     const email = String(fd.get('email') || '').trim() || undefined;
-    const installationAddress = String(fd.get('installationAddress') || '').trim() || undefined;
+    const cleanAddress = installationAddress.trim() || undefined;
     const rawCustomProductNote = String(fd.get('customProductNote') || '').trim();
     const combinedCustomNote = [
       ...customServiceItems.map((i) => `[Dịch vụ khác: ${i}]`),
@@ -483,12 +497,13 @@ export function ManualLeadModal({
       companyName,
       projectName,
       email,
+      sourceWebsite: matchedSource.sourceWebsite,
       selfReportedSource: matchedSource.label,
       contactedAt,
-      areaType,
-      hcmDistrict: areaType === 'hcm' ? district : undefined,
-      province: areaType === 'other_province' ? province : undefined,
-      installationAddress,
+      areaType: inferAreaTypeFromProvince(province),
+      hcmDistrict: composeLeadDistrictField(ward, district) || undefined,
+      province: province.trim() || undefined,
+      installationAddress: cleanAddress,
       productIds: selectedProductIds,
       customProductNote: combinedCustomNote,
       initialNote,
@@ -893,15 +908,22 @@ export function ManualLeadModal({
               {/* Row 1: Số điện thoại, Người liên hệ, Email */}
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">
-                  Số điện thoại *
+                  Số điện thoại (10 số) *
                 </label>
                 <input
                   name="phone"
                   type="tel"
                   required
+                  maxLength={10}
+                  inputMode="numeric"
+                  pattern="0[0-9]{9}"
                   defaultValue=""
-                  onChange={(e) => setLivePhone(e.target.value)}
-                  placeholder="0909 123 456"
+                  onChange={(e) => {
+                    const digitsOnly = e.target.value.replace(/\D/g, '').slice(0, 10);
+                    e.target.value = digitsOnly;
+                    setLivePhone(digitsOnly);
+                  }}
+                  placeholder="0909123456 (10 số)"
                   className="w-full h-9 px-3 rounded-lg border border-slate-200 font-mono font-semibold text-[#1E3A8A] focus:outline-none focus:border-[#1E3A8A]"
                 />
               </div>
@@ -977,64 +999,18 @@ export function ManualLeadModal({
                 </select>
               </div>
 
-              {/* Row 3: Khu vực công trình, Quận / Huyện, Địa chỉ chi tiết */}
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  Khu vực công trình
-                </label>
-                <select
-                  value={areaType}
-                  onChange={(e) => setAreaType(e.target.value as 'hcm' | 'other_province')}
-                  className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
-                >
-                  <option value="hcm">Nội thành TP. Hồ Chí Minh</option>
-                  <option value="other_province">Tỉnh / Thành phố khác</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  {areaType === 'hcm' ? 'Quận / Huyện TP.HCM' : 'Tỉnh / Thành phố'}
-                </label>
-                {areaType === 'hcm' ? (
-                  <select
-                    value={district}
-                    onChange={(e) => setDistrict(e.target.value)}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
-                  >
-                    {HCM_DISTRICTS.map((d) => (
-                      <option key={d} value={d}>
-                        {d}
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <select
-                    value={province}
-                    onChange={(e) => setProvince(e.target.value)}
-                    className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
-                  >
-                    {VIETNAM_PROVINCES.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">
-                  Địa chỉ lắp đặt chi tiết
-                </label>
-                <input
-                  name="installationAddress"
-                  type="text"
-                  defaultValue=""
-                  placeholder="Số nhà, đường, KCN..."
-                  className="w-full h-9 px-3 rounded-lg border border-slate-200 text-slate-800 focus:outline-none focus:border-[#1E3A8A]"
-                />
-              </div>
+              {/* Row 3: Địa chỉ hành chính (Tỉnh/TP, Quận/Huyện, Phường/Xã, Thôn/Số nhà) - Hỗ trợ tên cũ & mới */}
+              <VietnamAddressFields
+                province={province}
+                onProvinceChange={setProvince}
+                district={district}
+                onDistrictChange={setDistrict}
+                ward={ward}
+                onWardChange={setWard}
+                installationAddress={installationAddress}
+                onInstallationAddressChange={setInstallationAddress}
+                installationAddressName="installationAddress"
+              />
             </div>
           </div>
 

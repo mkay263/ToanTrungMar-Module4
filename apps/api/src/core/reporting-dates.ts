@@ -33,3 +33,26 @@ export const getCustomCanonicalDateRange: (
   toStr?: string,
   timezone?: string,
 ) => CanonicalDateRange = impl.getCustomCanonicalDateRange;
+
+export const getYesterdayCanonicalDateRange: (
+  referenceDate?: Date,
+  timezone?: string,
+) => CanonicalDateRange = impl.getYesterdayCanonicalDateRange;
+
+export const getThisMonthCanonicalDateRange: (
+  referenceDate?: Date,
+  timezone?: string,
+) => CanonicalDateRange = impl.getThisMonthCanonicalDateRange;
+
+export const resolveDatePresetRange: (
+  preset?: string,
+  fromStr?: string,
+  toStr?: string,
+  referenceDate?: Date,
+  timezone?: string,
+) => CanonicalDateRange = impl.resolveDatePresetRange;
+
+export const countInclusiveCalendarDays: (
+  startDateStr: string,
+  endDateStr: string,
+) => number = impl.countInclusiveCalendarDays;

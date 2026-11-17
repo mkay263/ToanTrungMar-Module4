@@ -203,6 +203,24 @@ export function GoogleAssetsHubSection({ hub, periodDays = 30, onSelectPeriod }:
         </div>
       </div>
 
+      {/* Quick Guide: Data Allocation Across Module 2 - 3 - 4 */}
+      <div className="bg-emerald-950/90 text-emerald-100 px-4 py-2.5 text-xs border-b border-emerald-800/60 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="font-bold text-amber-300">📌 Sơ đồ kéo dữ liệu chuẩn:</span>
+          <span>
+            <strong>Module 2 (Chiến dịch):</strong> Kéo <strong>GA4 (4 Web: Users, Pageviews, Trang đích)</strong> &amp; Đối soát GCLID/UTM sang Lead
+          </span>
+          <span>•</span>
+          <span>
+            <strong>Module 3 (Từ khóa &amp; SEO):</strong> Kéo <strong>Search Console (Từ khóa khách gõ thật)</strong> + <strong>GA4 Realtime 30p</strong> + <strong>Google Ads</strong>
+          </span>
+          <span>•</span>
+          <span>
+            <strong>Module 4 (Báo cáo):</strong> Phễu tổng hợp Traffic → Lead (L1/L2/L3) → Báo giá → Chốt thành công
+          </span>
+        </div>
+      </div>
+
       {/* Tab 1: Google Analytics 4 (GA4) */}
       {activeTab === 'GA4' && (
         <div className="p-5 space-y-5">

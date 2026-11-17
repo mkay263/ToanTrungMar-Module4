@@ -3,58 +3,58 @@
   "ga4AccessToken": "VAULT_PROTECTED_TOKEN",
   "gadsCustomerId": "",
   "autoRealtimeEnabled": true,
-  "lastRealtimeSyncAt": "2026-11-13T19:07:20.337Z",
+  "lastRealtimeSyncAt": "2026-11-17T03:07:44.704Z",
   "lastActiveUsers30m": 0,
   "lastActivePages": [
     {
       "page": "/ (30 ngày)",
-      "users": 295
+      "users": 283
     },
     {
       "page": "/du-an/ (30 ngày)",
-      "users": 169
+      "users": 170
     },
     {
       "page": "/du-an/doanh-nghiep/ (30 ngày)",
-      "users": 83
+      "users": 90
     },
     {
       "page": "/du-an/quang-cao-ngoai-troi/ (30 ngày)",
-      "users": 52
+      "users": 53
     },
     {
       "page": "/gioi-thieu-don-vi-thi-cong-man-hinh-led-uy-tin/ (30 ngày)",
-      "users": 50
+      "users": 44
     },
     {
       "page": "/lien-he-bao-gia-man-hinh-led/ (30 ngày)",
-      "users": 47
+      "users": 43
     }
   ],
   "lastActiveEvents": [
     {
       "event": "page_view (30d)",
-      "count": 2851
+      "count": 2903
     },
     {
       "event": "user_engagement (30d)",
-      "count": 1889
+      "count": 1890
     },
     {
       "event": "users10s (30d)",
-      "count": 1621
+      "count": 1612
     },
     {
       "event": "session_start (30d)",
-      "count": 1161
+      "count": 1205
     },
     {
       "event": "scroll (30d)",
-      "count": 834
+      "count": 856
     },
     {
       "event": "first_visit (30d)",
-      "count": 664
+      "count": 720
     }
   ],
   "propertyCache": {
@@ -65,58 +65,58 @@
       "activeEvents": []
     },
     "512879968": {
-      "lastRealtimeSyncAt": "2026-11-13T18:30:39.167Z",
+      "lastRealtimeSyncAt": "2026-11-16T18:27:50.733Z",
       "lastActiveUsers30m": 0,
       "activePages": [
         {
           "page": "/ (30 ngày)",
-          "users": 295
+          "users": 283
         },
         {
           "page": "/du-an/ (30 ngày)",
-          "users": 169
+          "users": 170
         },
         {
           "page": "/du-an/doanh-nghiep/ (30 ngày)",
-          "users": 83
+          "users": 90
         },
         {
           "page": "/du-an/quang-cao-ngoai-troi/ (30 ngày)",
-          "users": 52
+          "users": 53
         },
         {
           "page": "/gioi-thieu-don-vi-thi-cong-man-hinh-led-uy-tin/ (30 ngày)",
-          "users": 50
+          "users": 44
         },
         {
           "page": "/lien-he-bao-gia-man-hinh-led/ (30 ngày)",
-          "users": 47
+          "users": 43
         }
       ],
       "activeEvents": [
         {
           "event": "page_view (30d)",
-          "count": 2851
+          "count": 2903
         },
         {
           "event": "user_engagement (30d)",
-          "count": 1889
+          "count": 1890
         },
         {
           "event": "users10s (30d)",
-          "count": 1621
+          "count": 1612
         },
         {
           "event": "session_start (30d)",
-          "count": 1161
+          "count": 1205
         },
         {
           "event": "scroll (30d)",
-          "count": 834
+          "count": 856
         },
         {
           "event": "first_visit (30d)",
-          "count": 664
+          "count": 720
         }
       ]
     },

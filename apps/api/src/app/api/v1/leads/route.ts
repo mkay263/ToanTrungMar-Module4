@@ -10,17 +10,22 @@ import {
   listLeadsForUser,
   setSalesReceivingStatus,
 } from '../../../../modules/01-leads/service';
-import { ensureGmailAutoSyncPollerStarted } from '../../../../modules/01-leads/gmail-sync.service';
+import {
+  ensureGmailAutoSyncPollerStarted,
+  triggerGmailAutoSyncOnRead,
+} from '../../../../modules/01-leads/gmail-sync.service';
 
 export async function GET(req: Request) {
   const auth = await requirePermissionSession(req, 'LEAD_VIEW_OWN');
   if (!auth.ok) return auth.response;
 
-  ensureGmailAutoSyncPollerStarted();
+  // Kick off background Gmail check non-blockingly so GET /api/v1/leads responds immediately (<50ms)
+  void triggerGmailAutoSyncOnRead(0);
 
   try {
     const url = new URL(req.url);
     const status = url.searchParams.get('status') || undefined;
+    const sourceWebsite = url.searchParams.get('sourceWebsite') || undefined;
     const search = url.searchParams.get('search') || undefined;
     const includeSpam = url.searchParams.get('includeSpam') === 'true';
     const overdueOnly = url.searchParams.get('overdueOnly') === 'true';
@@ -35,6 +40,7 @@ export async function GET(req: Request) {
     const [payload, currentUserRecord] = await Promise.all([
       listLeadsForUser(auth.user, {
         status,
+        sourceWebsite,
         search,
         includeSpam,
         overdueOnly,

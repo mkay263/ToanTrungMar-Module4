@@ -96,7 +96,7 @@ export async function refreshKeywordDerivedCacheFromCanonicalMetrics(options?: {
     metricsByNorm.set(m.keywordTextNorm, arr);
   }
 
-  for (const kw of keywords) {
+  const updates = keywords.map((kw) => {
     const metrics = metricsByNorm.get(kw.keywordNorm) || [];
     if (metrics.length > 0) {
       const adsClicks = metrics
@@ -110,7 +110,7 @@ export async function refreshKeywordDerivedCacheFromCanonicalMetrics(options?: {
           ? posRows.reduce((acc, m) => acc + (m.avgPosition || 0), 0) / posRows.length
           : kw.cachedAvgPosition;
 
-      await prisma.seoKeyword.update({
+      return prisma.seoKeyword.update({
         where: { id: kw.id },
         data: {
           cachedAdsClicks: adsClicks || kw.cachedAdsClicks,
@@ -121,18 +121,21 @@ export async function refreshKeywordDerivedCacheFromCanonicalMetrics(options?: {
           cacheRefreshedAt: now,
         },
       });
-    } else {
-      await prisma.seoKeyword.update({
-        where: { id: kw.id },
-        data: { cacheRefreshedAt: now },
-      });
     }
+    return prisma.seoKeyword.update({
+      where: { id: kw.id },
+      data: { cacheRefreshedAt: now },
+    });
+  });
+
+  if (updates.length > 0) {
+    await prisma.$transaction(updates);
   }
 }
 
 export async function listKeywordsAndArticlesForUser(user: SessionUserDto): Promise<AdsWorkspacePayloadDto> {
-  // Only refresh if cache is missing or older than 30 minutes
-  await refreshKeywordDerivedCacheFromCanonicalMetrics({ force: false });
+  // Refresh stale cache asynchronously in background so GET /api/v1/ads responds immediately
+  void refreshKeywordDerivedCacheFromCanonicalMetrics({ force: false }).catch(() => {});
 
   const [keywordRows, campaignRows, dailyMetricRows] = await Promise.all([
     prisma.seoKeyword.findMany({
@@ -158,6 +161,17 @@ export async function listKeywordsAndArticlesForUser(user: SessionUserDto): Prom
           { accountPropertyId: { startsWith: 'GA4-' } },
           { campaignExternalId: { startsWith: 'ga4_' } },
         ],
+      },
+      select: {
+        grain: true,
+        platform: true,
+        campaignId: true,
+        campaignExternalId: true,
+        metricDate: true,
+        impressions: true,
+        clicks: true,
+        spendMicros: true,
+        conversionsMicros: true,
       },
       orderBy: { metricDate: 'desc' },
     }),
@@ -501,6 +515,40 @@ export async function generateSeoArticleDraftByAi(
     throw new Error('Không tìm thấy từ khóa mục tiêu.');
   }
 
+  // Gather computed canonical metrics as grounded evidence for AI SEO generation (P4)
+  const canonicalKeywordRows = await prisma.platformDailyMetric.findMany({
+    where: {
+      platform: 'search_console',
+      grain: 'keyword',
+      keywordTextNorm: keyword.keywordNorm,
+      id: { gt: 1000 },
+    },
+    orderBy: { metricDate: 'desc' },
+    take: 60,
+  });
+
+  const computedOrganicClicks =
+    canonicalKeywordRows.length > 0
+      ? canonicalKeywordRows.reduce((sum, r) => sum + r.clicks, 0)
+      : keyword.cachedOrganicClicks ?? 0;
+  const computedImpressions =
+    canonicalKeywordRows.length > 0
+      ? canonicalKeywordRows.reduce((sum, r) => sum + r.impressions, 0)
+      : keyword.cachedSearchVolume ?? 0;
+  const computedCtrPct =
+    computedImpressions > 0 ? ((computedOrganicClicks / computedImpressions) * 100).toFixed(2) : '0.00';
+  const evidenceSourceSite =
+    canonicalKeywordRows[0]?.accountPropertyId ||
+    keyword.cacheSourceAccountKey ||
+    'Google Search Console (toantrung.com.vn)';
+  const evidenceWindow =
+    canonicalKeywordRows.length > 0
+      ? `${canonicalKeywordRows[canonicalKeywordRows.length - 1].metricDate} → ${canonicalKeywordRows[0].metricDate}`
+      : keyword.cacheWindowStartDate && keyword.cacheWindowEndDate
+        ? `${keyword.cacheWindowStartDate} → ${keyword.cacheWindowEndDate}`
+        : 'Kỳ đồng bộ gần nhất';
+  const evidenceCitationHtml = `<p><em>Dẫn chứng số liệu thực tế (${evidenceSourceSite}, kỳ ${evidenceWindow}): ${computedOrganicClicks} lượt click tự nhiên, ${computedImpressions.toLocaleString('vi-VN')} lượt hiển thị (CTR ${computedCtrPct}%), vị trí TB ${keyword.cachedAvgPosition ? keyword.cachedAvgPosition.toFixed(1) : 'chưa xếp hạng'}.</em></p>`;
+
   const startedMs = Date.now();
   await new Promise((r) => setTimeout(r, 85));
   const durationMs = Date.now() - startedMs;
@@ -541,7 +589,8 @@ export async function generateSeoArticleDraftByAi(
 <h2>2. Phân tích cấu hình Module, tần số quét và độ sáng thực tế</h2>
 <p>Đội ngũ kỹ sư Toàn Trung khuyến nghị sử dụng tần số quét từ 3840Hz trở lên kết hợp bộ xử lý hình ảnh đồng bộ để hình ảnh trên <strong>${keyword.keyword}</strong> không bị sọc khi quay phim, chụp ảnh sự kiện.</p>
 <h2>3. Quy trình khảo sát hiện trường và thi công đạt chuẩn ISO</h2>
-<p>Mọi công trình lắp đặt <strong>${keyword.keyword}</strong> đều được khảo sát kết cấu khung chịu lực, hệ thống điện 3 pha và dựng phối cảnh 3D trực quan trước khi thi công.</p>`;
+<p>Mọi công trình lắp đặt <strong>${keyword.keyword}</strong> đều được khảo sát kết cấu khung chịu lực, hệ thống điện 3 pha và dựng phối cảnh 3D trực quan trước khi thi công.</p>
+${evidenceCitationHtml}`;
 
   let activeModelUsed = 'gemini-2.5-flash';
   try {
@@ -569,11 +618,14 @@ export async function generateSeoArticleDraftByAi(
                 parts: [
                   {
                     text: `Bạn là chuyên gia SEO B2B của Toàn Trung. Hãy viết bài chuẩn SEO bằng tiếng Việt cho từ khóa mục tiêu "${keyword.keyword}" với chủ đề "${input.topicFocus}".
+Số liệu thực tế đã tính từ hệ thống (chỉ dùng để tham chiếu & dẫn chứng, tuyệt đối không bịa số khác):
+- Nguồn dữ liệu: ${evidenceSourceSite} (Kỳ ${evidenceWindow})
+- Lượt click tự nhiên: ${computedOrganicClicks} | Lượt hiển thị: ${computedImpressions} | CTR: ${computedCtrPct}% | Vị trí TB: ${keyword.cachedAvgPosition ? keyword.cachedAvgPosition.toFixed(1) : 'N/A'}
 Yêu cầu bắt buộc:
 - Trả về định dạng JSON thuần túy gồm 3 trường: {"title": "...", "metaDescription": "...", "contentHtml": "..."}
 - "title" chứa từ khóa "${keyword.keyword}".
 - "metaDescription" dài 130-160 ký tự, chứa từ khóa "${keyword.keyword}".
-- "contentHtml" dài tối thiểu 220 từ, dùng các thẻ <h2>, <h3>, <p>, <ul>, <li>, <strong>, trong đó ít nhất 1 thẻ <h2> chứa từ khóa "${keyword.keyword}".`,
+- "contentHtml" dài tối thiểu 220 từ, dùng các thẻ <h2>, <h3>, <p>, <ul>, <li>, <strong>, trong đó ít nhất 1 thẻ <h2> chứa từ khóa "${keyword.keyword}" và có mục dẫn chứng ngắn gọn dựa trên số liệu thật ở trên.`,
                   },
                 ],
               },

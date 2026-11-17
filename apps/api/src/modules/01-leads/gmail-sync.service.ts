@@ -1,4 +1,5 @@
 import { prisma, ingestLeadWithTrackingIdempotent } from '@toantrung/database';
+import { findProvinceEntry, inferAreaTypeFromProvince } from '@toantrung/contracts';
 import {
   getGoogleConnection,
   getValidAccessToken,
@@ -9,9 +10,102 @@ import {
   normalizeVietnamPhone,
   selectAutoAssignedSales,
 } from './service';
+import {
+  parseStructuredFormEmailBody as parseStructuredFormEmailBodyCore,
+  type ParsedStructuredFormEmail,
+} from './gmail-form-parser';
 
 const SETTING_KEY_GMAIL_SYNC = 'gmail_lead_sync_config';
+const SETTING_KEY_GMAIL_CHECKPOINT = 'gmail_sync_checkpoint';
+const SETTING_KEY_GMAIL_AUDIT_LOGS = 'gmail_intake_audit_logs_v1';
 const GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+const MAX_GMAIL_MESSAGE_RETRIES = 3;
+const MAX_GMAIL_PAGES_PER_RUN = 10;
+const MAX_GMAIL_MESSAGES_PER_RUN = 250;
+const MAX_GMAIL_AUDIT_LOG_ENTRIES = 200;
+
+export type GmailIntakeClassification =
+  | 'VALID_FORM'
+  | 'DIRECT_INQUIRY'
+  | 'NEEDS_REVIEW'
+  | 'DUPLICATE'
+  | 'IRRELEVANT'
+  | 'PROCESSING_ERROR';
+
+export type GmailSyncMode = 'GMAIL_PUSH_WITH_RECONCILIATION' | 'POLLING_WITH_RECONCILIATION';
+export type GmailServerStatus = 'RUNNING' | 'PAUSED' | 'ERROR';
+
+export interface GmailIntakeAuditEntry {
+  messageId: string;
+  internalDateMs: number | null;
+  fromEmail: string | null;
+  subject: string;
+  classification: GmailIntakeClassification;
+  reasonCode: string;
+  reasonDetail: string;
+  leadId: number | null;
+  leadCode: string | null;
+  sourceWebsite: string | null;
+  submissionId: string | null;
+  processedAt: string;
+}
+
+export interface GmailSyncCheckpoint {
+  accountKey: string;
+  lastProcessedInternalDateMs: number | null;
+  lastMessageId: string | null;
+  lastSuccessAt: string | null;
+  lastError: string | null;
+  consecutiveFailures: number;
+  failedMessageRetries: Record<string, { attempts: number; lastError: string; updatedAt: string }>;
+}
+
+export async function getGmailSyncCheckpoint(accountKey = ''): Promise<GmailSyncCheckpoint> {
+  const row = await prisma.systemSetting.findUnique({
+    where: { key: SETTING_KEY_GMAIL_CHECKPOINT },
+  });
+  const empty: GmailSyncCheckpoint = {
+    accountKey,
+    lastProcessedInternalDateMs: null,
+    lastMessageId: null,
+    lastSuccessAt: null,
+    lastError: null,
+    consecutiveFailures: 0,
+    failedMessageRetries: {},
+  };
+  if (!row?.value) return empty;
+  try {
+    const parsed = JSON.parse(row.value) as Partial<GmailSyncCheckpoint>;
+    if (accountKey && parsed.accountKey && parsed.accountKey !== accountKey) {
+      return empty;
+    }
+    return {
+      accountKey: parsed.accountKey || accountKey,
+      lastProcessedInternalDateMs:
+        typeof parsed.lastProcessedInternalDateMs === 'number'
+          ? parsed.lastProcessedInternalDateMs
+          : null,
+      lastMessageId: parsed.lastMessageId || null,
+      lastSuccessAt: parsed.lastSuccessAt || null,
+      lastError: parsed.lastError || null,
+      consecutiveFailures: Number(parsed.consecutiveFailures) || 0,
+      failedMessageRetries: parsed.failedMessageRetries || {},
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export async function saveGmailSyncCheckpoint(cp: GmailSyncCheckpoint): Promise<void> {
+  await prisma.systemSetting.upsert({
+    where: { key: SETTING_KEY_GMAIL_CHECKPOINT },
+    update: { value: JSON.stringify(cp) },
+    create: {
+      key: SETTING_KEY_GMAIL_CHECKPOINT,
+      value: JSON.stringify(cp),
+    },
+  });
+}
 
 export interface GmailSyncSummary {
   scanned: number;
@@ -20,12 +114,15 @@ export interface GmailSyncSummary {
   skippedNoise: number;
   failed: number;
   error: string | null;
+  classificationCounts?: Record<GmailIntakeClassification, number>;
+  pagesFetched?: number;
 }
 
 export interface GmailLeadSyncConfig {
   enabled: boolean;
   query: string;
   maxMessages: number;
+  pollIntervalSec: number;
   onlyLeadKeywords: boolean;
   lastSyncAt: string | null;
   lastSyncSummary: GmailSyncSummary | null;
@@ -38,6 +135,8 @@ export interface GmailCreatedLeadPreview {
   email: string | null;
   phone: string;
   projectName: string | null;
+  classification?: GmailIntakeClassification;
+  sourceWebsite?: string | null;
 }
 
 export interface GmailSyncRunResult {
@@ -49,12 +148,14 @@ export interface GmailSyncRunResult {
   message: string;
   summary: GmailSyncSummary;
   createdLeads: GmailCreatedLeadPreview[];
+  auditEntries?: GmailIntakeAuditEntry[];
 }
 
 const DEFAULT_CONFIG: GmailLeadSyncConfig = {
   enabled: true,
-  query: 'in:inbox newer_than:7d -category:promotions -category:social',
-  maxMessages: 30,
+  query: 'newer_than:14d -category:promotions -category:social',
+  maxMessages: 40,
+  pollIntervalSec: 30,
   onlyLeadKeywords: true,
   lastSyncAt: null,
   lastSyncSummary: null,
@@ -72,6 +173,27 @@ const FREE_EMAIL_DOMAINS = new Set([
   'me.com',
   'ymail.com',
 ]);
+
+/**
+ * Các hộp thư nội bộ / hộp thư nhận-gửi thông báo của công ty Toàn Trung.
+ * Tuyệt đối KHÔNG dùng các địa chỉ này làm email khách hàng, tên khách hàng, hay nguồn website/marketing.
+ */
+function isInternalCompanyMailbox(email: string | null | undefined, connectedAccountKey = ''): boolean {
+  if (!email) return false;
+  const lower = email.trim().toLowerCase();
+  if (!lower) return false;
+  if (connectedAccountKey && lower === connectedAccountKey.trim().toLowerCase()) return true;
+  const local = lower.split('@')[0] || '';
+  return (
+    local === 'toantrungco' ||
+    local.startsWith('toantrungco+') ||
+    local === 'truongvanlong.19052005' ||
+    local.startsWith('truongvanlong') ||
+    lower.endsWith('@toantrung.com.vn') ||
+    lower.endsWith('@bangled.vn') ||
+    lower.endsWith('@manhinhled.net.vn')
+  );
+}
 
 const AUTOMATED_SENDER_PATTERNS = [
   'noreply',
@@ -133,16 +255,24 @@ export async function getGmailLeadSyncConfig(): Promise<GmailLeadSyncConfig> {
     });
     if (!row?.value) return { ...DEFAULT_CONFIG };
     const parsed = JSON.parse(row.value) as Partial<GmailLeadSyncConfig>;
+    const rawQuery =
+      typeof parsed.query === 'string' && parsed.query.trim()
+        ? parsed.query.trim()
+        : DEFAULT_CONFIG.query;
+    const isLegacySeedConfig =
+      rawQuery === 'in:inbox newer_than:7d -category:promotions -category:social';
+    const upgradedQuery = isLegacySeedConfig ? DEFAULT_CONFIG.query : rawQuery;
     return {
-      enabled: Boolean(parsed.enabled),
-      query:
-        typeof parsed.query === 'string' && parsed.query.trim()
-          ? parsed.query.trim()
-          : DEFAULT_CONFIG.query,
+      enabled: isLegacySeedConfig ? true : parsed.enabled !== false,
+      query: upgradedQuery,
       maxMessages:
         typeof parsed.maxMessages === 'number' && parsed.maxMessages > 0
           ? Math.min(50, Math.max(5, Math.round(parsed.maxMessages)))
           : DEFAULT_CONFIG.maxMessages,
+      pollIntervalSec:
+        typeof parsed.pollIntervalSec === 'number' && parsed.pollIntervalSec > 0
+          ? Math.min(300, Math.max(15, Math.round(parsed.pollIntervalSec)))
+          : DEFAULT_CONFIG.pollIntervalSec,
       onlyLeadKeywords:
         typeof parsed.onlyLeadKeywords === 'boolean'
           ? parsed.onlyLeadKeywords
@@ -170,6 +300,10 @@ export async function saveGmailLeadSyncConfig(
       typeof patch.maxMessages === 'number' && patch.maxMessages > 0
         ? Math.min(50, Math.max(5, Math.round(patch.maxMessages)))
         : current.maxMessages,
+    pollIntervalSec:
+      typeof patch.pollIntervalSec === 'number' && patch.pollIntervalSec > 0
+        ? Math.min(300, Math.max(15, Math.round(patch.pollIntervalSec)))
+        : current.pollIntervalSec,
   };
 
   await prisma.systemSetting.upsert({
@@ -181,22 +315,104 @@ export async function saveGmailLeadSyncConfig(
   return next;
 }
 
+export async function getGmailIntakeAuditLogs(limit = 50): Promise<GmailIntakeAuditEntry[]> {
+  try {
+    const row = await prisma.systemSetting.findUnique({
+      where: { key: SETTING_KEY_GMAIL_AUDIT_LOGS },
+    });
+    if (!row?.value) return [];
+    const parsed = JSON.parse(row.value) as GmailIntakeAuditEntry[];
+    return Array.isArray(parsed) ? parsed.slice(0, limit) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function appendGmailIntakeAuditLogs(entries: GmailIntakeAuditEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+  const existing = await getGmailIntakeAuditLogs(MAX_GMAIL_AUDIT_LOG_ENTRIES);
+  const merged = [...entries.slice().reverse(), ...existing].slice(0, MAX_GMAIL_AUDIT_LOG_ENTRIES);
+  await prisma.systemSetting.upsert({
+    where: { key: SETTING_KEY_GMAIL_AUDIT_LOGS },
+    update: { value: JSON.stringify(merged) },
+    create: { key: SETTING_KEY_GMAIL_AUDIT_LOGS, value: JSON.stringify(merged) },
+  });
+}
+
+export function getGmailPushCapabilities(pollIntervalSec: number): {
+  syncMode: GmailSyncMode;
+  pushConfigured: boolean;
+  pushLimitationReason: string | null;
+} {
+  const pubsubTopic = process.env.GMAIL_PUBSUB_TOPIC?.trim();
+  const publicBaseUrl = process.env.PUBLIC_WEBHOOK_BASE_URL?.trim();
+  const isHttpsPublic = Boolean(
+    publicBaseUrl && /^https:\/\//i.test(publicBaseUrl) && !/localhost|127\.0\.0\.1/i.test(publicBaseUrl),
+  );
+  if (pubsubTopic && isHttpsPublic) {
+    return {
+      syncMode: 'GMAIL_PUSH_WITH_RECONCILIATION',
+      pushConfigured: true,
+      pushLimitationReason: null,
+    };
+  }
+  return {
+    syncMode: 'POLLING_WITH_RECONCILIATION',
+    pushConfigured: false,
+    pushLimitationReason: !pubsubTopic
+      ? `Chưa cấu hình GMAIL_PUBSUB_TOPIC để nhận Gmail Push; hệ thống đang dùng Poller backend mỗi ${pollIntervalSec}s kèm đối soát checkpoint (push vẫn cần quét đối soát dự phòng).`
+      : `Endpoint hiện tại (${publicBaseUrl || 'local'}) chưa là HTTPS công khai cho Google Pub/Sub Push; hệ thống đang dùng Poller backend mỗi ${pollIntervalSec}s.`,
+  };
+}
+
 export async function getGmailLeadSyncStatus() {
-  const [conn, config] = await Promise.all([
+  const [conn, config, recentAuditLogs] = await Promise.all([
     getGoogleConnection(),
     getGmailLeadSyncConfig(),
+    getGmailIntakeAuditLogs(30),
   ]);
+  const checkpoint = await getGmailSyncCheckpoint(conn?.connectedEmail?.trim().toLowerCase() || '');
   const scopes = conn?.scopes || [];
   const hasGmailScope = scopes.some(
     (s) => s === GMAIL_READONLY_SCOPE || s.includes('gmail.readonly') || s.includes('mail.google.com'),
   );
+  const pushCap = getGmailPushCapabilities(config.pollIntervalSec);
+
+  let serverStatus: GmailServerStatus = 'RUNNING';
+  let serverStatusReason = `Đang chạy tự động ở máy chủ (${pushCap.syncMode === 'GMAIL_PUSH_WITH_RECONCILIATION' ? 'Push + đối soát' : `Poller mỗi ${config.pollIntervalSec}s`})`;
+
+  if (!config.enabled) {
+    serverStatus = 'PAUSED';
+    serverStatusReason = 'Tự động tiếp nhận đang tạm dừng theo cấu hình máy chủ.';
+  } else if (!conn?.connected || conn.isSandboxDemo || !hasGmailScope) {
+    serverStatus = 'ERROR';
+    serverStatusReason = !conn?.connected
+      ? 'Chưa kết nối tài khoản Google / Gmail.'
+      : conn.isSandboxDemo
+        ? 'Đang ở chế độ Sandbox Demo, chưa có kết nối Gmail thật.'
+        : 'Thiếu quyền đọc Gmail (gmail.readonly).';
+  } else if (checkpoint.consecutiveFailures > 0 && checkpoint.lastError) {
+    serverStatus = 'ERROR';
+    serverStatusReason = `Lỗi đồng bộ gần nhất: ${checkpoint.lastError}`;
+  }
 
   return {
     connected: Boolean(conn?.connected),
     connectedEmail: conn?.connectedEmail ?? null,
     isSandboxDemo: Boolean(conn?.isSandboxDemo),
     hasGmailScope,
+    serverStatus,
+    serverStatusReason,
+    pollerStarted: Boolean(globalForGmailSync.__gmailAutoSyncPollerStarted),
+    lastAttemptAt: globalForGmailSync.__gmailLastAutoAttemptMs
+      ? new Date(globalForGmailSync.__gmailLastAutoAttemptMs).toISOString()
+      : null,
+    syncMode: pushCap.syncMode,
+    pushConfigured: pushCap.pushConfigured,
+    pushLimitationReason: pushCap.pushLimitationReason,
     config,
+    checkpoint,
+    recentAuditLogs,
   };
 }
 
@@ -324,138 +540,139 @@ export function decodeGmailBody(payload?: GmailMimePart | null): string {
   return (plainText || htmlText).replace(/\r\n/g, '\n').trim();
 }
 
-const FORM_FIELD_NEXT_LABELS =
-  '(?:Gửi đến từ|Nguồn form|Form|Khách hàng|Họ và tên|Họ tên|Tên khách hàng|Tên|Số điện thoại|SĐT|Điện thoại|Phone|Email|E-mail|Địa chỉ|Khu vực|Tỉnh\\/Thành|Sản phẩm|Nhu cầu|Màn hình|Ghi chú)';
-
 export function parseStructuredFormEmailBody(
   subject: string,
   bodyText: string,
   fromHeader = '',
-): {
-  isStructuredForm: boolean;
-  sourceWebsite: string | null;
-  formSource: string | null;
-  contactName: string | null;
-  phone: string | null;
-  isPhoneUnstandardized: boolean;
-  email: string | null;
-  address: string | null;
-  areaType: 'tphcm' | 'other_province' | null;
-  province: string | null;
-  productNote: string | null;
-  note: string | null;
-} {
-  const normalizedBody = (bodyText || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/--+\s*Thông báo biểu mẫu[\s\S]*$/i, '')
-    .replace(/--+\s*This is a notification that a contact form[\s\S]*$/i, '')
-    .trim();
+): ParsedStructuredFormEmail {
+  return parseStructuredFormEmailBodyCore(subject, bodyText, fromHeader, {
+    normalizeVietnamPhone,
+    findProvinceEntry,
+    inferAreaTypeFromProvince,
+  });
+}
 
-  const extractField = (labels: string[]): string | null => {
-    const labelGroup = labels.join('|');
-    const regex = new RegExp(
-      `(?:^|\\n|\\s+-\\s*|\\s+)(?:${labelGroup})\\s*:\\s*([^\\n]+?)(?=(?:\\s+-\\s*|\\s+)${FORM_FIELD_NEXT_LABELS}\\s*:|\\n|$)`,
-      'i',
-    );
-    const match = normalizedBody.match(regex);
-    const val = match?.[1]?.trim().replace(/^[-–—\s]+|[-–—\s]+$/g, '');
-    return val || null;
-  };
+const PROMO_OR_SYSTEM_SUBJECT_PATTERNS = [
+  'khuyến mãi',
+  'khuyen mai',
+  'giảm giá',
+  'giam gia',
+  'ưu đãi',
+  'uu dai',
+  'voucher',
+  'newsletter',
+  'bản tin',
+  'ban tin',
+  'unsubscribe',
+  'hủy đăng ký',
+  'huy dang ky',
+  'mã otp',
+  'ma otp',
+  'verification code',
+  'xác nhận tài khoản',
+  'xac nhan tai khoan',
+  'hóa đơn điện tử',
+  'hoa don dien tu',
+  'thông báo tuyển dụng',
+  'ứng tuyển',
+  'ung tuyen',
+  'delivery status notification',
+];
 
-  const formSource = extractField(['Gửi đến từ', 'Nguồn form', 'Form']);
-  const contactName = extractField(['Khách hàng', 'Họ và tên', 'Họ tên', 'Tên khách hàng', 'Tên']);
-  const rawPhone = extractField(['Số điện thoại', 'SĐT', 'Điện thoại', 'Phone']);
-  const rawEmail = extractField(['Email', 'E-mail']);
-  const address = extractField(['Địa chỉ', 'Khu vực', 'Tỉnh/Thành']);
-  const productNote = extractField(['Sản phẩm', 'Nhu cầu', 'Màn hình']);
-  const note = extractField(['Ghi chú']);
-
-  const phoneExtract = rawPhone
-    ? normalizeVietnamPhone(rawPhone)
-    : { normalizedPhone: '', isUnstandardized: true };
-  const validPhone =
-    phoneExtract.normalizedPhone && phoneExtract.normalizedPhone.replace(/\D/g, '').length >= 8
-      ? phoneExtract.normalizedPhone
-      : null;
-
-  const emailMatch = rawEmail?.match(/([^\s<>,"']+@[^\s<>,"']+)/);
-  const email = emailMatch ? emailMatch[1].toLowerCase() : null;
-
-  let areaType: 'tphcm' | 'other_province' | null = null;
-  let province: string | null = null;
-  if (address) {
-    const addrLower = address.toLowerCase();
+export function stripSignatureAndPromoFooter(bodyText: string): string {
+  if (!bodyText) return '';
+  const lines = bodyText.replace(/\r\n/g, '\n').split('\n');
+  const kept: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
     if (
-      addrLower === 'hcm' ||
-      addrLower.includes('tp.hcm') ||
-      addrLower.includes('tp hcm') ||
-      addrLower.includes('hồ chí minh') ||
-      addrLower.includes('ho chi minh') ||
-      addrLower.includes('sài gòn')
+      /^--\s*$/.test(trimmed) ||
+      /^_{3,}$/.test(trimmed) ||
+      /^-{4,}$/.test(trimmed) ||
+      /^(?:trân trọng|best regards|kind regards|regards|thân mến|chân thành cảm ơn)[,!\s]*$/i.test(trimmed) ||
+      /^(?:hotline|tổng đài|cskh|văn phòng|trụ sở|unsubscribe|hủy đăng ký|bản tin quảng cáo)\s*:/i.test(trimmed) ||
+      /^this is a notification that a contact form was submitted/i.test(trimmed) ||
+      /^thông báo biểu mẫu liên hệ/i.test(trimmed)
     ) {
-      areaType = 'tphcm';
-      province = 'TP. Hồ Chí Minh';
-    } else {
-      areaType = 'other_province';
-      province = address.slice(0, 80);
+      break;
     }
+    kept.push(line);
   }
-
-  const originHint = `${fromHeader}\n${subject}\n${bodyText}`.toLowerCase();
-  let sourceWebsite: string | null = null;
-  if (originHint.includes('bangled')) {
-    sourceWebsite = 'bangled.vn';
-  } else if (originHint.includes('manhinhled.net.vn')) {
-    sourceWebsite = 'manhinhled.net.vn';
-  } else if (originHint.includes('toantrung')) {
-    sourceWebsite = 'toantrung.com.vn';
-  }
-
-  const isStructuredForm = Boolean(
-    formSource ||
-      contactName ||
-      productNote ||
-      subject.toLowerCase().includes('form báo giá'),
-  );
-
-  return {
-    isStructuredForm,
-    sourceWebsite,
-    formSource,
-    contactName,
-    phone: validPhone,
-    isPhoneUnstandardized: validPhone ? phoneExtract.isUnstandardized : true,
-    email,
-    address,
-    areaType,
-    province,
-    productNote,
-    note,
-  };
+  return kept.join('\n').trim();
 }
 
 export function isLikelyLeadEmail(params: {
   fromEmail: string;
   subject: string;
   bodyText: string;
-  hasPhone: boolean;
+  hasPhoneInMainBody: boolean;
   onlyLeadKeywords: boolean;
-}): boolean {
+}): {
+  isLead: boolean;
+  hasDemandKeyword: boolean;
+  reasonCode: string;
+  reasonDetail: string;
+} {
   const fromLower = params.fromEmail.toLowerCase();
   if (AUTOMATED_SENDER_PATTERNS.some((pat) => fromLower.includes(pat))) {
-    return false;
+    return {
+      isLead: false,
+      hasDemandKeyword: false,
+      reasonCode: 'AUTOMATED_SENDER',
+      reasonDetail: `Bỏ qua thư tự động/hệ thống từ ${params.fromEmail}.`,
+    };
   }
+
+  const mainBody = stripSignatureAndPromoFooter(params.bodyText);
+  const haystack = `${params.subject}\n${mainBody}`.toLowerCase();
+
+  if (PROMO_OR_SYSTEM_SUBJECT_PATTERNS.some((pat) => haystack.includes(pat))) {
+    return {
+      isLead: false,
+      hasDemandKeyword: false,
+      reasonCode: 'PROMO_OR_SYSTEM_MAIL',
+      reasonDetail: 'Bỏ qua thư quảng cáo, bản tin, OTP hoặc thông báo hệ thống.',
+    };
+  }
+
+  const hasDemandKeyword = LEAD_KEYWORDS.some((kw) => haystack.includes(kw));
 
   if (!params.onlyLeadKeywords) {
-    return true;
+    return {
+      isLead: true,
+      hasDemandKeyword,
+      reasonCode: 'KEYWORD_FILTER_DISABLED',
+      reasonDetail: 'Tiếp nhận trực tiếp vì đang tắt bộ lọc từ khóa.',
+    };
   }
 
-  if (params.hasPhone) {
-    return true;
+  // U01: Không coi mọi thư có SĐT là Lead; phải có nội dung nhu cầu rõ ràng ngoài chữ ký quảng cáo.
+  if (hasDemandKeyword && params.hasPhoneInMainBody) {
+    return {
+      isLead: true,
+      hasDemandKeyword: true,
+      reasonCode: 'DIRECT_INQUIRY_WITH_PHONE_AND_DEMAND',
+      reasonDetail: 'Khách hỏi trực tiếp có SĐT trong nội dung chính và từ khóa nhu cầu sản phẩm/báo giá.',
+    };
   }
 
-  const haystack = `${params.subject}\n${params.bodyText}`.toLowerCase();
-  return LEAD_KEYWORDS.some((kw) => haystack.includes(kw));
+  if (hasDemandKeyword) {
+    return {
+      isLead: true,
+      hasDemandKeyword: true,
+      reasonCode: 'DIRECT_INQUIRY_DEMAND_ONLY',
+      reasonDetail: 'Khách hỏi trực tiếp có từ khóa nhu cầu nhưng chưa có SĐT trong nội dung (cần kiểm tra).',
+    };
+  }
+
+  return {
+    isLead: false,
+    hasDemandKeyword: false,
+    reasonCode: params.hasPhoneInMainBody ? 'PHONE_WITHOUT_DEMAND' : 'NO_DEMAND_OR_FORM',
+    reasonDetail: params.hasPhoneInMainBody
+      ? 'Thư chỉ có SĐT nhưng không có cấu trúc form hoặc nội dung nhu cầu LED/báo giá.'
+      : 'Thư không chứa cấu trúc form và không có từ khóa nhu cầu sản phẩm/báo giá.',
+  };
 }
 
 function getHeaderValue(
@@ -470,50 +687,100 @@ function getHeaderValue(
 const globalForGmailSync = globalThis as typeof globalThis & {
   __gmailSyncInFlight?: Promise<GmailSyncRunResult> | null;
   __gmailAutoSyncPollerStarted?: boolean;
+  __gmailLastAutoAttemptMs?: number;
 };
+
+async function runQuietBackgroundGmailPoll(forceIntervalCheck = false): Promise<void> {
+  try {
+    const [conn, cfg] = await Promise.all([
+      getGoogleConnection(),
+      getGmailLeadSyncConfig(),
+    ]);
+    if (forceIntervalCheck) {
+      const lastAttempt = globalForGmailSync.__gmailLastAutoAttemptMs || 0;
+      if (Date.now() - lastAttempt < cfg.pollIntervalSec * 1000) {
+        return;
+      }
+    }
+    globalForGmailSync.__gmailLastAutoAttemptMs = Date.now();
+    if (!cfg.enabled || !conn?.connected || conn.isSandboxDemo) return;
+    const hasGmailScope = (conn.scopes || []).some(
+      (s) =>
+        s === GMAIL_READONLY_SCOPE ||
+        s.includes('gmail.readonly') ||
+        s.includes('mail.google.com'),
+    );
+    if (!hasGmailScope) return;
+    await syncLeadsFromGmail();
+  } catch {
+    // Background poll errors should never crash the server process
+  }
+}
 
 export function ensureGmailAutoSyncPollerStarted(): void {
   if (globalForGmailSync.__gmailAutoSyncPollerStarted) return;
   globalForGmailSync.__gmailAutoSyncPollerStarted = true;
 
-  const timer = setInterval(async () => {
-    try {
-      const [conn, cfg] = await Promise.all([
-        getGoogleConnection(),
-        getGmailLeadSyncConfig(),
-      ]);
-      if (!cfg.enabled || !conn?.connected || conn.isSandboxDemo) return;
-      const hasGmailScope = (conn.scopes || []).some(
-        (s) =>
-          s === GMAIL_READONLY_SCOPE ||
-          s.includes('gmail.readonly') ||
-          s.includes('mail.google.com'),
-      );
-      if (!hasGmailScope) return;
-      await syncLeadsFromGmail();
-    } catch {
-      // Background poll errors should never crash the server process
-    }
-  }, 20_000);
+  void runQuietBackgroundGmailPoll(false);
+
+  const timer = setInterval(() => {
+    void runQuietBackgroundGmailPoll(true);
+  }, 15_000);
 
   if (typeof timer.unref === 'function') {
     timer.unref();
   }
 }
 
+/**
+ * Tự động kích hoạt quét Gmail ở hậu trường khi danh sách Lead được đọc (nếu đã qua chu kỳ pollIntervalSec).
+ * Khi `maxWaitMs <= 0`, tác vụ chạy ngầm hoàn toàn không chặn phản hồi HTTP.
+ */
+export async function triggerGmailAutoSyncOnRead(maxWaitMs = 0): Promise<void> {
+  ensureGmailAutoSyncPollerStarted();
+  const cfg = await getGmailLeadSyncConfig();
+  const now = Date.now();
+  const lastAttempt = globalForGmailSync.__gmailLastAutoAttemptMs || 0;
+  if (now - lastAttempt < cfg.pollIntervalSec * 1000) {
+    return;
+  }
+  if (maxWaitMs <= 0) {
+    void runQuietBackgroundGmailPoll(false);
+    return;
+  }
+  await Promise.race([
+    runQuietBackgroundGmailPoll(false),
+    new Promise<void>((resolve) => setTimeout(resolve, maxWaitMs)),
+  ]);
+}
+
+export interface MockGmailMessageInput {
+  id: string;
+  internalDate: string;
+  from: string;
+  subject: string;
+  bodyText: string;
+}
+
 export async function syncLeadsFromGmail(options?: {
   query?: string;
   maxMessages?: number;
   onlyLeadKeywords?: boolean;
+  mockMessages?: MockGmailMessageInput[];
+  mockConnectedEmail?: string;
 }): Promise<GmailSyncRunResult> {
-  if (globalForGmailSync.__gmailSyncInFlight) {
+  if (globalForGmailSync.__gmailSyncInFlight && !options?.mockMessages) {
     return globalForGmailSync.__gmailSyncInFlight;
   }
 
   const runPromise = runSyncLeadsFromGmailInternal(options).finally(() => {
-    globalForGmailSync.__gmailSyncInFlight = null;
+    if (!options?.mockMessages) {
+      globalForGmailSync.__gmailSyncInFlight = null;
+    }
   });
-  globalForGmailSync.__gmailSyncInFlight = runPromise;
+  if (!options?.mockMessages) {
+    globalForGmailSync.__gmailSyncInFlight = runPromise;
+  }
   return runPromise;
 }
 
@@ -521,8 +788,18 @@ async function runSyncLeadsFromGmailInternal(options?: {
   query?: string;
   maxMessages?: number;
   onlyLeadKeywords?: boolean;
+  mockMessages?: MockGmailMessageInput[];
+  mockConnectedEmail?: string;
 }): Promise<GmailSyncRunResult> {
-  const conn = await getGoogleConnection();
+  const isMockFeed = Array.isArray(options?.mockMessages);
+  const conn = isMockFeed
+    ? {
+        connected: true,
+        connectedEmail: options?.mockConnectedEmail || 'toantrungco@gmail.com',
+        isSandboxDemo: false,
+        scopes: [GMAIL_READONLY_SCOPE],
+      }
+    : await getGoogleConnection();
   const config = await getGmailLeadSyncConfig();
 
   const query = (options?.query || config.query).trim();
@@ -545,6 +822,9 @@ async function runSyncLeadsFromGmailInternal(options?: {
     };
   }
 
+  const accountKey = conn.connectedEmail.trim().toLowerCase();
+  const checkpoint = await getGmailSyncCheckpoint(accountKey);
+
   if (conn.isSandboxDemo) {
     return {
       ok: false,
@@ -561,6 +841,12 @@ async function runSyncLeadsFromGmailInternal(options?: {
     (s) => s === GMAIL_READONLY_SCOPE || s.includes('gmail.readonly') || s.includes('mail.google.com'),
   );
   if (!hasGmailScope) {
+    await saveGmailSyncCheckpoint({
+      ...checkpoint,
+      accountKey,
+      lastError: 'MISSING_GMAIL_SCOPE',
+      consecutiveFailures: checkpoint.consecutiveFailures + 1,
+    });
     return {
       ok: false,
       needsReauth: true,
@@ -572,8 +858,14 @@ async function runSyncLeadsFromGmailInternal(options?: {
     };
   }
 
-  const accessToken = await getValidAccessToken();
+  const accessToken = isMockFeed ? 'MOCK_GMAIL_TOKEN' : await getValidAccessToken();
   if (!accessToken) {
+    await saveGmailSyncCheckpoint({
+      ...checkpoint,
+      accountKey,
+      lastError: 'TOKEN_EXPIRED',
+      consecutiveFailures: checkpoint.consecutiveFailures + 1,
+    });
     return {
       ok: false,
       needsAuth: true,
@@ -584,40 +876,109 @@ async function runSyncLeadsFromGmailInternal(options?: {
     };
   }
 
-  const accountKey = conn.connectedEmail.trim().toLowerCase();
-  const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
-  listUrl.searchParams.set('q', query);
-  listUrl.searchParams.set('maxResults', String(maxMessages));
+  const effectiveQuery =
+    !options?.query &&
+    checkpoint.lastProcessedInternalDateMs &&
+    !/\bafter:/i.test(query)
+      ? `${query} after:${Math.max(0, Math.floor((checkpoint.lastProcessedInternalDateMs - 300_000) / 1000))}`
+      : query;
 
-  const listResp = await fetch(listUrl.toString(), {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+  let messageRefs: Array<{ id: string; threadId?: string }> = [];
+  let pagesFetched = 0;
+  const mockById = new Map<string, MockGmailMessageInput>();
 
-  if (listResp.status === 401 || listResp.status === 403) {
-    const errText = await listResp.text();
-    const isScopeErr = errText.includes('insufficientPermissions') || errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT');
-    return {
-      ok: false,
-      needsReauth: isScopeErr || listResp.status === 403,
-      needsAuth: listResp.status === 401,
-      connectedEmail: conn.connectedEmail,
-      message: isScopeErr
-        ? 'Google từ chối quyền đọc Gmail. Vui lòng bấm "Cấp quyền đọc Gmail" để cấp lại quyền gmail.readonly.'
-        : `Lỗi xác thực Gmail API (${listResp.status}): ${errText.slice(0, 180)}`,
-      summary: { scanned: 0, created: 0, deduplicated: 0, skippedNoise: 0, failed: 0, error: `HTTP_${listResp.status}` },
-      createdLeads: [],
-    };
+  if (isMockFeed) {
+    const cutoffMs = checkpoint.lastProcessedInternalDateMs
+      ? checkpoint.lastProcessedInternalDateMs - 300_000
+      : 0;
+    const filteredMocks = (options?.mockMessages || [])
+      .filter((m) => Number(m.internalDate || 0) >= cutoffMs)
+      .sort((a, b) => Number(b.internalDate || 0) - Number(a.internalDate || 0));
+    const cappedMocks = filteredMocks.slice(0, MAX_GMAIL_MESSAGES_PER_RUN);
+    pagesFetched = Math.max(1, Math.ceil(cappedMocks.length / Math.max(1, maxMessages)));
+    for (const m of cappedMocks) {
+      mockById.set(m.id, m);
+    }
+    // Process oldest-to-newest so checkpoint advances chronologically without skipping burst emails
+    messageRefs = cappedMocks
+      .slice()
+      .reverse()
+      .map((m) => ({ id: m.id }));
+  } else {
+    let pageToken: string | undefined;
+    const collectedRefs: Array<{ id: string; threadId?: string }> = [];
+
+    for (let page = 0; page < MAX_GMAIL_PAGES_PER_RUN; page += 1) {
+      const listUrl = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
+      listUrl.searchParams.set('q', effectiveQuery);
+      listUrl.searchParams.set('maxResults', String(maxMessages));
+      if (pageToken) {
+        listUrl.searchParams.set('pageToken', pageToken);
+      }
+
+      const listResp = await fetch(listUrl.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      if (listResp.status === 401 || listResp.status === 403) {
+        const errText = await listResp.text();
+        const isScopeErr = errText.includes('insufficientPermissions') || errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT');
+        await saveGmailSyncCheckpoint({
+          ...checkpoint,
+          accountKey,
+          lastError: `HTTP_${listResp.status}`,
+          consecutiveFailures: checkpoint.consecutiveFailures + 1,
+        });
+        return {
+          ok: false,
+          needsReauth: isScopeErr || listResp.status === 403,
+          needsAuth: listResp.status === 401,
+          connectedEmail: conn.connectedEmail,
+          message: isScopeErr
+            ? 'Google từ chối quyền đọc Gmail. Vui lòng bấm "Cấp quyền đọc Gmail" để cấp lại quyền gmail.readonly.'
+            : `Lỗi xác thực Gmail API (${listResp.status}): ${errText.slice(0, 180)}`,
+          summary: { scanned: 0, created: 0, deduplicated: 0, skippedNoise: 0, failed: 0, error: `HTTP_${listResp.status}` },
+          createdLeads: [],
+        };
+      }
+
+      if (!listResp.ok) {
+        const errText = await listResp.text();
+        await saveGmailSyncCheckpoint({
+          ...checkpoint,
+          accountKey,
+          lastError: `HTTP_${listResp.status}`,
+          consecutiveFailures: checkpoint.consecutiveFailures + 1,
+        });
+        throw new Error(`Gmail API trả lỗi ${listResp.status}: ${errText.slice(0, 200)}`);
+      }
+
+      pagesFetched += 1;
+      const listJson = (await listResp.json()) as {
+        messages?: Array<{ id: string; threadId?: string }>;
+        nextPageToken?: string;
+      };
+      if (Array.isArray(listJson.messages) && listJson.messages.length > 0) {
+        collectedRefs.push(...listJson.messages);
+      }
+      if (!listJson.nextPageToken || collectedRefs.length >= MAX_GMAIL_MESSAGES_PER_RUN) {
+        break;
+      }
+      pageToken = listJson.nextPageToken;
+    }
+
+    // Gmail lists newest first; process oldest-to-newest so checkpoint advances safely
+    messageRefs = collectedRefs.slice(0, MAX_GMAIL_MESSAGES_PER_RUN).reverse();
   }
 
-  if (!listResp.ok) {
-    const errText = await listResp.text();
-    throw new Error(`Gmail API trả lỗi ${listResp.status}: ${errText.slice(0, 200)}`);
-  }
-
-  const listJson = (await listResp.json()) as {
-    messages?: Array<{ id: string; threadId?: string }>;
+  const classificationCounts: Record<GmailIntakeClassification, number> = {
+    VALID_FORM: 0,
+    DIRECT_INQUIRY: 0,
+    NEEDS_REVIEW: 0,
+    DUPLICATE: 0,
+    IRRELEVANT: 0,
+    PROCESSING_ERROR: 0,
   };
-  const messageRefs = listJson.messages || [];
 
   const summary: GmailSyncSummary = {
     scanned: messageRefs.length,
@@ -626,39 +987,60 @@ async function runSyncLeadsFromGmailInternal(options?: {
     skippedNoise: 0,
     failed: 0,
     error: null,
+    classificationCounts,
+    pagesFetched,
   };
   const createdLeads: GmailCreatedLeadPreview[] = [];
+  const auditEntries: GmailIntakeAuditEntry[] = [];
 
-  for (const ref of messageRefs) {
-    try {
-      // Pre-check idempotency key before downloading full email payload
-      const existingTracking = await prisma.marketingTracking.findUnique({
-        where: {
-          uq_tracking_source_submission: {
+  let maxInternalDateSeen = checkpoint.lastProcessedInternalDateMs || 0;
+  let lastMessageIdSeen = checkpoint.lastMessageId || messageRefs[0]?.id || null;
+
+  // Batch pre-check idempotency keys in a single query to avoid N+1 database round-trips
+  const candidateIds = messageRefs.map((r) => r.id).filter(Boolean);
+  const existingRows =
+    candidateIds.length > 0
+      ? await prisma.marketingTracking.findMany({
+          where: {
             intakeSourceProvider: 'gmail_sync',
             intakeSourceAccountKey: accountKey,
-            externalSubmissionId: ref.id,
+            externalSubmissionId: { in: candidateIds },
           },
-        },
-        select: { id: true },
-      });
+          select: {
+            externalSubmissionId: true,
+            lead: { select: { contactedAt: true, createdAt: true } },
+          },
+        })
+      : [];
+  const existingMessageIdSet = new Set(
+    existingRows.map((r) => r.externalSubmissionId).filter((v): v is string => Boolean(v)),
+  );
+  for (const row of existingRows) {
+    const dt = row.lead?.contactedAt || row.lead?.createdAt;
+    if (dt) {
+      const ms = new Date(dt).getTime();
+      if (ms > maxInternalDateSeen) {
+        maxInternalDateSeen = ms;
+        if (row.externalSubmissionId) {
+          lastMessageIdSeen = row.externalSubmissionId;
+        }
+      }
+    }
+  }
 
-      if (existingTracking) {
+  for (const ref of messageRefs) {
+    const retryInfo = checkpoint.failedMessageRetries[ref.id];
+    if (retryInfo && retryInfo.attempts >= MAX_GMAIL_MESSAGE_RETRIES) {
+      summary.failed += 1;
+      continue;
+    }
+    try {
+      if (existingMessageIdSet.has(ref.id)) {
         summary.deduplicated += 1;
         continue;
       }
 
-      const msgResp = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(ref.id)}?format=full`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
-      );
-
-      if (!msgResp.ok) {
-        summary.failed += 1;
-        continue;
-      }
-
-      const msgData = (await msgResp.json()) as {
+      let msgData: {
         id: string;
         snippet?: string;
         internalDate?: string;
@@ -667,6 +1049,56 @@ async function runSyncLeadsFromGmailInternal(options?: {
         };
       };
 
+      if (isMockFeed) {
+        const mockItem = mockById.get(ref.id);
+        if (!mockItem) continue;
+        msgData = {
+          id: mockItem.id,
+          snippet: mockItem.bodyText.slice(0, 180),
+          internalDate: mockItem.internalDate,
+          payload: {
+            mimeType: 'text/plain',
+            headers: [
+              { name: 'From', value: mockItem.from },
+              { name: 'Subject', value: mockItem.subject },
+            ],
+            body: {
+              data: Buffer.from(mockItem.bodyText, 'utf8').toString('base64url'),
+            },
+          },
+        };
+      } else {
+        const msgResp = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(ref.id)}?format=full`,
+          { headers: { Authorization: `Bearer ${accessToken}` } },
+        );
+
+        if (!msgResp.ok) {
+          summary.failed += 1;
+          checkpoint.failedMessageRetries[ref.id] = {
+            attempts: (retryInfo?.attempts || 0) + 1,
+            lastError: `HTTP_${msgResp.status}`,
+            updatedAt: new Date().toISOString(),
+          };
+          continue;
+        }
+
+        msgData = (await msgResp.json()) as {
+          id: string;
+          snippet?: string;
+          internalDate?: string;
+          payload?: GmailMimePart & {
+            headers?: Array<{ name?: string; value?: string }>;
+          };
+        };
+      }
+
+      const msgInternalMs = msgData.internalDate ? Number(msgData.internalDate) : 0;
+      if (msgInternalMs > maxInternalDateSeen) {
+        maxInternalDateSeen = msgInternalMs;
+        lastMessageIdSeen = ref.id;
+      }
+
       const headers = msgData.payload?.headers;
       const fromHeader = getHeaderValue(headers, 'From');
       const subject = getHeaderValue(headers, 'Subject').trim() || '(Không có tiêu đề)';
@@ -674,7 +1106,52 @@ async function runSyncLeadsFromGmailInternal(options?: {
 
       const bodyText = decodeGmailBody(msgData.payload) || msgData.snippet || '';
       const structured = parseStructuredFormEmailBody(subject, bodyText, fromHeader);
-      const fallbackPhone = extractVietnamPhoneFromText(`${subject}\n${bodyText}`);
+
+      const mainBodyForScreening = structured.isStructuredForm
+        ? bodyText
+        : stripSignatureAndPromoFooter(bodyText);
+
+      if (structured.formSubmissionId) {
+        const existingBySubmissionId = await prisma.marketingTracking.findFirst({
+          where: {
+            OR: [
+              { externalSubmissionId: structured.formSubmissionId },
+              {
+                lead: {
+                  is: {
+                    selfReportedSource: {
+                      contains: structured.formSubmissionId,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          select: { id: true, leadId: true },
+        });
+        if (existingBySubmissionId) {
+          summary.deduplicated += 1;
+          classificationCounts.DUPLICATE += 1;
+          auditEntries.push({
+            messageId: ref.id,
+            internalDateMs: msgInternalMs || null,
+            fromEmail: parsedFrom.email,
+            subject,
+            classification: 'DUPLICATE',
+            reasonCode: 'DUPLICATE_SUBMISSION_ID',
+            reasonDetail: `Trùng mã lần gửi ${structured.formSubmissionId} với Lead #${existingBySubmissionId.leadId}.`,
+            leadId: existingBySubmissionId.leadId,
+            leadCode: null,
+            sourceWebsite: structured.sourceWebsite,
+            submissionId: structured.formSubmissionId,
+            processedAt: new Date().toISOString(),
+          });
+          delete checkpoint.failedMessageRetries[ref.id];
+          continue;
+        }
+      }
+
+      const fallbackPhone = extractVietnamPhoneFromText(`${subject}\n${mainBodyForScreening}`);
       const resolvedPhone = structured.phone || fallbackPhone.normalizedPhone;
       const isPhoneUnstandardized = structured.phone
         ? structured.isPhoneUnstandardized
@@ -682,39 +1159,88 @@ async function runSyncLeadsFromGmailInternal(options?: {
 
       if (!parsedFrom.email) {
         summary.skippedNoise += 1;
+        classificationCounts.IRRELEVANT += 1;
+        auditEntries.push({
+          messageId: ref.id,
+          internalDateMs: msgInternalMs || null,
+          fromEmail: null,
+          subject,
+          classification: 'IRRELEVANT',
+          reasonCode: 'MISSING_SENDER_EMAIL',
+          reasonDetail: 'Thư không có địa chỉ email người gửi hợp lệ.',
+          leadId: null,
+          leadCode: null,
+          sourceWebsite: null,
+          submissionId: structured.formSubmissionId,
+          processedAt: new Date().toISOString(),
+        });
         continue;
       }
 
       // Skip self-sent emails ONLY if they are NOT structured form-quote notifications
       if (parsedFrom.email === accountKey && !structured.isStructuredForm && !resolvedPhone) {
         summary.skippedNoise += 1;
-        continue;
-      }
-
-      const shouldImport =
-        structured.isStructuredForm ||
-        isLikelyLeadEmail({
+        classificationCounts.IRRELEVANT += 1;
+        auditEntries.push({
+          messageId: ref.id,
+          internalDateMs: msgInternalMs || null,
           fromEmail: parsedFrom.email,
           subject,
-          bodyText,
-          hasPhone: Boolean(resolvedPhone),
-          onlyLeadKeywords,
+          classification: 'IRRELEVANT',
+          reasonCode: 'SELF_SENT_NON_FORM',
+          reasonDetail: 'Thư tự gửi từ chính hộp thư quản lý và không phải thông báo form.',
+          leadId: null,
+          leadCode: null,
+          sourceWebsite: null,
+          submissionId: structured.formSubmissionId,
+          processedAt: new Date().toISOString(),
         });
-
-      if (!shouldImport) {
-        summary.skippedNoise += 1;
         continue;
       }
 
-      // For structured form notification emails, the From header is the website mailer (e.g. toantrungco@gmail.com),
-      // NOT the customer's email/company — only use customer email/company if explicitly present in the form body.
-      const leadEmail = structured.isStructuredForm
-        ? structured.email
-        : parsedFrom.email;
-      const leadCompanyName = structured.isStructuredForm
-        ? null
-        : parsedFrom.companyHint;
-      const leadContactName = structured.contactName || parsedFrom.contactName;
+      const screening = structured.isStructuredForm
+        ? {
+            isLead: true,
+            hasDemandKeyword: true,
+            reasonCode: 'STRUCTURED_WEBSITE_FORM',
+            reasonDetail: `Biểu mẫu có cấu trúc từ ${structured.sourceWebsite || 'website chưa xác định'}.`,
+          }
+        : isLikelyLeadEmail({
+            fromEmail: parsedFrom.email,
+            subject,
+            bodyText,
+            hasPhoneInMainBody: Boolean(resolvedPhone),
+            onlyLeadKeywords,
+          });
+
+      if (!screening.isLead) {
+        summary.skippedNoise += 1;
+        classificationCounts.IRRELEVANT += 1;
+        auditEntries.push({
+          messageId: ref.id,
+          internalDateMs: msgInternalMs || null,
+          fromEmail: parsedFrom.email,
+          subject,
+          classification: 'IRRELEVANT',
+          reasonCode: screening.reasonCode,
+          reasonDetail: screening.reasonDetail,
+          leadId: null,
+          leadCode: null,
+          sourceWebsite: structured.sourceWebsite,
+          submissionId: structured.formSubmissionId,
+          processedAt: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      // Chỉ đọc thông tin khách hàng trong nội dung thư/đoạn chat;
+      // KHÔNG lấy email/tên của hộp thư nội bộ (toantrungco, truongvanlong, connected account) làm thông tin khách hàng hay nguồn.
+      const senderIsInternal = isInternalCompanyMailbox(parsedFrom.email, accountKey);
+      const leadEmail = structured.email || (structured.isStructuredForm || senderIsInternal ? null : parsedFrom.email);
+      const leadCompanyName =
+        structured.isStructuredForm || senderIsInternal ? null : parsedFrom.companyHint;
+      const leadContactName =
+        structured.contactName || (structured.isStructuredForm || senderIsInternal ? null : parsedFrom.contactName);
       const leadProjectName = structured.productNote
         ? `${structured.productNote}${structured.formSource ? ` (${structured.formSource})` : ''}`.slice(0, 160)
         : subject.slice(0, 160);
@@ -727,15 +1253,44 @@ async function runSyncLeadsFromGmailInternal(options?: {
         projectName: leadProjectName,
       });
 
+      const needsIntakeReview =
+        !resolvedPhone ||
+        isPhoneUnstandardized ||
+        (!structured.isStructuredForm && !resolvedPhone) ||
+        dupCheck.isDuplicateAlert;
+
+      const intakeClassification: GmailIntakeClassification = needsIntakeReview
+        ? 'NEEDS_REVIEW'
+        : structured.isStructuredForm
+          ? 'VALID_FORM'
+          : 'DIRECT_INQUIRY';
+
       const assignment = await selectAutoAssignedSales(dupCheck.matchedOldLead?.assignedSalesId);
       const leadCode = await generateNextLeadCode();
+
+      const marketingSourceFromForm = structured.gclid
+        ? 'Google Ads'
+        : structured.utmSource
+          ? structured.utmMedium?.toLowerCase() === 'cpc'
+            ? 'Google Ads'
+            : structured.utmSource
+          : structured.referrerUrl
+            ? 'Website giới thiệu'
+            : 'Chưa xác định';
+      const sourceResolutionMethodFromForm = structured.gclid
+        ? 'gclid'
+        : structured.utmSource
+          ? 'utm'
+          : structured.referrerUrl
+            ? 'referrer'
+            : 'unknown';
 
       const ingested = await ingestLeadWithTrackingIdempotent(prisma, {
         intakeSourceProvider: 'gmail_sync',
         intakeSourceAccountKey: accountKey,
         externalSubmissionId: ref.id,
         leadCode,
-        contactChannel: 'email',
+        contactChannel: structured.contactChannel,
         phone: phoneForLead,
         email: leadEmail,
         contactName: leadContactName,
@@ -745,23 +1300,37 @@ async function runSyncLeadsFromGmailInternal(options?: {
         province: structured.province,
         installationAddress: structured.address,
         sourceWebsite: structured.sourceWebsite,
-        selfReportedSource:
-          structured.formSource ||
-          (structured.sourceWebsite ? `Form báo giá ${structured.sourceWebsite}` : `Gmail (${conn.connectedEmail})`),
+        landingPageUrl: structured.landingPageUrl,
+        utmSource: structured.utmSource,
+        utmMedium: structured.utmMedium,
+        utmCampaign: structured.utmCampaign,
+        gclid: structured.gclid,
+        referrerUrl: structured.referrerUrl,
+        selfReportedSource: structured.sourceWebsite
+          ? `${structured.sourceWebsite} (${structured.websiteResolutionMethod})${structured.formSubmissionId ? ` [sub:${structured.formSubmissionId}]` : ''}`
+          : structured.formSource || 'Chưa xác định website',
         assignedSalesId: assignment.assignedSalesId,
-        marketingSource:
-          structured.sourceWebsite === 'bangled.vn'
-            ? 'Website bangled.vn'
-            : structured.sourceWebsite === 'manhinhled.net.vn'
-              ? 'Website manhinhled.net.vn'
-              : structured.formSource || structured.isStructuredForm
-                ? 'Website Toàn Trung'
-                : 'Email Dự án',
-        sourceResolutionMethod: 'gmail_sync',
+        marketingSource: marketingSourceFromForm,
+        sourceResolutionMethod: sourceResolutionMethodFromForm,
       });
 
       if (ingested.deduplicated) {
         summary.deduplicated += 1;
+        classificationCounts.DUPLICATE += 1;
+        auditEntries.push({
+          messageId: ref.id,
+          internalDateMs: msgInternalMs || null,
+          fromEmail: parsedFrom.email,
+          subject,
+          classification: 'DUPLICATE',
+          reasonCode: 'DUPLICATE_MESSAGE_ID',
+          reasonDetail: `Đã tồn tại Lead #${ingested.lead.id} (${ingested.lead.leadCode}) cho Gmail messageId ${ref.id}.`,
+          leadId: ingested.lead.id,
+          leadCode: ingested.lead.leadCode,
+          sourceWebsite: structured.sourceWebsite,
+          submissionId: structured.formSubmissionId,
+          processedAt: new Date().toISOString(),
+        });
         continue;
       }
 
@@ -780,7 +1349,7 @@ async function runSyncLeadsFromGmailInternal(options?: {
             duplicateStatus: dupCheck.duplicateStatus,
             matchedOldLeadId: dupCheck.matchedOldLead?.id ?? null,
             isSuspectedPriceCheck: dupCheck.isSuspectedPriceCheck,
-            needsManagerAttention: assignment.needsManagerAttention,
+            needsManagerAttention: assignment.needsManagerAttention || needsIntakeReview,
             contactedAt: emailDate,
           },
         });
@@ -799,6 +1368,11 @@ async function runSyncLeadsFromGmailInternal(options?: {
             actorType: 'webhook',
             note: [
               `[Đồng bộ tự động từ Gmail: ${conn.connectedEmail}]`,
+              `Phân loại tiếp nhận: ${intakeClassification} (${screening.reasonCode})`,
+              `Lý do: ${screening.reasonDetail}`,
+              dupCheck.isDuplicateAlert
+                ? `Kiểm tra trùng khách: Khớp SĐT với Lead cũ #${dupCheck.matchedOldLead?.id ?? 'N/A'} (giữ nguyên trạng thái Sales, không tự loại yêu cầu mới).`
+                : '',
               `Người gửi: ${fromHeader}`,
               `Tiêu đề: ${subject}`,
               excerpt ? `Nội dung tóm tắt:\n${excerpt}` : '',
@@ -810,6 +1384,22 @@ async function runSyncLeadsFromGmailInternal(options?: {
       });
 
       summary.created += 1;
+      classificationCounts[intakeClassification] += 1;
+      auditEntries.push({
+        messageId: ref.id,
+        internalDateMs: msgInternalMs || null,
+        fromEmail: parsedFrom.email,
+        subject,
+        classification: intakeClassification,
+        reasonCode: screening.reasonCode,
+        reasonDetail: screening.reasonDetail,
+        leadId: ingested.lead.id,
+        leadCode: ingested.lead.leadCode,
+        sourceWebsite: structured.sourceWebsite,
+        submissionId: structured.formSubmissionId,
+        processedAt: new Date().toISOString(),
+      });
+      delete checkpoint.failedMessageRetries[ref.id];
       createdLeads.push({
         id: ingested.lead.id,
         leadCode: ingested.lead.leadCode,
@@ -817,30 +1407,179 @@ async function runSyncLeadsFromGmailInternal(options?: {
         email: ingested.lead.email,
         phone: ingested.lead.phone,
         projectName: ingested.lead.projectName,
+        classification: intakeClassification,
+        sourceWebsite: structured.sourceWebsite,
       });
-    } catch {
+    } catch (err) {
       summary.failed += 1;
+      classificationCounts.PROCESSING_ERROR += 1;
+      const errMsg = err instanceof Error ? err.message.slice(0, 180) : 'UNKNOWN_ERROR';
+      const prevAttempts = checkpoint.failedMessageRetries[ref.id]?.attempts || 0;
+      checkpoint.failedMessageRetries[ref.id] = {
+        attempts: prevAttempts + 1,
+        lastError: errMsg,
+        updatedAt: new Date().toISOString(),
+      };
+      auditEntries.push({
+        messageId: ref.id,
+        internalDateMs: null,
+        fromEmail: null,
+        subject: `(Lỗi xử lý thư ${ref.id})`,
+        classification: 'PROCESSING_ERROR',
+        reasonCode: 'PROCESSING_EXCEPTION',
+        reasonDetail: errMsg,
+        leadId: null,
+        leadCode: null,
+        sourceWebsite: null,
+        submissionId: null,
+        processedAt: new Date().toISOString(),
+      });
     }
   }
 
   const nowIso = new Date().toISOString();
-  await saveGmailLeadSyncConfig({
-    query,
-    maxMessages,
-    onlyLeadKeywords,
-    lastSyncAt: nowIso,
-    lastSyncSummary: summary,
-  });
+  await Promise.all([
+    saveGmailSyncCheckpoint({
+      accountKey,
+      lastProcessedInternalDateMs: maxInternalDateSeen > 0 ? maxInternalDateSeen : checkpoint.lastProcessedInternalDateMs,
+      lastMessageId: lastMessageIdSeen,
+      lastSuccessAt: summary.failed === 0 ? nowIso : checkpoint.lastSuccessAt,
+      lastError: summary.failed > 0 ? `${summary.failed} thư lỗi xử lý` : null,
+      consecutiveFailures: summary.failed > 0 ? checkpoint.consecutiveFailures + 1 : 0,
+      failedMessageRetries: checkpoint.failedMessageRetries,
+    }),
+    saveGmailLeadSyncConfig({
+      enabled: config.enabled,
+      query,
+      maxMessages,
+      pollIntervalSec: config.pollIntervalSec,
+      onlyLeadKeywords,
+      lastSyncAt: nowIso,
+      lastSyncSummary: summary,
+    }),
+    appendGmailIntakeAuditLogs(auditEntries),
+  ]);
 
   return {
     ok: true,
     connectedEmail: conn.connectedEmail,
     message:
       summary.created > 0
-        ? `Đã tạo ${summary.created} Lead mới từ Gmail (${summary.scanned} thư quét, ${summary.deduplicated} thư đã có, ${summary.skippedNoise} thư lọc bỏ).`
-        : `Đã quét ${summary.scanned} thư từ Gmail — chưa có Lead mới (${summary.deduplicated} thư đã đồng bộ trước đó, ${summary.skippedNoise} thư lọc bỏ).`,
+        ? `Đã tạo ${summary.created} Lead mới từ Gmail (${summary.scanned} thư quét qua ${pagesFetched} trang, ${summary.deduplicated} thư trùng, ${summary.skippedNoise} thư lọc bỏ).`
+        : `Đã quét ${summary.scanned} thư từ Gmail (${pagesFetched} trang) — chưa có Lead mới (${summary.deduplicated} thư trùng, ${summary.skippedNoise} thư lọc bỏ).`,
     summary,
     createdLeads,
+    auditEntries,
   };
 }
 
+
+export interface LegacyGmailWebsiteReconcileItem {
+  leadId: number;
+  leadCode: string;
+  previousSourceWebsite: string | null;
+  resolvedSourceWebsite: string | null;
+  method: string;
+  action: 'updated_to_website' | 'cleared_gmail_domain' | 'kept_unresolved';
+}
+
+/**
+ * U02: Rà lại các Lead cũ đang mang nguồn Gmail; chỉ cập nhật website khi có căn cứ rõ ràng
+ * trong nội dung/tiêu đề email lưu tại LeadActivity, hoặc xóa nếu đang gán nhầm domain Gmail.
+ * Ghi lịch sử thay đổi vào LeadActivity khi `dryRun = false`.
+ */
+export async function reconcileLegacyGmailSourceWebsites(dryRun = true): Promise<{
+  dryRun: boolean;
+  inspectedCount: number;
+  updatedCount: number;
+  items: LegacyGmailWebsiteReconcileItem[];
+}> {
+  const leads = await prisma.lead.findMany({
+    where: {
+      OR: [
+        { sourceWebsite: { contains: 'gmail' } },
+        { tracking: { is: { intakeSourceProvider: 'gmail_sync' } } },
+      ],
+    },
+    include: {
+      tracking: true,
+      activities: {
+        orderBy: { id: 'asc' },
+        take: 5,
+      },
+    },
+  });
+
+  const items: LegacyGmailWebsiteReconcileItem[] = [];
+  let updatedCount = 0;
+
+  for (const lead of leads) {
+    const currentWebsite = lead.sourceWebsite || null;
+    const isInvalidGmailWebsite = Boolean(currentWebsite && /gmail\.com|googlemail\.com/i.test(currentWebsite));
+
+    const gmailActivity = lead.activities.find((a) =>
+      (a.note || '').includes('[Đồng bộ tự động từ Gmail'),
+    );
+    const noteText = gmailActivity?.note || '';
+    const senderMatch = noteText.match(/^Người gửi:\s*(.+)$/m);
+    const subjectMatch = noteText.match(/^Tiêu đề:\s*(.+)$/m);
+    const bodyMatch = noteText.match(/Nội dung tóm tắt:\n([\s\S]+)$/);
+
+    const fromHeader = senderMatch?.[1]?.trim() || '';
+    const subject = subjectMatch?.[1]?.trim() || lead.projectName || '';
+    const bodyText = bodyMatch?.[1]?.trim() || noteText;
+
+    const parsed = parseStructuredFormEmailBody(subject, bodyText, fromHeader);
+    let nextWebsite = currentWebsite;
+    let action: LegacyGmailWebsiteReconcileItem['action'] = 'kept_unresolved';
+
+    if (parsed.sourceWebsite && parsed.websiteResolutionMethod !== 'unresolved') {
+      if (currentWebsite !== parsed.sourceWebsite) {
+        nextWebsite = parsed.sourceWebsite;
+        action = 'updated_to_website';
+      }
+    } else if (isInvalidGmailWebsite) {
+      nextWebsite = null;
+      action = 'cleared_gmail_domain';
+    }
+
+    if (action !== 'kept_unresolved') {
+      updatedCount += 1;
+      if (!dryRun) {
+        await prisma.$transaction(async (tx) => {
+          await tx.lead.update({
+            where: { id: lead.id },
+            data: {
+              sourceWebsite: nextWebsite,
+              contactChannel: parsed.isStructuredForm ? 'form_web' : lead.contactChannel,
+            },
+          });
+          await tx.leadActivity.create({
+            data: {
+              leadId: lead.id,
+              actionType: 'add_note',
+              actorType: 'system',
+              note: `[U02 Rà soát website nguồn] ${currentWebsite || 'Chưa xác định'} → ${nextWebsite || 'Chưa xác định website'} (Phương pháp: ${parsed.websiteResolutionMethod}).`,
+            },
+          });
+        });
+      }
+    }
+
+    items.push({
+      leadId: lead.id,
+      leadCode: lead.leadCode,
+      previousSourceWebsite: currentWebsite,
+      resolvedSourceWebsite: nextWebsite,
+      method: parsed.websiteResolutionMethod,
+      action,
+    });
+  }
+
+  return {
+    dryRun,
+    inspectedCount: leads.length,
+    updatedCount,
+    items,
+  };
+}

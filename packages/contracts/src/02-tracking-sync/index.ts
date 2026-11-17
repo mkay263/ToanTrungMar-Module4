@@ -120,11 +120,33 @@ export interface WebhookIntakeErrorItemDto {
   replayedAt: string | null;
 }
 
+export interface TrackingSourceStatusItemDto {
+  sourceKey: string;
+  sourceName: string;
+  connectionStatus: string;
+  backendSchedule: string;
+  sourceLatency: string;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  dataRangeCovered: string;
+  quotaOrLimitNote: string;
+  isUsingCachedData: boolean;
+}
+
 export interface TrackingDashboardDto {
   periodDays: number;
+  dateRange?: {
+    startDateStr: string;
+    endDateStr: string;
+    totalCalendarDays: number;
+    isTodayIncluded: boolean;
+    timezone: string;
+  };
   isSmallSample: boolean;
   smallSampleNote: string | null;
   todayPreliminaryNotice: string;
+  sourceStatuses?: TrackingSourceStatusItemDto[];
+  hostingLimitationNote?: string;
   liveIntegrationMode: 'FIXTURE_SIMULATION' | 'LIVE_CONFIGURED';
   lastSyncedAt: string | null;
   totals: {
@@ -147,19 +169,53 @@ export interface TrackingDashboardDto {
   webhookErrors: WebhookIntakeErrorItemDto[];
   sourceVsSelfReported: Array<{
     leadCode: string;
+    sourceWebsite?: string;
     contactChannel: string;
     marketingSource: string;
     selfReportedSource: string | null;
     utmGclidMismatch: boolean;
     createdAt: string;
   }>;
+  touchpointSummary?: {
+    productViews: number;
+    contactClicks: number;
+    formSubmits: number;
+    createdLeads: number;
+  };
+  leadJourneys?: Array<{
+    leadCode: string;
+    sourceWebsite: string;
+    landingPageUrl: string | null;
+    marketingSource: string;
+    campaignName: string | null;
+    pipelineStatus: string;
+    touchpointsCount: number;
+    recentActions: string[];
+    createdAt: string;
+  }>;
   googleAssetsHub?: any;
 }
+
+export const TrackingTouchpointSchema = z.object({
+  eventId: z.string().trim().min(2).max(150),
+  eventType: z.enum(['product_view', 'contact_click', 'form_submit_success']),
+  sourceWebsite: z.string().trim().min(2).max(150),
+  pageUrl: z.string().trim().max(500).optional().nullable(),
+  leadCode: z.string().trim().max(80).optional().nullable(),
+  submissionId: z.string().trim().max(150).optional().nullable(),
+  visitorId: z.string().trim().max(150).optional().nullable(),
+  occurredAt: z.string().trim().max(60).optional().nullable(),
+});
+
+export type TrackingTouchpointDto = z.infer<typeof TrackingTouchpointSchema>;
 
 export const WebhookLeadIntakeSchema = z.object({
   intakeSourceProvider: z.enum(['WEBSITE_FORM', 'GOOGLE_LEAD_FORM']).default('WEBSITE_FORM'),
   intakeSourceAccountKey: z.string().trim().min(2).max(120),
   externalSubmissionId: z.string().trim().min(2).max(150),
+  sourceWebsite: z.string().trim().max(150).optional().nullable(),
+  formId: z.string().trim().max(100).optional().nullable(),
+  submittedAt: z.string().trim().max(60).optional().nullable(),
   phone: z.string().trim().min(3).max(40),
   email: z.string().trim().max(150).optional().nullable(),
   contactName: z.string().trim().max(150).optional().nullable(),

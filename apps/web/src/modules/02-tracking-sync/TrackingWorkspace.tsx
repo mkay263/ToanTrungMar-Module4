@@ -1,690 +1,519 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Crosshair,
-  Download,
-  FolderUp,
-  Info,
-  Play,
-  Plus,
-  RefreshCw,
-  Send,
-  ShieldCheck,
-} from 'lucide-react';
-import type { TrackingDashboardDto } from '@toantrung/contracts';
-import { apiRequest } from '@/core/http/client';
-import { useSession } from '@/core/session/SessionContext';
-import { GoogleOAuthManager } from '@/components/google-oauth/GoogleOAuthManager';
-import { GoogleAssetsHubSection, type GoogleAssetsHubDto } from '@/components/google-oauth/GoogleAssetsHubSection';
-import { StandardDateRangeDropdown, type StandardDatePreset } from '@/components/common/StandardDateRangeDropdown';
-import { RealtimeLiveMotionIndicator } from '@/components/common/RealtimeLiveMotionIndicator';
+import { Download } from 'lucide-react';
+import type { M02TrafficInteractionDto } from '@toantrung/contracts';
+import { apiRequest, peekApiCache } from '@/core/http/client';
+import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
+import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
+import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
+import { StockAreaChart } from '@/components/common/StockAreaChart';
 
-interface AdapterStatusItem {
-  code: string;
-  name: string;
-  moduleScope: string;
-  mode: 'LIVE_CONNECTED' | 'SIMULATED_FALLBACK';
-  envKeysRequired: string[];
-  description: string;
-}
-
-interface WorkerHistoryItem {
-  id: number;
-  jobCode: string;
-  summary: string;
-  durationMs: number;
-  executedAt: string;
-}
-
-type ExtendedTrackingDashboardDto = TrackingDashboardDto & {
-  adapterMatrix?: AdapterStatusItem[];
-  workerHistory?: WorkerHistoryItem[];
-  googleAssetsHub?: GoogleAssetsHubDto;
-};
+type M02Tab = 'overview' | 'interactions' | 'journey';
+type TrafficMetricKey = 'sessions' | 'pageViews' | 'users';
 
 export function TrackingWorkspace() {
-  const { user } = useSession();
-  const [data, setData] = useState<ExtendedTrackingDashboardDto | null>(null);
-  const [periodDays, setPeriodDays] = useState<number>(30);
-  const [datePreset, setDatePreset] = useState<StandardDatePreset>('30D');
-  const [customStartDate, setCustomStartDate] = useState('');
-  const [customEndDate, setCustomEndDate] = useState('');
+  const { scope, hydrated, updateScope } = useDashboardScope();
+  const [activeTab, setActiveTab] = useState<M02Tab>('overview');
+  const [trafficMetric, setTrafficMetric] = useState<TrafficMetricKey>('sessions');
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<M02TrafficInteractionDto | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
-  const adsImportInputRef = useRef<HTMLInputElement | null>(null);
+  const reqIdRef = useRef(0);
 
-  // Declare Campaign state (A3)
-  const [newCampPlatform, setNewCampPlatform] = useState<'EXTERNAL' | 'GOOGLE_ADS' | 'FANPAGE'>('EXTERNAL');
-  const [newCampCode, setNewCampCode] = useState('');
-  const [newCampName, setNewCampName] = useState('');
-  const [newCampBudgetVnd, setNewCampBudgetVnd] = useState('2000000');
-
-  // Webhook simulator state (A1 & Idempotency)
-  const [whWebsite, setWhWebsite] = useState('toantrung.com.vn');
-  const [whSubmissionId, setWhSubmissionId] = useState('WEB-SUB-2026-9001');
-  const [whPhone, setWhPhone] = useState('0909345678');
-  const [whEmail, setWhEmail] = useState('khachhang@congtymau-synthetic.vn');
-  const [whCompany, setWhCompany] = useState('Công ty TNHH Điện tử Á Châu');
-  const [whGclid, setWhGclid] = useState('EAIaIQobChMI_test_gclid_9001');
-  const [whUtmSource, setWhUtmSource] = useState('google');
-  const [whUtmCampaign, setWhUtmCampaign] = useState('led_indoor_p25_q4');
-
-  // Reconciliation resolution note
-  const [reconcileNotes, setReconcileNotes] = useState<Record<number, string>>({});
-  const [realtimePolling, setRealtimePolling] = useState<boolean>(false);
-  const [lastPolledAt, setLastPolledAt] = useState<Date>(new Date());
-  const requestIdRef = useRef<number>(0);
-  const activePeriodRef = useRef<number>(periodDays);
-  activePeriodRef.current = periodDays;
-  const dataRef = useRef<ExtendedTrackingDashboardDto | null>(null);
-  dataRef.current = data;
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const isFetchingRef = useRef<boolean>(false);
-
-  const fetchDashboard = useCallback(async (forceFresh = false) => {
-    // If background polling triggers while another request is actively in-flight, avoid duplicate pileup
-    if (isFetchingRef.current && !forceFresh) {
-      return;
-    }
-
-    // Cancel any previous in-flight request on filter switch or forced refresh
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    const thisRequestId = ++requestIdRef.current;
-    const requestedPeriod = periodDays;
-    isFetchingRef.current = true;
-    setLoading(!dataRef.current);
-    setRealtimePolling(true);
-    setErrorMsg(null);
-    try {
-      const res = await apiRequest<ExtendedTrackingDashboardDto>(
-        `/api/v1/tracking?periodDays=${requestedPeriod}`,
-        { skipCache: forceFresh, signal: controller.signal },
-      );
-      // Guard against race condition: only apply if this is still the active request and active period filter
-      if (thisRequestId === requestIdRef.current && requestedPeriod === activePeriodRef.current) {
-        setData(res);
-        setLastPolledAt(new Date());
+  const loadData = useCallback(
+    async (silent = false) => {
+      if (!hydrated) return;
+      const myId = ++reqIdRef.current;
+      if (!silent && !data) setLoading(true);
+      setErrorMsg(null);
+      try {
+        const qs = new URLSearchParams({
+          view: 'spec',
+          websiteId: scope.websiteId,
+          preset: scope.preset,
+          page: String(page),
+          pageSize: '20',
+        });
+        if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+          qs.set('from', scope.from);
+          qs.set('to', scope.to);
+        }
+        const res = await apiRequest<M02TrafficInteractionDto>(`/api/v1/tracking?${qs.toString()}`, {
+          skipCache: true,
+        });
+        if (myId === reqIdRef.current) {
+          setData(res);
+        }
+      } catch (err) {
+        if (myId === reqIdRef.current) {
+          setErrorMsg(
+            err instanceof Error
+              ? err.message
+              : 'Chưa cập nhật được; đang hiển thị số liệu gần nhất.',
+          );
+        }
+      } finally {
+        if (myId === reqIdRef.current) setLoading(false);
       }
-    } catch (err: any) {
-      if (err?.name === 'AbortError' || err?.message?.includes('aborted')) {
-        // Quietly ignore aborted requests from filter changes
-        return;
-      }
-      if (thisRequestId === requestIdRef.current) {
-        setErrorMsg(err instanceof Error ? err.message : 'Không thể tải dữ liệu Tracking.');
-      }
-    } finally {
-      if (thisRequestId === requestIdRef.current) {
-        isFetchingRef.current = false;
-        setLoading(false);
-        setRealtimePolling(false);
-      }
-    }
-  }, [periodDays]);
+    },
+    [hydrated, scope.websiteId, scope.preset, scope.from, scope.to, page],
+  );
 
   useEffect(() => {
-    void fetchDashboard(true);
-    // Auto-refresh CRM data every 15s when tab is active
-    const interval = setInterval(() => {
+    void loadData(false);
+  }, [loadData]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [scope.websiteId, scope.preset, scope.from, scope.to]);
+
+  // Prefetch nhẹ sau khi trang chính đã tải xong để không nghẽn băng thông chuyển trang
+  useEffect(() => {
+    if (!data) return;
+    const timer = setTimeout(() => {
+      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
+      const queue: string[] = [];
+      for (const p of presets) {
+        if (p !== scope.preset) {
+          queue.push(`/api/v1/tracking?view=spec&websiteId=${encodeURIComponent(scope.websiteId)}&preset=${p}&page=1&pageSize=20`);
+        }
+      }
+      const siteIds = ['all', ...(data.coverage.availableWebsites || []).map((w) => w.websiteId)];
+      for (const wid of siteIds) {
+        if (wid !== scope.websiteId) {
+          queue.push(`/api/v1/tracking?view=spec&websiteId=${encodeURIComponent(wid)}&preset=${scope.preset}&page=1&pageSize=20`);
+        }
+      }
+      void (async () => {
+        for (const u of queue) {
+          if (!peekApiCache(u)) {
+            await apiRequest(u).catch(() => {});
+          }
+        }
+      })();
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [data, scope.websiteId, scope.preset]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-        void fetchDashboard(false);
+        void loadData(true);
       }
-    }, 15000);
-    return () => {
-      clearInterval(interval);
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-    };
-  }, [fetchDashboard]);
+    }, 25_000);
+    return () => clearInterval(timer);
+  }, [loadData]);
 
-  const handleTriggerSync = async (slot: 'FULL_0200' | 'LIGHT_1100' | 'MANUAL_RETRY') => {
-    if (!user) return;
-    setBusy(true);
-    setErrorMsg(null);
-    try {
-      const res = await apiRequest<{
-        recordsSynced: number;
-        gclidRetryResult: { scanned: number; resolved: number };
-        ga4Status?: 'success' | 'partial' | 'failed';
-        scStatus?: 'success' | 'partial' | 'failed';
-        ga4Error?: string | null;
-        scError?: string | null;
-      }>('/api/v1/tracking', {
-        method: 'POST',
-        csrfToken: user.csrfToken,
-        body: {
-          action: 'trigger_sync',
-          scheduleSlot: slot,
-          runGclidResolution: true,
-          runReconciliation: true,
-        },
-      });
-
-      if (res.ga4Status === 'partial' || res.scStatus === 'partial') {
-        setFeedbackMsg(
-          `⚠️ Đồng bộ một phần (${res.recordsSynced} bản ghi): ${res.ga4Error || res.scError || 'Một số báo cáo con gặp lỗi hoặc bị giới hạn.'}`,
-        );
-      } else if (res.ga4Status === 'failed' && res.scStatus === 'failed') {
-        setErrorMsg(`❌ Đồng bộ thất bại: ${res.ga4Error || res.scError || 'Không thể kết nối Google APIs.'}`);
-      } else {
-        setFeedbackMsg(
-          `✅ Đồng bộ hoàn tất (${res.recordsSynced} bản ghi metric, quét lại ${res.gclidRetryResult.scanned} gclid, giải quyết ${res.gclidRetryResult.resolved}).`,
-        );
-      }
-      await fetchDashboard(true);
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Lỗi chạy đồng bộ.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleDeclareCampaign = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user) return;
-    setBusy(true);
-    setErrorMsg(null);
-    try {
-      const budgetMicros = (BigInt(newCampBudgetVnd || '0') * 1_000_000n).toString(10);
-      const res = await apiRequest<{ campaignId: number; remappedCount: number }>(
-        '/api/v1/tracking',
-        {
-          method: 'POST',
-          csrfToken: user.csrfToken,
-          body: {
-            action: 'declare_campaign',
-            platform: newCampPlatform,
-            accountExternalId: 'TOANTRUNG_MKT',
-            campaignCode: newCampCode,
-            campaignName: newCampName,
-            dailyBudgetMicrosString: budgetMicros,
-          },
-        },
-      );
-      setNewCampCode('');
-      setNewCampName('');
-      setFeedbackMsg(
-        `Đã khai báo chiến dịch và tự động gắn lại cho ${res.remappedCount} Lead đang ở trạng thái UTM chưa khớp (UC03 A3).`,
-      );
-      await fetchDashboard();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Lỗi khai báo chiến dịch.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleSimulateWebhook = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user) return;
-    setBusy(true);
-    setErrorMsg(null);
-    try {
-      const res = await apiRequest<{
-        leadCode: string;
-        deduplicated: boolean;
-        marketingSource: string;
-      }>('/api/v1/tracking', {
-        method: 'POST',
-        csrfToken: user.csrfToken,
-        body: {
-          action: 'simulate_webhook',
-          intakeSourceProvider: 'WEBSITE_FORM',
-          intakeSourceAccountKey: whWebsite,
-          externalSubmissionId: whSubmissionId,
-          phone: whPhone,
-          email: whEmail,
-          companyName: whCompany,
-          tracking: {
-            gclid: whGclid || null,
-            utmSource: whUtmSource || null,
-            utmCampaign: whUtmCampaign || null,
-            landingPageUrl: `https://${whWebsite}/lien-he-bao-gia`,
-            deviceType: 'desktop',
-          },
-        },
-      });
-      setFeedbackMsg(
-        res.deduplicated
-          ? `Chống lặp Idempotency hoạt động: Mã gửi form "${whSubmissionId}" từ "${whWebsite}" đã tồn tại (${res.leadCode}), không tạo bản ghi Lead trùng.`
-          : `Đã tiếp nhận Lead mới ${res.leadCode} từ Webhook (${whWebsite}) · Nguồn: ${res.marketingSource}.`,
-      );
-      await fetchDashboard();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Lỗi gửi Webhook.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleResolveReconciliation = async (reconciliationId: number) => {
-    if (!user) return;
-    const note = (reconcileNotes[reconciliationId] || '').trim();
-    if (note.length < 5) {
-      setErrorMsg('Vui lòng nhập ghi chú nguyên nhân / xử lý chênh lệch đối soát (tối thiểu 5 ký tự).');
-      return;
-    }
-    setBusy(true);
-    setErrorMsg(null);
-    try {
-      await apiRequest('/api/v1/tracking', {
-        method: 'POST',
-        csrfToken: user.csrfToken,
-        body: {
-          action: 'resolve_reconciliation',
-          reconciliationId,
-          resolutionNote: note,
-        },
-      });
-      setFeedbackMsg('Đã xác nhận xử lý cảnh báo đối soát Google Lead Form (UC03 Luồng D).');
-      await fetchDashboard();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Lỗi cập nhật đối soát.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleRunWorkerJob = async (
-    jobCode:
-      | 'D3_SYNC_FULL'
-      | 'GCLID_HOURLY_RETRY'
-      | 'GOOGLE_LEAD_RECONCILE'
-      | 'SEO_SCHEDULED_PUBLISH'
-      | 'OVERDUE_QUOTE_REMINDER'
-      | 'ALL_JOBS',
-  ) => {
-    if (!user) return;
-    setBusy(true);
-    setErrorMsg(null);
-    try {
-      const res = await apiRequest<{
-        executionId: string;
-        jobCode: string;
-        attempts: number;
-        results: Array<{ jobCode: string; summary: string; durationMs: number }>;
-      }>(`/api/v1/workers/${jobCode}/run`, {
-        method: 'POST',
-        csrfToken: user.csrfToken,
-        body: {},
-      });
-      const firstResult = res.results?.[0];
-      const summaryText = res.results?.map((r) => r.summary).join(' · ') || 'Hoàn tất đồng bộ';
-      setFeedbackMsg(
-        `[Mã thực thi ${res.executionId} · ${res.jobCode}] Hoàn tất (${firstResult?.durationMs ?? 0}ms, lần thử #${res.attempts}): ${summaryText}`,
-      );
-      await fetchDashboard();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Lỗi thực thi tác vụ nền.');
-    } finally {
-      setBusy(false);
-    }
-  };
+  const m = data?.metrics;
+  const trafficPoints = data?.charts.trafficSeries || [];
+  const maxTrafficVal = Math.max(
+    1,
+    ...trafficPoints.map((p) => Number(p[trafficMetric] ?? 0)),
+  );
+  const channelRows = data?.charts.channelRows || [];
+  const maxChannelVal = Math.max(
+    1,
+    ...channelRows.map((c) => Math.max(c.sessions, c.validLeadCount)),
+  );
+  const lpTable = data?.tables.landingPageRows;
+  const totalPages = lpTable ? Math.max(1, Math.ceil(lpTable.totalRows / lpTable.pageSize)) : 1;
 
   return (
-    <div className="space-y-3.5 text-sm">
-      {/* Centralized Action Toolbar — Centered with Standard Date Picker (matching Leads) */}
-      <div className="bg-white border border-slate-200/90 rounded-2xl p-3 shadow-2xs flex flex-wrap items-center justify-center gap-2.5">
-        {/* Standard Date Range Dropdown Popover (Identical to Leads Workspace) */}
-        <StandardDateRangeDropdown
-          preset={datePreset}
-          customStartDate={customStartDate}
-          customEndDate={customEndDate}
-          onChangePreset={(p) => {
-            setDatePreset(p);
-            if (p === '7D') setPeriodDays(7);
-            else if (p === '30D' || p === 'THIS_MONTH') setPeriodDays(30);
-            else if (p === '90D' || p === 'ALL') setPeriodDays(90);
-            else if (p === 'TODAY') setPeriodDays(1);
-          }}
-          onChangeCustomRange={(start, end) => {
-            setCustomStartDate(start);
-            setCustomEndDate(end);
-            if (start && end) {
-              const diffDays = Math.max(
-                1,
-                Math.round(
-                  (new Date(end).getTime() - new Date(start).getTime()) / (1000 * 3600 * 24),
-                ),
+    <div className="space-y-4 text-sm max-w-full overflow-x-hidden">
+      <WebsiteDashboardHeader
+        scope={scope}
+        availableWebsites={data?.coverage.availableWebsites || []}
+        selectedWebsiteLabel={data?.scope.websiteLabel || 'Tất cả website'}
+        freshnessMessage={errorMsg ? 'Chưa cập nhật được; đang hiển thị số liệu gần nhất.' : data?.freshness.statusMessage}
+        onChangeScope={updateScope}
+      />
+
+      {/* Page Title + Tabs + Export */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div>
+          <h2 className="font-display text-xl font-bold text-slate-900">Truy cập &amp; tương tác</h2>
+          {data?.coverage.note && (
+            <p className="text-xs text-slate-500 mt-0.5">{data.coverage.note}</p>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <div
+            role="tablist"
+            aria-label="Phân mục Truy cập và tương tác"
+            className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200 overflow-x-auto max-w-full"
+          >
+            {[
+              { id: 'overview' as const, label: 'Tổng quan' },
+              { id: 'interactions' as const, label: 'Tương tác & sản phẩm' },
+              { id: 'journey' as const, label: 'Hành trình' },
+            ].map((tab) => {
+              const selected = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-colors ${
+                    selected
+                      ? 'bg-white text-[#0B1D48] shadow-2xs border-b-2 border-[#0B1D48]'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {tab.label}
+                </button>
               );
-              setPeriodDays(diffDays);
-            }
-          }}
-          size="sm"
-        />
+            })}
+          </div>
 
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void handleTriggerSync('FULL_0200')}
-          className="h-9 px-3.5 rounded-xl bg-brand hover:bg-brand-deep text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm transition"
-        >
-          <Play className="w-3.5 h-3.5" />
-          <span>Chạy Đồng bộ + Tra lại gclid</span>
-        </button>
+          <a
+            href={`/api/v1/tracking/export?websiteId=${encodeURIComponent(scope.websiteId)}&preset=${encodeURIComponent(scope.preset)}`}
+            className="h-9 px-3 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Xuất Excel</span>
+          </a>
+        </div>
+      </div>
 
-        <input
-          ref={adsImportInputRef}
-          type="file"
-          accept=".xlsx,.csv,.tsv"
-          className="hidden"
-          onChange={(e) => {
-            const file = e.target.files?.[0];
-            if (!file || !user) return;
-            setBusy(true);
-            setErrorMsg(null);
-            void (async () => {
-              try {
-                const fd = new FormData();
-                fd.append('file', file);
-                const res = await apiRequest<{
-                  importedCampaigns: number;
-                  importedKeywords: number;
-                }>('/api/v1/ads/export', {
-                  method: 'POST',
-                  csrfToken: user.csrfToken,
-                  isFormData: true,
-                  body: fd,
-                });
-                setFeedbackMsg(
-                  `Đã nhập thành công file "${file.name}" từ Google Ads: cập nhật ${res.importedCampaigns} chiến dịch và ${res.importedKeywords} từ khóa tìm kiếm.`,
-                );
-                await fetchDashboard();
-              } catch (err) {
-                setErrorMsg(
-                  err instanceof Error
-                    ? err.message
-                    : 'Không thể nhập file báo cáo Google Ads.',
-                );
-              } finally {
-                setBusy(false);
-                if (adsImportInputRef.current) {
-                  adsImportInputRef.current.value = '';
+      {/* Realtime 30m Bar above 6 KPI Cards */}
+      <div className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+        <div className="flex items-baseline gap-3">
+          <span className="text-xs font-semibold text-slate-600">
+            Người dùng hoạt động / 30 phút gần nhất:
+          </span>
+          <strong className="font-display text-2xl font-extrabold text-[#0B1D48]">
+            <AnimatedMetricNumber value={m?.activeUsers30m} emptyText="Chưa đủ dữ liệu" />
+          </strong>
+          <span className="text-[11px] text-slate-500">Hiện tại · 30 phút gần nhất</span>
+        </div>
+
+        {(data?.realtimeMinutesSeries?.length || 0) > 0 && (
+          <div
+            className="flex items-end gap-0.5 h-8"
+            aria-label="Biểu đồ người dùng hoạt động 30 phút gần nhất"
+          >
+            {data!.realtimeMinutesSeries.map((pt) => {
+              const maxMin = Math.max(1, ...data!.realtimeMinutesSeries.map((x) => x.activeUsers));
+              const h = Math.max(3, Math.round((pt.activeUsers / maxMin) * 28));
+              return (
+                <div
+                  key={pt.minutesAgo}
+                  title={`${pt.minutesAgo} phút trước: ${pt.activeUsers}`}
+                  style={{ height: `${h}px` }}
+                  className="w-1.5 rounded-t bg-blue-600/80"
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 6 Main KPI Cards (3 cols x 2 rows on desktop) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+          <div className="text-xs font-bold text-slate-500">Người dùng</div>
+          <div className="mt-1.5 font-display text-2xl font-extrabold text-slate-900">
+            <AnimatedMetricNumber value={m?.users} />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">
+            Người dùng mới:{' '}
+            <strong>{m?.newUsers !== null && m?.newUsers !== undefined ? m.newUsers.toLocaleString('vi-VN') : 'Chưa đủ dữ liệu'}</strong>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+          <div className="text-xs font-bold text-slate-500">Phiên truy cập</div>
+          <div className="mt-1.5 font-display text-2xl font-extrabold text-slate-900">
+            <AnimatedMetricNumber value={m?.sessions} />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Tổng phiên trong kỳ chọn</div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+          <div className="text-xs font-bold text-slate-500">Lượt xem trang</div>
+          <div className="mt-1.5 font-display text-2xl font-extrabold text-slate-900">
+            <AnimatedMetricNumber value={m?.pageViews} />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Tổng lượt xem trong kỳ chọn</div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+          <div className="text-xs font-bold text-slate-500">Tỷ lệ tương tác</div>
+          <div className="mt-1.5 font-display text-2xl font-extrabold text-slate-900">
+            <AnimatedMetricNumber value={m?.engagementRatePct} format={(v) => `${v.toFixed(1)}%`} />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">
+            Phiên có tương tác:{' '}
+            <strong>
+              {m?.engagedSessions !== null && m?.engagedSessions !== undefined
+                ? m.engagedSessions.toLocaleString('vi-VN')
+                : 'Chưa đủ dữ liệu'}
+            </strong>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+          <div className="text-xs font-bold text-slate-500">Tương tác TB / người hoạt động</div>
+          <div className="mt-1.5 font-display text-2xl font-extrabold text-slate-900">
+            <AnimatedMetricNumber value={m?.averageEngagementSeconds} format={(v) => `${v.toFixed(0)} giây`} />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Tính theo kỳ báo cáo</div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+          <div className="text-xs font-bold text-slate-500">Lead hợp lệ từ form</div>
+          <div className="mt-1.5 font-display text-2xl font-extrabold text-[#0B1D48]">
+            <AnimatedMetricNumber value={m?.validFormLeadCount} />
+          </div>
+          <div className="mt-1 text-xs text-slate-500">Đã tiếp nhận và sàng lọc</div>
+        </div>
+      </div>
+
+      {/* Tab 1: Tổng quan */}
+      {activeTab === 'overview' && (
+        <div role="tabpanel" className="space-y-4">
+          {/* Two charts in 8/4 ratio */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+            {/* Left 8 cols: Lưu lượng truy cập */}
+            <div className="lg:col-span-8 bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs flex flex-col">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                <h3 className="font-bold text-slate-900">Lưu lượng truy cập</h3>
+                <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200 text-xs">
+                  {[
+                    { id: 'sessions' as const, label: 'Phiên' },
+                    { id: 'pageViews' as const, label: 'Lượt xem' },
+                    { id: 'users' as const, label: 'Người dùng' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setTrafficMetric(opt.id)}
+                      className={`px-2.5 py-1 rounded-md font-semibold ${
+                        trafficMetric === opt.id
+                          ? 'bg-white text-[#0B1D48] shadow-2xs'
+                          : 'text-slate-600'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <StockAreaChart
+                points={trafficPoints.map((pt) => ({
+                  date: pt.date,
+                  value: pt[trafficMetric],
+                  isMissingData: pt.isMissingData,
+                }))}
+                metricLabel={
+                  trafficMetric === 'sessions'
+                    ? 'phiên'
+                    : trafficMetric === 'pageViews'
+                      ? 'lượt xem'
+                      : 'người dùng'
                 }
-              }
-            })();
-          }}
-        />
-
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => adsImportInputRef.current?.click()}
-          className="h-9 px-3.5 rounded-xl border border-emerald-200 bg-emerald-50/80 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold inline-flex items-center gap-1.5 transition"
-          title="Nhập file báo cáo Chiến dịch hoặc Từ khóa tải về từ Google Ads (.xlsx / .csv)"
-        >
-          <FolderUp className="w-3.5 h-3.5 text-emerald-700" />
-          <span>Nhập file Google Ads (.xlsx / .csv)</span>
-        </button>
-
-        <a
-          href={`/api/v1/tracking/export?periodDays=${periodDays}`}
-          className="h-9 px-3.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition"
-          title="Xuất báo cáo Excel Tracking & Đồng bộ (02_Tracking_DongBo.xlsx)"
-        >
-          <Download className="w-3.5 h-3.5 text-slate-600" />
-          <span>Xuất Excel (.xlsx)</span>
-        </a>
-
-        {/* Auto-refresh CRM indicator with countdown */}
-        <RealtimeLiveMotionIndicator
-          isPolling={realtimePolling}
-          lastUpdated={data?.lastSyncedAt || lastPolledAt}
-          intervalSec={15}
-          onRefresh={() => void fetchDashboard(true)}
-          label="Làm mới hệ thống"
-          subLabel="Tự động cập nhật 15s"
-          size="md"
-        />
-      </div>
-
-      {/* Activity Ticker Banner */}
-      <div className="bg-gradient-to-r from-emerald-950 via-slate-900 to-teal-950 text-white rounded-2xl px-4 py-2.5 shadow-sm border border-emerald-500/30 flex items-center justify-between gap-3 overflow-hidden">
-        <div className="flex items-center gap-2.5 shrink-0">
-          <span className="relative flex h-2.5 w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
-          </span>
-          <span className="text-xs font-black uppercase tracking-wider text-emerald-400">
-            Hệ Thống Theo Dõi
-          </span>
-        </div>
-        <div className="flex-1 text-xs text-slate-300 font-medium truncate flex items-center gap-3">
-          <span>
-            🟢 <strong>GA4 Multi-Site:</strong> Thuộc tính website công ty Toàn Trung
-          </span>
-          <span className="text-slate-600">•</span>
-          <span>
-            🔍 <strong>Search Console:</strong> Tra cứu lượt click & hiển thị tìm kiếm thực tế
-          </span>
-          <span className="text-slate-600">•</span>
-          <span>
-            ⚡ <strong>GCLID Attribution:</strong> Tự động ánh xạ Lead với quảng cáo Google Ads
-          </span>
-        </div>
-        <div className="shrink-0 flex items-end gap-1 h-3.5" title="Tín hiệu kết nối Realtime">
-          <span className="w-1 bg-emerald-400 animate-equalizer-1 rounded-xs" />
-          <span className="w-1 bg-teal-400 animate-equalizer-2 rounded-xs" />
-          <span className="w-1 bg-emerald-500 animate-equalizer-3 rounded-xs" />
-          <span className="w-1 bg-teal-300 animate-equalizer-4 rounded-xs" />
-        </div>
-      </div>
-
-      {/* Google OAuth 2.0 Fast Connect Banner (One-Click Connect for Module 02 & All Modules) */}
-      <GoogleOAuthManager compact returnPath="/tracking" onSyncCompleted={() => void fetchDashboard()} />
-
-      {/* 4-Pillars Google Live Hub: GA4 (4 Sites), Search Console, Google Trends, Google Ads */}
-      {data?.googleAssetsHub && (
-        <GoogleAssetsHubSection
-          hub={data.googleAssetsHub}
-          periodDays={periodDays}
-          onSelectPeriod={(d) => setPeriodDays(d)}
-        />
-      )}
-
-      {/* Adapter Mode & Freshness Notice */}
-      {data && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          <div className="p-4 rounded-xl bg-brand-soft/80 border border-brand-border flex items-start gap-2.5 text-sm text-slate-700">
-            <Info className="w-4 h-4 text-brand shrink-0 mt-0.5" />
-            <div>
-              <strong>
-                Trạng thái kết nối ({data.liveIntegrationMode === 'LIVE_CONFIGURED' ? '100% Live Google OAuth 2.0' : 'Dữ liệu mô phỏng'}):
-              </strong>{' '}
-              Cập nhật lần cuối lúc{' '}
-              <strong>
-                {data.lastSyncedAt
-                  ? new Date(data.lastSyncedAt).toLocaleString('vi-VN')
-                  : 'Chưa chạy'}
-              </strong>
-              . {data.todayPreliminaryNotice}
-              {data.smallSampleNote && (
-                <span className="block mt-1 font-semibold text-amber-800">
-                  • {data.smallSampleNote}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2.5 text-sm text-amber-900">
-            <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <strong>Quy tắc bảo toàn Nguồn Marketing & Chiến dịch:</strong> Nguồn Marketing và Chiến dịch hiện được cập nhật tự động qua đối chiếu <code className="font-mono">gclid</code> và ánh xạ danh mục chiến dịch để bảo đảm tính khách quan khi tính chi phí quảng cáo.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {errorMsg && (
-        <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700 flex items-center justify-between">
-          <span>{errorMsg}</span>
-          <button type="button" onClick={() => setErrorMsg(null)} className="font-bold">
-            Đóng
-          </button>
-        </div>
-      )}
-
-      {feedbackMsg && (
-        <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-800 flex items-center justify-between">
-          <span>{feedbackMsg}</span>
-          <button type="button" onClick={() => setFeedbackMsg(null)} className="font-bold">
-            Đóng
-          </button>
-        </div>
-      )}
-
-      {loading || !data ? (
-        <div className="bg-white border border-slate-200 rounded-2xl p-10 text-center text-sm text-slate-500">
-          Đang tải số liệu Tracking & Đồng bộ...
-        </div>
-      ) : (
-        <>
-          {/* 4 KPI Cards for L1 / L2 / L3 & Tracking Quality */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card">
-              <p className="text-sm font-bold text-slate-700">Cấp L1 — Lead thô (Raw Leads)</p>
-              <p className="font-display text-3xl font-bold text-ink mt-2">
-                {data.totals.rawLeadsL1}
-              </p>
-              <p className="text-xs text-slate-500 mt-1.5">
-                Mọi Lead tiếp nhận trong kỳ (Trong đó Lead lặp: <strong>{data.totals.repeatLeads}</strong>)
-              </p>
+                accentColor="blue"
+                loading={loading}
+              />
+              <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+                <span>Kỳ: {data?.scope.startDate} → {data?.scope.endDate}</span>
+                <span>Cột xám đứt nét: ngày thiếu dữ liệu (khác với ngày xác nhận bằng 0)</span>
+              </div>
             </div>
 
-            <div className="bg-white border border-blue-200 rounded-2xl p-5 shadow-card">
-              <p className="text-sm font-bold text-brand">Cấp L2 — Lead hợp lệ (Pipeline)</p>
-              <p className="font-display text-3xl font-bold text-brand mt-2">
-                {data.totals.validLeadsL2}
-              </p>
-              <p className="text-xs text-slate-500 mt-1.5">
-                L1 trừ toàn bộ Lead có cờ Spam (kể cả đang chờ xác nhận)
-              </p>
-            </div>
-
-            <div className="bg-white border border-emerald-200 rounded-2xl p-5 shadow-card">
-              <p className="text-sm font-bold text-emerald-700">Cấp L3 — Lead hiệu quả (Tính CPL/Ads)</p>
-              <p className="font-display text-3xl font-bold text-emerald-700 mt-2">
-                {data.totals.effectiveLeadsL3}
-              </p>
-              <p className="text-xs text-slate-500 mt-1.5">
-                L1 trừ Spam tự động & Spam đã xác nhận của Trưởng bộ phận
-              </p>
-            </div>
-
-            <div className="bg-white border border-amber-200 rounded-2xl p-5 shadow-card">
-              <p className="text-sm font-bold text-amber-800">Chất lượng Tracking & Cảnh báo</p>
-              <div className="mt-2 space-y-1 text-sm text-slate-700">
-                <div>
-                  UTM lệch gclid: <strong>{data.totals.utmGclidMismatchCount}</strong>
-                </div>
-                <div>
-                  Chưa rõ chiến dịch / UTM chưa khớp:{' '}
-                  <strong>
-                    {data.totals.unknownCampaignLeads} / {data.totals.unmatchedUtmCount}
-                  </strong>
-                </div>
-                <div>
-                  Cảnh báo đối soát mở:{' '}
-                  <strong className="text-red-600">{data.totals.openReconciliationAlerts}</strong>
-                </div>
+            {/* Right 4 cols: Khách đến từ đâu? */}
+            <div className="lg:col-span-4 bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs flex flex-col">
+              <h3 className="font-bold text-slate-900 mb-3">Khách đến từ đâu?</h3>
+              <div className="h-[280px] overflow-y-auto space-y-2.5 pr-1">
+                {channelRows.length === 0 ? (
+                  <div className="h-full flex items-center justify-center text-xs text-slate-400">
+                    Chưa đủ dữ liệu
+                  </div>
+                ) : (
+                  channelRows.map((ch, idx) => {
+                    const metricVal = ch.sessions > 0 ? ch.sessions : ch.validLeadCount;
+                    const wPct = Math.max(8, Math.round((metricVal / maxChannelVal) * 100));
+                    const barColor = ch.channelLabel.includes('Tìm kiếm')
+                      ? 'bg-emerald-500'
+                      : ch.channelLabel.includes('Quảng cáo')
+                        ? 'bg-blue-500'
+                        : ch.channelLabel.includes('Mạng xã hội')
+                          ? 'bg-violet-500'
+                          : ch.channelLabel.includes('trực tiếp')
+                            ? 'bg-indigo-500'
+                            : ch.channelLabel.includes('giới thiệu')
+                              ? 'bg-amber-500'
+                              : idx % 2 === 0
+                                ? 'bg-sky-500'
+                                : 'bg-slate-400';
+                    return (
+                      <div key={ch.channelKey} className="space-y-1 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-slate-800 truncate">{ch.channelLabel}</span>
+                          <span className="text-slate-600 shrink-0">
+                            {ch.sessions > 0 ? `${ch.sessions.toLocaleString('vi-VN')} phiên · ` : ''}
+                            {ch.validLeadCount} Lead
+                          </span>
+                        </div>
+                        <div className="h-2.5 rounded-full bg-slate-100 overflow-hidden">
+                          <div style={{ width: `${wPct}%` }} className={`h-full ${barColor} rounded-full transition-all duration-300`} />
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </div>
           </div>
 
-          {/* Cảnh báo Đối soát Google Lead Form */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-5 h-5 text-amber-600" />
-                <h2 className="font-display text-base font-bold text-ink">
-                  Đối soát Lead Google Form (Cảnh báo khi chênh lệch &ge; 2 Lead)
-                </h2>
-              </div>
-              <span className="text-xs text-slate-500">So khớp CRM (cộng cả log lỗi tiếp nhận) với Google Ads</span>
+          {/* Full-width Landing Page Table (20 rows/page) */}
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-2xs overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="font-bold text-slate-900">Trang đích khách vào đầu tiên</h3>
+              <span className="text-xs text-slate-500">Tổng {lpTable?.totalRows || 0} trang</span>
             </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                    <th className="py-2.5 px-3 font-bold">Ngày đối soát</th>
-                    <th className="py-2.5 px-3 font-bold">Tài khoản</th>
-                    <th className="py-2.5 px-3 font-bold">Lead trong CRM</th>
-                    <th className="py-2.5 px-3 font-bold">Log lỗi tiếp nhận</th>
-                    <th className="py-2.5 px-3 font-bold">Google báo</th>
-                    <th className="py-2.5 px-3 font-bold">Chênh lệch</th>
-                    <th className="py-2.5 px-3 font-bold">Trạng thái / Xử lý</th>
+            <div tabIndex={0} role="region" aria-label="Bảng trang đích" className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3 font-semibold">Trang khách vào đầu tiên</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Phiên truy cập</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Phiên có tương tác</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Tỷ lệ tương tác</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Form thành công</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Lead hợp lệ</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {data.reconciliations.length === 0 ? (
+                  {(lpTable?.rows || []).length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="py-6 text-center text-xs text-slate-500">
-                        <span className="inline-flex items-center gap-1.5 text-emerald-700 font-semibold text-sm">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                          Không có cảnh báo lệch Lead — Toàn bộ Lead CRM và Google Form khớp 100%.
-                        </span>
+                      <td colSpan={6} className="py-8 text-center text-slate-400">
+                        Chưa đủ dữ liệu trang đích trong kỳ đang chọn.
                       </td>
                     </tr>
                   ) : (
-                    data.reconciliations.map((rec) => (
-                      <tr
-                        key={rec.id}
-                        className={rec.status === 'ALERT_OPEN' ? 'bg-red-50/70' : ''}
-                      >
-                        <td className="py-2.5 px-3 font-mono font-bold">{rec.reconcileDate}</td>
-                        <td className="py-2.5 px-3 font-mono">{rec.accountPropertyId}</td>
-                        <td className="py-2.5 px-3 font-bold">{rec.crmLeadCount}</td>
-                        <td className="py-2.5 px-3">{rec.errorIntakeCount}</td>
-                        <td className="py-2.5 px-3 font-bold">{rec.platformReportedCount}</td>
-                        <td className="py-2.5 px-3 font-bold text-red-600">
-                          {rec.discrepancyCount} Lead
+                    lpTable!.rows.map((row) => (
+                      <tr key={row.landingPage} className="hover:bg-slate-50/70">
+                        <td className="py-2.5 px-3 font-mono text-slate-800 max-w-[360px] truncate" title={row.landingPage}>
+                          {row.landingPage}
                         </td>
-                        <td className="py-2.5 px-3">
-                          {rec.status === 'ALERT_OPEN' ? (
-                            <div className="flex items-center gap-2">
-                              <input
-                                type="text"
-                                value={reconcileNotes[rec.id] || ''}
-                                onChange={(e) =>
-                                  setReconcileNotes((prev) => ({
-                                    ...prev,
-                                    [rec.id]: e.target.value,
-                                  }))
-                                }
-                                placeholder="Nhập ghi chú đối chiếu danh sách Google Ads..."
-                                className="h-9 px-3 rounded-lg border border-red-200 bg-white text-sm flex-1"
-                              />
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void handleResolveReconciliation(rec.id)}
-                                className="h-9 px-3.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-sm font-bold shrink-0"
-                              >
-                                Xác nhận Đã xử lý
-                              </button>
-                            </div>
-                          ) : rec.status === 'RESOLVED' ? (
-                            <span className="text-emerald-700 font-semibold">
-                              Đã xử lý ({rec.resolvedByName}): {rec.resolutionNote}
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
-                              <CheckCircle2 className="w-4 h-4" /> Khớp 100%
-                            </span>
-                          )}
+                        <td className="py-2.5 px-3 text-right font-semibold">{row.sessions.toLocaleString('vi-VN')}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">
+                          {row.engagedSessions !== null ? row.engagedSessions.toLocaleString('vi-VN') : '—'}
                         </td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">
+                          {row.engagementRatePct !== null ? `${row.engagementRatePct}%` : '—'}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">
+                          {row.successfulFormCount !== null ? row.successfulFormCount.toLocaleString('vi-VN') : '—'}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-bold text-[#0B1D48]">{row.validLeadCount}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            {totalPages > 1 && (
+              <div className="px-4 py-2.5 border-t border-slate-100 flex items-center justify-between text-xs">
+                <span>Trang {page} / {totalPages}</span>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    className="px-2.5 py-1 rounded border border-slate-200 disabled:opacity-40"
+                  >
+                    Trước
+                  </button>
+                  <button
+                    type="button"
+                    disabled={page >= totalPages}
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    className="px-2.5 py-1 rounded border border-slate-200 disabled:opacity-40"
+                  >
+                    Sau
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Tab 2: Tương tác & sản phẩm */}
+      {activeTab === 'interactions' && (
+        <div role="tabpanel" className="space-y-4">
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-2xs overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-900">Bảng tương tác chuyển đổi</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3 font-semibold">Hành động</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Số lượt</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Số người</th>
+                    <th className="py-2.5 px-3 font-semibold">Ý nghĩa</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(data?.tables.interactionRows || []).map((row) => (
+                    <tr key={row.actionKey}>
+                      <td className="py-2.5 px-3 font-semibold text-slate-800">{row.actionLabel}</td>
+                      <td className="py-2.5 px-3 text-right font-bold">
+                        {row.count !== null ? row.count.toLocaleString('vi-VN') : 'Chưa đủ dữ liệu'}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-600">
+                        {row.users !== null ? row.users.toLocaleString('vi-VN') : '—'}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600">{row.meaning}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="bg-white border border-slate-200 rounded-2xl shadow-2xs overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-900">Sản phẩm được quan tâm</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3 font-semibold">Sản phẩm</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Lượt xem</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Người xem</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Bấm gọi</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Bấm Zalo</th>
+                    <th className="py-2.5 px-3 font-semibold text-right">Lead hợp lệ</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(data?.tables.productInterestRows || []).length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-6 text-center text-slate-400">
+                        Chưa có Lead gắn sản phẩm trong kỳ đang chọn.
+                      </td>
+                    </tr>
+                  ) : (
+                    data!.tables.productInterestRows.map((p) => (
+                      <tr key={p.productId}>
+                        <td className="py-2.5 px-3 font-semibold text-slate-800">{p.productName}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">{p.pageViews ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">{p.users ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">{p.phoneClicks ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">{p.zaloClicks ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right font-bold text-[#0B1D48]">{p.validLeadCount}</td>
                       </tr>
                     ))
                   )}
@@ -693,334 +522,50 @@ export function TrackingWorkspace() {
             </div>
           </div>
 
-          {/* Bảng phân bổ theo Nguồn Marketing & Kênh tiếp nhận */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card space-y-3">
-              <h2 className="font-display text-base font-bold text-ink">
-                Phân bổ Lead theo Nguồn Marketing (Bao gồm Chưa xác định & Nhập tay)
-              </h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                      <th className="py-2.5 px-3 font-bold">Nguồn Marketing</th>
-                      <th className="py-2.5 px-3 font-bold">L1 Thô</th>
-                      <th className="py-2.5 px-3 font-bold">L3 Hiệu quả</th>
-                      <th className="py-2.5 px-3 font-bold">Lead lặp</th>
-                      <th className="py-2.5 px-3 font-bold">Tỷ lệ BG</th>
-                      <th className="py-2.5 px-3 font-bold">Tỷ lệ Chốt</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {data.bySource.map((row) => (
-                      <tr key={row.dimensionKey}>
-                        <td className="py-2.5 px-3 font-semibold text-ink">
-                          {row.dimensionLabel}
-                        </td>
-                        <td className="py-2.5 px-3 font-mono">{row.rawLeadsL1}</td>
-                        <td className="py-2.5 px-3 font-mono font-bold text-brand">
-                          {row.effectiveLeadsL3}
-                        </td>
-                        <td className="py-2.5 px-3 font-mono text-slate-500">{row.repeatLeads}</td>
-                        <td className="py-2.5 px-3 font-mono">{row.quoteRateText}</td>
-                        <td className="py-2.5 px-3 font-mono font-bold text-emerald-700">
-                          {row.winRateText}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+          {/* Thiết bị và khu vực (2 separate charts, never summed) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <h3 className="font-bold text-slate-900 mb-2">Phiên theo thiết bị</h3>
+              <p className="text-xs text-slate-500">
+                {(data?.charts.deviceRows.length || 0) === 0
+                  ? 'Chưa đủ dữ liệu phân rã theo thiết bị cho kỳ này.'
+                  : `${data!.charts.deviceRows.length} nhóm thiết bị`}
+              </p>
             </div>
-
-            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card space-y-3">
-              <h2 className="font-display text-base font-bold text-ink">
-                Đối chiếu Nguồn Marketing (Hệ thống) vs Nguồn Khách tự khai
-              </h2>
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm text-left border-collapse">
-                  <thead>
-                    <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                      <th className="py-2.5 px-3 font-bold">Mã Lead</th>
-                      <th className="py-2.5 px-3 font-bold">Kênh</th>
-                      <th className="py-2.5 px-3 font-bold">Nguồn Marketing</th>
-                      <th className="py-2.5 px-3 font-bold">Khách tự khai</th>
-                      <th className="py-2.5 px-3 font-bold">Đối chiếu Tín hiệu</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {data.sourceVsSelfReported.map((item) => (
-                      <tr key={item.leadCode}>
-                        <td className="py-2.5 px-3 font-mono font-bold text-brand">
-                          {item.leadCode}
-                        </td>
-                        <td className="py-2.5 px-3">{item.contactChannel}</td>
-                        <td className="py-2.5 px-3 font-semibold text-ink">
-                          {item.marketingSource}
-                        </td>
-                        <td className="py-2.5 px-3 text-slate-600">
-                          {item.selfReportedSource || '—'}
-                        </td>
-                        <td className="py-2.5 px-3">
-                          {item.utmGclidMismatch ? (
-                            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-xs">
-                              UTM lệch gclid
-                            </span>
-                          ) : (
-                            <span className="text-slate-400">Đồng nhất</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-2xs">
+              <h3 className="font-bold text-slate-900 mb-2">Phiên theo khu vực</h3>
+              <p className="text-xs text-slate-500">
+                {(data?.charts.geoRows.length || 0) === 0
+                  ? 'Chưa đủ dữ liệu phân rã theo khu vực cho kỳ này.'
+                  : `${data!.charts.geoRows.length} khu vực`}
+              </p>
             </div>
           </div>
+        </div>
+      )}
 
-          {/* Hiệu quả Chiến dịch Quảng cáo — chỉ dùng chi phí quảng cáo, không có doanh thu/ROAS */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card space-y-4">
-            <h2 className="font-display text-base font-bold text-ink">
-              Hiệu quả Chiến dịch Quảng cáo (CPL trên L3)
-            </h2>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm text-left border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 text-slate-600 border-b border-slate-200">
-                    <th className="py-2.5 px-3 font-bold">Mã / Tên Chiến dịch</th>
-                    <th className="py-2.5 px-3 font-bold">Nền tảng / TK</th>
-                    <th className="py-2.5 px-3 font-bold">Ngân sách ngày</th>
-                    <th className="py-2.5 px-3 font-bold">Tổng chi phí</th>
-                    <th className="py-2.5 px-3 font-bold">L1 / L3</th>
-                    <th className="py-2.5 px-3 font-bold">CPL (Chi phí/L3)</th>
-                    <th className="py-2.5 px-3 font-bold">Chi phí/Báo giá</th>
-                    <th className="py-2.5 px-3 font-bold">Chi phí/Lead chốt</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {data.campaigns.length === 0 ? (
-                    <tr>
-                      <td colSpan={8} className="py-8 text-center text-xs text-slate-500">
-                        <div className="space-y-1">
-                          <p className="font-bold text-slate-700 text-sm">Chưa có chiến dịch quảng cáo trả phí Google Ads</p>
-                          <p className="text-slate-500">Tài khoản Google của bạn hiện chưa kích hoạt chiến dịch cắn tiền (Chi phí: 0 đ). Khi doanh nghiệp bắt đầu chạy quảng cáo Google Ads, các chiến dịch, chi phí và tỷ lệ CPL sẽ tự động được ghi nhận tại đây.</p>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    data.campaigns.map((camp) => (
-                    <tr key={camp.id}>
-                      <td className="py-2.5 px-3">
-                        <div className="font-bold text-ink">{camp.campaignName}</div>
-                        <div className="font-mono text-xs text-slate-400">
-                          {camp.campaignCode}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 font-mono text-xs">
-                        {camp.platform} · {camp.accountExternalId}
-                      </td>
-                      <td className="py-2.5 px-3 font-mono">
-                        {camp.dailyBudget
-                          ? `${Number(camp.dailyBudget.formattedDecimal).toLocaleString('vi-VN')} ₫`
-                          : '—'}
-                      </td>
-                      <td className="py-2.5 px-3 font-mono font-bold text-ink">
-                        {camp.totalSpend
-                          ? `${Number(camp.totalSpend.formattedDecimal).toLocaleString('vi-VN')} ₫`
-                          : '—'}
-                      </td>
-                      <td className="py-2.5 px-3 font-mono">
-                        {camp.leadsCountL1} / <strong className="text-brand">{camp.leadsCountL3}</strong>
-                      </td>
-                      <td className="py-2.5 px-3 font-mono font-bold text-brand">
-                        {camp.cplEffective
-                          ? `${Math.round(Number(camp.cplEffective.formattedDecimal)).toLocaleString('vi-VN')} ₫`
-                          : '—'}
-                      </td>
-                      <td className="py-2.5 px-3 font-mono">
-                        {camp.costPerQuote
-                          ? `${Math.round(Number(camp.costPerQuote.formattedDecimal)).toLocaleString('vi-VN')} ₫`
-                          : '—'}
-                      </td>
-                      <td className="py-2.5 px-3 font-mono">
-                        {camp.costPerWon
-                          ? `${Math.round(Number(camp.costPerWon.formattedDecimal)).toLocaleString('vi-VN')} ₫`
-                          : '—'}
-                      </td>
-                    </tr>
-                  )))}
-                </tbody>
-              </table>
-            </div>
-
-            {/* Form khai báo chiến dịch ngoài Google Ads */}
-            <form
-              onSubmit={(e) => void handleDeclareCampaign(e)}
-              className="pt-3 border-t border-slate-100 grid grid-cols-1 md:grid-cols-5 gap-2.5 items-end"
-            >
-              <div>
-                <label className="block text-sm font-semibold text-slate-600 mb-1">
-                  Nền tảng chiến dịch
-                </label>
-                <select
-                  value={newCampPlatform}
-                  onChange={(e) =>
-                    setNewCampPlatform(e.target.value as 'EXTERNAL' | 'GOOGLE_ADS' | 'FANPAGE')
-                  }
-                  className="w-full h-9 px-2.5 rounded-xl border border-slate-200 text-sm"
-                >
-                  <option value="EXTERNAL">Chiến dịch Ngoài (Zalo/PR/Event)</option>
-                  <option value="FANPAGE">Facebook Fanpage Ads</option>
-                  <option value="GOOGLE_ADS">Google Ads</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-semibold text-slate-600 mb-1">
-                  Mã chiến dịch / UTM Slug *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newCampCode}
-                  onChange={(e) => setNewCampCode(e.target.value)}
-                  placeholder="VD: zalo_led_outdoor_t11"
-                  className="w-full h-9 px-3 rounded-xl border border-slate-200 text-sm"
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="block text-sm font-semibold text-slate-600 mb-1">
-                  Tên chiến dịch *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newCampName}
-                  onChange={(e) => setNewCampName(e.target.value)}
-                  placeholder="Tên chiến dịch truyền thông..."
-                  className="w-full h-9 px-3 rounded-xl border border-slate-200 text-sm"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={busy}
-                className="h-9 px-4 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-sm font-bold inline-flex items-center justify-center gap-1.5"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Khai báo & Map lại UTM</span>
-              </button>
-            </form>
+      {/* Tab 3: Hành trình */}
+      {activeTab === 'journey' && (
+        <div role="tabpanel" className="bg-white border border-slate-200 rounded-2xl p-5 shadow-2xs space-y-4">
+          <div>
+            <h3 className="font-bold text-slate-900">Hành trình phiên truy cập</h3>
+            {data?.tables.journeyNote && (
+              <p className="text-xs text-slate-600 mt-1">{data.tables.journeyNote}</p>
+            )}
           </div>
-
-          {/* Bảng điều khiển 5 Tác vụ Nền (Background Workers) */}
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card space-y-4">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-                <div>
-                  <h2 className="font-display font-bold text-base text-ink">
-                    Trung tâm Điều hành 5 Tác vụ Tự động (Background Workers)
-                  </h2>
-                  <p className="text-xs text-slate-500 mt-0.5">
-                    Kích hoạt trực tiếp hoặc theo dõi lịch sử thực thi của 5 tiến trình đồng bộ tự động
-                  </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {(data?.tables.journeySteps || []).map((step, idx) => (
+              <div key={step.stepKey} className="rounded-xl border border-slate-200 p-3.5 bg-slate-50/60">
+                <div className="text-[11px] font-bold text-slate-500">Bước {idx + 1}</div>
+                <div className="font-bold text-slate-900 mt-0.5">{step.label}</div>
+                <div className="mt-2 text-lg font-extrabold text-[#0B1D48]">
+                  {step.sessionCount !== null ? `${step.sessionCount.toLocaleString('vi-VN')} phiên` : 'Chưa đủ dữ liệu'}
                 </div>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void handleRunWorkerJob('ALL_JOBS')}
-                  className="h-9 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold inline-flex items-center gap-1.5 shadow-xs"
-                >
-                  <Play className="w-4 h-4" />
-                  <span>Chạy Tất Cả 5 Worker Jobs</span>
-                </button>
               </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-                {[
-                  {
-                    code: 'D3_SYNC_FULL' as const,
-                    title: '1. Đồng bộ Đa kênh & Cache Từ khóa',
-                    schedule: 'Định kỳ 02:00 / 11:00 / 17:00',
-                    desc: 'Kéo chi phí Ads, GA4, GSC và làm mới cache từ khóa SEO.',
-                  },
-                  {
-                    code: 'GCLID_HOURLY_RETRY' as const,
-                    title: '2. Tra lại mã gclid bị trễ',
-                    schedule: 'Định kỳ mỗi 60 phút',
-                    desc: 'Quét các Lead <= 7 ngày có gclid nhưng chưa rõ chiến dịch.',
-                  },
-                  {
-                    code: 'GOOGLE_LEAD_RECONCILE' as const,
-                    title: '3. Đối soát Google Lead Form (T-1)',
-                    schedule: 'Định kỳ 02:15 sáng',
-                    desc: 'So khớp số Lead trên Google Ads với số Lead vào CRM.',
-                  },
-                  {
-                    code: 'SEO_SCHEDULED_PUBLISH' as const,
-                    title: '4. Kiểm tra Lịch đăng & Tối ưu Bài SEO',
-                    schedule: 'Định kỳ mỗi 5 phút',
-                    desc: 'Cập nhật trạng thái lịch đăng bài viết SEO đã duyệt và rà soát bài cũ.',
-                  },
-                  {
-                    code: 'OVERDUE_QUOTE_REMINDER' as const,
-                    title: '5. Nhắc Báo giá Quá hạn > 7 ngày',
-                    schedule: 'Định kỳ 08:00 sáng',
-                    desc: 'Gửi thông báo nhắc NVKD chăm sóc lại các báo giá chưa phản hồi.',
-                  },
-                ].map((job) => (
-                  <div
-                    key={job.code}
-                    className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 flex flex-col justify-between gap-2"
-                  >
-                    <div>
-                      <div className="flex items-center justify-between gap-2">
-                        <strong className="text-sm text-slate-900 font-bold">{job.title}</strong>
-                        <span className="text-xs font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 shrink-0">
-                          {job.schedule}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-600 mt-1">{job.desc}</p>
-                    </div>
-                    <div className="flex justify-end pt-1">
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => void handleRunWorkerJob(job.code)}
-                        className="px-3 py-1.5 rounded-lg bg-white hover:bg-brand hover:text-white border border-slate-300 text-slate-800 font-bold text-xs transition inline-flex items-center gap-1"
-                      >
-                        <Play className="w-3.5 h-3.5" />
-                        <span>Chạy ngay</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {data.workerHistory && data.workerHistory.length > 0 && (
-                <div className="pt-2 space-y-1.5">
-                  <span className="text-sm font-bold text-slate-700 block">
-                    Nhật ký thực thi Worker gần nhất:
-                  </span>
-                  <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
-                    {data.workerHistory.map((wh) => (
-                      <div
-                        key={wh.id}
-                        className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3 text-xs"
-                      >
-                        <div className="min-w-0">
-                          <span className="font-mono font-bold text-brand mr-2">[{wh.jobCode}]</span>
-                          <span className="text-slate-700">{wh.summary}</span>
-                        </div>
-                        <span className="text-slate-400 font-mono shrink-0">
-                          {wh.durationMs}ms · {new Date(wh.executedAt).toLocaleTimeString('vi-VN')}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+            ))}
           </div>
-        </>
+        </div>
       )}
     </div>
   );
 }
-

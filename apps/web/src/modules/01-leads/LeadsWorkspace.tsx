@@ -42,14 +42,16 @@ import {
 } from 'lucide-react';
 import {
   CONTACT_CHANNEL_LABELS,
-  HCM_DISTRICTS,
   LOST_REASONS,
   PIPELINE_STATUSES,
   PIPELINE_STATUS_LABELS,
   REASSIGN_REASONS,
   SPAM_REASONS,
-  VIETNAM_PROVINCES,
+  composeLeadDistrictField,
+  formatLeadLocationLabel,
   hasBaPermission,
+  inferAreaTypeFromProvince,
+  splitLeadDistrictField,
   type ContactChannel,
   type LeadItemDto,
   type PipelineStatus,
@@ -62,8 +64,8 @@ import { useSession } from '@/core/session/SessionContext';
 import { ManualLeadModal } from './ManualLeadModal';
 import { GmailSyncModal } from './GmailSyncModal';
 import { LeadActivityTimeline } from './LeadActivityTimeline';
+import { VietnamAddressFields } from './VietnamAddressFields';
 import { StandardDateRangeDropdown, type StandardDatePreset } from '@/components/common/StandardDateRangeDropdown';
-import { RealtimeLiveMotionIndicator } from '@/components/common/RealtimeLiveMotionIndicator';
 
 const STATUS_BADGE_STYLES: Record<PipelineStatus, string> = {
   new_lead: 'bg-violet-50 text-violet-700 border-violet-200 font-semibold',
@@ -581,7 +583,7 @@ export function LeadsWorkspace() {
   >('all');
   const [quickReminderNotes, setQuickReminderNotes] = useState<Record<number, string>>({});
   const [collabNoteDraft, setCollabNoteDraft] = useState('');
-  const [dateRangePreset, setDateRangePreset] = useState<'ALL' | 'TODAY' | '7D' | '30D' | 'THIS_MONTH' | 'CUSTOM'>('ALL');
+  const [dateRangePreset, setDateRangePreset] = useState<StandardDatePreset>('ALL');
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate, setCustomEndDate] = useState('');
   const [showDateDropdown, setShowDateDropdown] = useState(false);
@@ -590,6 +592,7 @@ export function LeadsWorkspace() {
   >('MAN_HINH_LED');
   const [editProductSearch, setEditProductSearch] = useState('');
   const [b2bHorizonFilter, setB2bHorizonFilter] = useState<string>('all');
+  const [sourceWebsiteFilter, setSourceWebsiteFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [includeSpam, setIncludeSpam] = useState(true);
@@ -749,9 +752,8 @@ export function LeadsWorkspace() {
   const [createProjectName, setCreateProjectName] = useState('');
   const [createEmail, setCreateEmail] = useState('');
   const [createSelfSource, setCreateSelfSource] = useState('');
-  const [createAreaType, setCreateAreaType] = useState<'hcm' | 'other_province'>('hcm');
-  const [createDistrict, setCreateDistrict] = useState<string>(HCM_DISTRICTS[0]);
-  const [createProvince, setCreateProvince] = useState<string>(VIETNAM_PROVINCES[0]);
+  const [createDistrict, setCreateDistrict] = useState<string>('');
+  const [createProvince, setCreateProvince] = useState<string>('TP. Hồ Chí Minh');
   const [createAddress, setCreateAddress] = useState('');
   const [createProductIds, setCreateProductIds] = useState<number[]>([1]);
   const [createCustomProductNote, setCreateCustomProductNote] = useState('');
@@ -768,9 +770,9 @@ export function LeadsWorkspace() {
   const [editProjectName, setEditProjectName] = useState('');
   const [editEmail, setEditEmail] = useState('');
   const [editSelfSource, setEditSelfSource] = useState('');
-  const [editAreaType, setEditAreaType] = useState<'hcm' | 'other_province'>('hcm');
-  const [editDistrict, setEditDistrict] = useState<string>(HCM_DISTRICTS[0]);
-  const [editProvince, setEditProvince] = useState<string>(VIETNAM_PROVINCES[0]);
+  const [editDistrict, setEditDistrict] = useState<string>('');
+  const [editWard, setEditWard] = useState<string>('');
+  const [editProvince, setEditProvince] = useState<string>('TP. Hồ Chí Minh');
   const [editAddress, setEditAddress] = useState('');
   const [editProductIds, setEditProductIds] = useState<number[]>([]);
   const [editCustomServiceItems, setEditCustomServiceItems] = useState<string[]>([]);
@@ -858,7 +860,15 @@ export function LeadsWorkspace() {
         isReceivingLeads?: boolean;
       }>(url, { signal: controller.signal, skipCache: forceFresh });
 
-      setLeads(data.leads);
+      setLeads((prev) => {
+        if (forceFresh && prev.length > 0 && data.leads.length > prev.length) {
+          const addedCount = data.leads.length - prev.length;
+          setFeedbackMsg(
+            `⚡ Hệ thống vừa tự động quét và tiếp nhận ${addedCount} Lead mới từ Form Website / Gmail!`,
+          );
+        }
+        return data.leads;
+      });
       setTotalCount(data.totalCount ?? data.leads.length);
       setProducts(data.products);
       setSalesOptions(data.salesOptions);
@@ -876,7 +886,7 @@ export function LeadsWorkspace() {
         setLoading(false);
       }
     }
-  }, [debouncedSearchQuery, includeSpam, leads.length]);
+  }, [includeSpam]);
 
   useEffect(() => {
     let active = true;
@@ -901,15 +911,32 @@ export function LeadsWorkspace() {
   }, [showGmailSyncModal]);
 
   useEffect(() => {
-    void fetchLeads();
-    // Continuous Realtime Live Auto-Polling (every 15s) with live motion updates
+    let lastFetchMs = Date.now();
+    void fetchLeads(true);
+    // Continuous Realtime Live Auto-Polling (every 25s when visible) + throttled sync on tab focus
     const interval = setInterval(() => {
-      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        lastFetchMs = Date.now();
         void fetchLeads(true);
       }
-    }, 15000);
+    }, 25000);
+
+    const handleFocusOrVisible = () => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        const now = Date.now();
+        if (now - lastFetchMs >= 8000) {
+          lastFetchMs = now;
+          void fetchLeads(true);
+        }
+      }
+    };
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
+
     return () => {
       clearInterval(interval);
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
       abortControllerRef.current?.abort();
     };
   }, [fetchLeads]);
@@ -1120,6 +1147,18 @@ export function LeadsWorkspace() {
           d1.getDate() === d2.getDate()
         );
       }
+      if (dateRangePreset === 'YESTERDAY') {
+        const d1 = new Date(l.contactedAt);
+        const y = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        return (
+          d1.getFullYear() === y.getFullYear() &&
+          d1.getMonth() === y.getMonth() &&
+          d1.getDate() === y.getDate()
+        );
+      }
+      if (dateRangePreset === '90D') {
+        return now - t <= 90 * 24 * 60 * 60 * 1000;
+      }
       if (dateRangePreset === '7D') {
         return now - t <= 7 * 24 * 60 * 60 * 1000;
       }
@@ -1263,6 +1302,15 @@ export function LeadsWorkspace() {
         (l) => l.pipelineStatus === 'new_lead' && !l.receivedConfirmedAt && l.spamStatus === 'NONE',
       );
     }
+    if (sourceWebsiteFilter !== 'all') {
+      if (sourceWebsiteFilter === '__unresolved__') {
+        list = list.filter((l) => !l.sourceWebsite || !l.sourceWebsite.trim());
+      } else {
+        list = list.filter(
+          (l) => (l.sourceWebsite || '').trim().toLowerCase() === sourceWebsiteFilter.toLowerCase(),
+        );
+      }
+    }
     if (b2bHorizonFilter !== 'all') {
       list = list.filter((l) => {
         if (l.spamStatus !== 'NONE') return false;
@@ -1319,6 +1367,7 @@ export function LeadsWorkspace() {
     statusFilter,
     overdueOnly,
     unreceivedOnly,
+    sourceWebsiteFilter,
     b2bHorizonFilter,
     searchQuery,
   ]);
@@ -1398,13 +1447,14 @@ export function LeadsWorkspace() {
   const exportHref = useMemo(() => {
     const qs = new URLSearchParams();
     if (statusFilter !== 'all') qs.set('status', statusFilter);
+    if (sourceWebsiteFilter !== 'all') qs.set('sourceWebsite', sourceWebsiteFilter);
     if (searchQuery.trim()) qs.set('search', searchQuery.trim());
     if (specialAlertFilter !== 'none') qs.set('includeSpam', 'true');
     if (overdueOnly) qs.set('overdueOnly', 'true');
     if (unreceivedOnly) qs.set('unreceived', '1');
     const queryStr = qs.toString();
     return queryStr ? `/api/v1/leads/export?${queryStr}` : '/api/v1/leads/export';
-  }, [statusFilter, searchQuery, specialAlertFilter, overdueOnly, unreceivedOnly]);
+  }, [statusFilter, sourceWebsiteFilter, searchQuery, specialAlertFilter, overdueOnly, unreceivedOnly]);
 
   const selectedLead = useMemo(
     () => leads.find((l) => l.id === selectedLeadId) || null,
@@ -1441,12 +1491,12 @@ export function LeadsWorkspace() {
       setEditProjectName(selectedLead.projectName || '');
       setEditEmail(selectedLead.email || '');
       setEditSelfSource(selectedLead.selfReportedSource || '');
-      setEditAreaType(selectedLead.areaType === 'other_province' ? 'other_province' : 'hcm');
-      setEditDistrict(selectedLead.hcmDistrict || HCM_DISTRICTS[0]);
+      const splitDist = splitLeadDistrictField(selectedLead.hcmDistrict);
+      setEditDistrict(splitDist.district);
+      setEditWard(splitDist.ward);
       setEditProvince(
-        selectedLead.province && selectedLead.province !== 'TP. Hồ Chí Minh'
-          ? selectedLead.province
-          : VIETNAM_PROVINCES[0],
+        selectedLead.province ||
+          (selectedLead.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : ''),
       );
       setEditAddress(selectedLead.installationAddress || '');
       setEditProductIds(selectedLead.products.map((p) => p.id));
@@ -1514,9 +1564,9 @@ export function LeadsWorkspace() {
           projectName: createProjectName || null,
           email: createEmail || null,
           selfReportedSource: createSelfSource || null,
-          areaType: createAreaType,
-          hcmDistrict: createAreaType === 'hcm' ? createDistrict : null,
-          province: createAreaType === 'other_province' ? createProvince : 'TP. Hồ Chí Minh',
+          areaType: inferAreaTypeFromProvince(createProvince),
+          hcmDistrict: createDistrict || null,
+          province: createProvince || null,
           installationAddress: createAddress || null,
           productIds: createProductIds,
           customProductNote: createCustomProductNote || null,
@@ -1599,9 +1649,9 @@ export function LeadsWorkspace() {
           projectName: editProjectName.trim() || null,
           email: editEmail.trim() || null,
           selfReportedSource: editSelfSource.trim() || null,
-          areaType: editAreaType,
-          hcmDistrict: editAreaType === 'hcm' ? editDistrict : null,
-          province: editAreaType === 'other_province' ? editProvince : 'TP. Hồ Chí Minh',
+          areaType: inferAreaTypeFromProvince(editProvince),
+          hcmDistrict: composeLeadDistrictField(editWard, editDistrict),
+          province: editProvince.trim() || null,
           installationAddress: editAddress.trim() || null,
           productIds: editProductIds.length > 0 ? editProductIds : selectedLead.products.map((p) => p.id),
           customProductNote: composedCustomNote || null,
@@ -2100,6 +2150,23 @@ export function LeadsWorkspace() {
           size="sm"
         />
 
+          <select
+            aria-label="Lọc theo Website tạo Lead"
+            value={sourceWebsiteFilter}
+            onChange={(e) => {
+              setSourceWebsiteFilter(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs sm:text-sm font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]/20"
+            title="Lọc Lead theo Website nguồn"
+          >
+            <option value="all">Tất cả website</option>
+            <option value="bangled.vn">bangled.vn</option>
+            <option value="toantrung.com.vn">toantrung.com.vn</option>
+            <option value="manhinhled.net.vn">manhinhled.net.vn</option>
+            <option value="__unresolved__">Chưa xác định website</option>
+          </select>
+
           {searchQuery.trim() && (
             <div className="inline-flex items-center gap-1.5 h-9 px-3 rounded-xl bg-blue-50 border border-blue-200 text-xs font-semibold text-[#1E3A8A]">
               <Search className="w-3.5 h-3.5" />
@@ -2196,72 +2263,39 @@ export function LeadsWorkspace() {
             </button>
           </div>
 
-          {/* Realtime Live Motion Indicator with dynamic countdown & auto-refresh */}
-          <RealtimeLiveMotionIndicator
-            isPolling={isLeadsPolling}
-            lastUpdated={lastLeadsPolledAt}
-            intervalSec={15}
-            onRefresh={() => void fetchLeads(true)}
-            label="Realtime Live"
-            subLabel="Tự động cập nhật 15s"
-            size="sm"
-          />
-
-          {/* Xuất Excel */}
-          {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && (
-            <a
-              href={exportHref}
-              className="h-9 px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors"
-              title="Xuất danh sách Lead hiện tại ra file Excel (.xlsx)"
-            >
-              <Download className="w-4 h-4 text-emerald-600" />
-              <span>Xuất Excel ({displayedLeads.length})</span>
-            </a>
-          )}
-
-          {/* Nhập Excel */}
-          {canCreate && (
-            <button
-              type="button"
-              onClick={() => {
-                setImportPreviewRows([]);
-                setImportFileName(null);
-                setImportPastedText('');
-                setShowImportModal(true);
-              }}
-              className="h-9 px-3 rounded-xl border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100/80 text-emerald-800 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors"
-              title="Nhập danh sách Lead từ file Excel (.xlsx, .csv) kèm kiểm tra trùng lặp tự động"
-            >
-              <FolderUp className="w-4 h-4 text-emerald-700" />
-              <span>Nhập Excel</span>
-            </button>
-          )}
-
-          {/* Đồng bộ Gmail */}
-          {canCreate && (
-            <button
-              type="button"
-              onClick={() => setShowGmailSyncModal(true)}
-              className={`h-9 px-3 rounded-xl border text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors ${
-                gmailAutoSyncLive
-                  ? 'border-emerald-200 bg-emerald-50/80 hover:bg-emerald-100/80 text-emerald-800'
-                  : 'border-rose-200 bg-rose-50/70 hover:bg-rose-100/80 text-rose-800'
-              }`}
-              title={
-                gmailAutoSyncLive
-                  ? 'Gmail Auto-Sync đang chạy nền mỗi 20 giây'
-                  : 'Quét hộp thư Gmail và tự động tạo Lead khách hàng hỏi báo giá'
-              }
-            >
-              <Mail className={`w-4 h-4 ${gmailAutoSyncLive ? 'text-emerald-600' : 'text-rose-600'}`} />
-              <span>Đồng bộ Gmail</span>
-              {gmailAutoSyncLive && (
-                <span className="inline-flex items-center gap-1 text-[10px] font-bold bg-emerald-600 text-white px-1.5 py-0.5 rounded-full">
-                  <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                  AUTO
-                </span>
+          {/* Xuất & Nhập Excel gộp chung 1 ô */}
+          {((user && hasBaPermission(user.roleCode, 'EXPORT_DATA')) || canCreate) && (
+            <div className="inline-flex h-9 items-center rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
+              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && (
+                <a
+                  href={exportHref}
+                  className="h-full px-3 hover:bg-slate-50 text-slate-700 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  title="Xuất danh sách Lead hiện tại ra file Excel (.xlsx)"
+                >
+                  <Download className="w-4 h-4 text-emerald-600" />
+                  <span>Xuất ({displayedLeads.length})</span>
+                </a>
               )}
-            </button>
+              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && canCreate && (
+                <span className="h-5 w-px bg-slate-200" aria-hidden="true" />
+              )}
+              {canCreate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportPreviewRows([]);
+                    setImportFileName(null);
+                    setImportPastedText('');
+                    setShowImportModal(true);
+                  }}
+                  className="h-full px-3 hover:bg-emerald-50 text-emerald-800 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  title="Nhập danh sách Lead từ file Excel (.xlsx, .csv) kèm kiểm tra trùng lặp tự động"
+                >
+                  <FolderUp className="w-4 h-4 text-emerald-700" />
+                  <span>Nhập Excel</span>
+                </button>
+              )}
+            </div>
           )}
 
           {canCreate && (
@@ -3067,11 +3101,9 @@ export function LeadsWorkspace() {
                       const primaryName = rawPrimaryName.replace(/\s*\(nghi (dò|khảo) giá\)/i, '');
                       const secondaryProject = lead.projectName
                         ? `Dự án: ${lead.projectName}`
-                        : lead.areaType === 'hcm'
-                          ? `Khu vực: TP.HCM · ${lead.hcmDistrict || ''}`
-                          : lead.province
-                            ? `Khu vực: ${lead.province}`
-                            : 'Chưa cập nhật tên dự án';
+                        : lead.province || lead.hcmDistrict || lead.installationAddress
+                          ? `Địa điểm: ${formatLeadLocationLabel(lead)}`
+                          : 'Chưa cập nhật tên dự án';
 
                       const noteSummary =
                         lead.lostReason ||
@@ -3451,9 +3483,9 @@ export function LeadsWorkspace() {
                             <>
                               <td className="py-2 px-2.5 align-middle max-w-[180px]">
                                 <div className="text-xs text-slate-800 truncate">
-                                  {lead.areaType === 'hcm'
-                                    ? `TP.HCM · ${lead.hcmDistrict || ''}`
-                                    : lead.province || '—'}
+                                  {[lead.hcmDistrict, lead.province || (lead.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : '')]
+                                    .filter(Boolean)
+                                    .join(', ') || '—'}
                                 </div>
                                 {lead.installationAddress && (
                                   <div className="text-[11px] text-slate-500 truncate mt-0.5">
@@ -3462,11 +3494,24 @@ export function LeadsWorkspace() {
                                 )}
                               </td>
                               <td className="py-2 px-2.5 align-middle whitespace-nowrap">
-                                <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[11px] font-medium">
-                                  {lead.tracking?.marketingSource ||
-                                    lead.selfReportedSource ||
-                                    CONTACT_CHANNEL_LABELS[lead.contactChannel]}
-                                </span>
+                                <div className="flex flex-col gap-0.5">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[11px] font-semibold w-fit ${
+                                      lead.sourceWebsite
+                                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200/80'
+                                        : 'bg-slate-100 text-slate-600'
+                                    }`}
+                                  >
+                                    {lead.sourceWebsite || 'Chưa xác định website'}
+                                  </span>
+                                  <span className="text-[11px] text-slate-500">
+                                    {CONTACT_CHANNEL_LABELS[lead.contactChannel]}
+                                    {lead.tracking?.marketingSource &&
+                                    lead.tracking.marketingSource !== 'Chưa xác định'
+                                      ? ` · ${lead.tracking.marketingSource}`
+                                      : ''}
+                                  </span>
+                                </div>
                               </td>
                               <td className="py-2 px-2.5 align-middle max-w-[200px]">
                                 <p className="text-xs text-slate-600 truncate" title={noteSummary}>
@@ -3667,9 +3712,7 @@ export function LeadsWorkspace() {
                               <p className="text-xs text-slate-600 line-clamp-1 mt-0.5 min-h-[16px]">
                                 {lead.projectName
                                   ? `Dự án: ${lead.projectName}`
-                                  : lead.areaType === 'hcm'
-                                    ? `TP.HCM · ${lead.hcmDistrict || ''}`
-                                    : lead.province || 'Chưa cập nhật dự án'}
+                                  : formatLeadLocationLabel(lead)}
                               </p>
                             </div>
 
@@ -5114,13 +5157,16 @@ export function LeadsWorkspace() {
                           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                             <div>
                               <label className="block text-xs font-medium text-slate-600 mb-1">
-                                Số điện thoại *
+                                Số điện thoại (10 số) *
                               </label>
                               <input
-                                type="text"
+                                type="tel"
                                 required
+                                maxLength={10}
+                                inputMode="numeric"
+                                pattern="0[0-9]{9}"
                                 value={editPhone}
-                                onChange={(e) => setEditPhone(e.target.value)}
+                                onChange={(e) => setEditPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
                                 className="w-full h-9 px-3 rounded-lg border border-slate-200 font-mono font-semibold text-[#1E3A8A] focus:outline-none focus:border-[#1E3A8A]"
                               />
                             </div>
@@ -5205,63 +5251,16 @@ export function LeadsWorkspace() {
                               </select>
                             </div>
 
-                            <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
-                                Khu vực công trình
-                              </label>
-                              <select
-                                value={editAreaType}
-                                onChange={(e) =>
-                                  setEditAreaType(e.target.value as 'hcm' | 'other_province')
-                                }
-                                className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
-                              >
-                                <option value="hcm">Nội thành TP. Hồ Chí Minh</option>
-                                <option value="other_province">Tỉnh / Thành phố khác</option>
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
-                                {editAreaType === 'hcm' ? 'Quận / Huyện TP.HCM' : 'Tỉnh / Thành phố'}
-                              </label>
-                              {editAreaType === 'hcm' ? (
-                                <select
-                                  value={editDistrict}
-                                  onChange={(e) => setEditDistrict(e.target.value)}
-                                  className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
-                                >
-                                  {HCM_DISTRICTS.map((d) => (
-                                    <option key={d} value={d}>
-                                      {d}
-                                    </option>
-                                  ))}
-                                </select>
-                              ) : (
-                                <select
-                                  value={editProvince}
-                                  onChange={(e) => setEditProvince(e.target.value)}
-                                  className="w-full h-9 px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800"
-                                >
-                                  {VIETNAM_PROVINCES.map((p) => (
-                                    <option key={p} value={p}>
-                                      {p}
-                                    </option>
-                                  ))}
-                                </select>
-                              )}
-                            </div>
-                            <div>
-                              <label className="block text-xs font-medium text-slate-600 mb-1">
-                                Địa chỉ lắp đặt chi tiết
-                              </label>
-                              <input
-                                type="text"
-                                value={editAddress}
-                                onChange={(e) => setEditAddress(e.target.value)}
-                                placeholder="Số nhà, đường, KCN..."
-                                className="w-full h-9 px-3 rounded-lg border border-slate-200 text-slate-800 focus:outline-none focus:border-[#1E3A8A]"
-                              />
-                            </div>
+                            <VietnamAddressFields
+                              province={editProvince}
+                              onProvinceChange={setEditProvince}
+                              district={editDistrict}
+                              onDistrictChange={setEditDistrict}
+                              ward={editWard}
+                              onWardChange={setEditWard}
+                              installationAddress={editAddress}
+                              onInstallationAddressChange={setEditAddress}
+                            />
                           </div>
                         </div>
 
@@ -5567,27 +5566,44 @@ export function LeadsWorkspace() {
                             <span className="font-bold text-[#1E3A8A] text-sm">
                               1. Thông tin Nguồn, Chiến dịch, Thiết bị &amp; Địa chỉ (UC01 3.2)
                             </span>
-                            <span className="px-2 py-0.5 rounded bg-white border border-indigo-200 text-[11px] font-semibold text-indigo-900">
-                              {selectedLead.tracking?.marketingSource ||
-                                CONTACT_CHANNEL_LABELS[selectedLead.contactChannel] ||
-                                'Nhập tay'}
+                            <span className="px-2 py-0.5 rounded bg-white border border-emerald-200 text-[11px] font-semibold text-emerald-800">
+                              Website: {selectedLead.sourceWebsite || 'Chưa xác định website'}
                             </span>
                           </div>
                           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs text-slate-700">
                             <div className="p-2.5 rounded-lg bg-white border border-slate-200/80">
-                              <span className="text-slate-500 block">Nguồn &amp; Kênh tự khai:</span>
-                              <strong className="text-slate-900">
-                                {selectedLead.tracking?.marketingSource ||
-                                  CONTACT_CHANNEL_LABELS[selectedLead.contactChannel]}
-                                {selectedLead.selfReportedSource ? ` · ${selectedLead.selfReportedSource}` : ''}
+                              <span className="text-slate-500 block">Website tạo Lead:</span>
+                              <strong className="text-emerald-800">
+                                {selectedLead.sourceWebsite || 'Chưa xác định website'}
                               </strong>
                             </div>
                             <div className="p-2.5 rounded-lg bg-white border border-slate-200/80">
-                              <span className="text-slate-500 block">Chiến dịch quảng cáo:</span>
+                              <span className="text-slate-500 block">Kênh liên hệ &amp; Cách tiếp nhận:</span>
+                              <strong className="text-slate-900">
+                                {CONTACT_CHANNEL_LABELS[selectedLead.contactChannel]} ·{' '}
+                                {selectedLead.tracking?.intakeProvider === 'gmail_sync'
+                                  ? `Gmail Auto-Sync${selectedLead.tracking.intakeAccountKey ? ` (${selectedLead.tracking.intakeAccountKey})` : ''}`
+                                  : selectedLead.tracking?.intakeProvider === 'website_webhook'
+                                    ? 'Website Webhook'
+                                    : selectedLead.tracking?.intakeProvider === 'google_lead_form'
+                                      ? 'Google Lead Form'
+                                      : 'Nhập tay'}
+                              </strong>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-white border border-slate-200/80">
+                              <span className="text-slate-500 block">Nguồn Marketing / Chiến dịch:</span>
                               <strong className="text-[#1E3A8A]">
-                                {selectedLead.tracking?.campaignName ||
-                                  selectedLead.tracking?.utmCampaign ||
-                                  'Không thuộc chiến dịch Ads'}
+                                {selectedLead.tracking?.marketingSource || 'Chưa xác định'}
+                                {selectedLead.tracking?.campaignName || selectedLead.tracking?.utmCampaign
+                                  ? ` · ${selectedLead.tracking?.campaignName || selectedLead.tracking?.utmCampaign}`
+                                  : ''}
+                              </strong>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-white border border-slate-200/80 sm:col-span-2">
+                              <span className="text-slate-500 block">Trang gửi yêu cầu (URL) &amp; GCLID:</span>
+                              <strong className="font-mono text-slate-800 break-all">
+                                {selectedLead.tracking?.landingPageUrl || 'Chưa ghi nhận URL trang gửi'}
+                                {selectedLead.tracking?.gclid ? ` · GCLID: ${selectedLead.tracking.gclid}` : ''}
                               </strong>
                             </div>
                             <div className="p-2.5 rounded-lg bg-white border border-slate-200/80">
@@ -5596,20 +5612,11 @@ export function LeadsWorkspace() {
                                 {new Date(selectedLead.contactedAt).toLocaleString('vi-VN')}
                               </strong>
                             </div>
-                            <div className="p-2.5 rounded-lg bg-white border border-slate-200/80 sm:col-span-2">
-                              <span className="text-slate-500 block">Link đổ về (Landing Page) &amp; GCLID:</span>
-                              <strong className="font-mono text-slate-800 break-all">
-                                {selectedLead.tracking?.landingPageUrl || 'Trực tiếp / Không qua Landing Page'}
-                                {selectedLead.tracking?.gclid ? ` · GCLID: ${selectedLead.tracking.gclid}` : ''}
-                              </strong>
-                            </div>
-                            <div className="p-2.5 rounded-lg bg-white border border-slate-200/80">
+                            <div className="p-2.5 rounded-lg bg-white border border-slate-200/80 sm:col-span-3">
                               <span className="text-slate-500 block">Thiết bị &amp; Khu vực địa lý:</span>
                               <strong className="text-slate-900">
                                 {selectedLead.tracking?.deviceType || 'Mọi thiết bị'} ·{' '}
-                                {selectedLead.areaType === 'hcm'
-                                  ? `TP.HCM (${selectedLead.hcmDistrict || ''})`
-                                  : selectedLead.province || 'Chưa chọn tỉnh'}
+                                {formatLeadLocationLabel(selectedLead)}
                               </strong>
                             </div>
                           </div>
@@ -5650,12 +5657,10 @@ export function LeadsWorkspace() {
                                 {selectedLead.projectName || 'Chưa có'}
                               </span>
                             </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-slate-500">Khu vực:</span>
-                              <span className="font-semibold">
-                                {selectedLead.areaType === 'hcm'
-                                  ? `TP.HCM · ${selectedLead.hcmDistrict || ''}`
-                                  : selectedLead.province || 'Chưa chọn tỉnh'}
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="text-slate-500 shrink-0">Địa chỉ lắp đặt:</span>
+                              <span className="font-semibold text-right">
+                                {formatLeadLocationLabel(selectedLead)}
                               </span>
                             </div>
                           </div>

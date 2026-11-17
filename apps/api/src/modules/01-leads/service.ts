@@ -8,6 +8,7 @@ import {
 import {
   containsMonetaryAmountText,
   hasBaPermission,
+  inferAreaTypeFromProvince,
   type ContactChannel,
   type CreateManualLeadDto,
   type CreatePrivateQuoteVersionDto,
@@ -292,6 +293,7 @@ export async function listLeadsForUser(
   user: SessionUserDto,
   filters?: {
     status?: string;
+    sourceWebsite?: string;
     search?: string;
     includeSpam?: boolean;
     overdueOnly?: boolean;
@@ -344,9 +346,20 @@ export async function listLeadsForUser(
     whereClause.pipelineStatus = 'new_lead';
     whereClause.receivedAt = null;
   }
+  if (filters?.sourceWebsite && filters.sourceWebsite !== 'all') {
+    if (filters.sourceWebsite === '__unresolved__') {
+      whereClause.AND = [
+        ...(Array.isArray(whereClause.AND) ? (whereClause.AND as unknown[]) : []),
+        { OR: [{ sourceWebsite: null }, { sourceWebsite: '' }] },
+      ];
+    } else {
+      whereClause.sourceWebsite = filters.sourceWebsite.trim().toLowerCase();
+    }
+  }
   if (filters?.search && filters.search.trim()) {
     const q = filters.search.trim();
     whereClause.AND = [
+      ...(Array.isArray(whereClause.AND) ? (whereClause.AND as unknown[]) : []),
       {
         OR: [
           { leadCode: { contains: q } },
@@ -571,6 +584,7 @@ export async function listLeadsForUser(
       email: isAnonymized ? maskEmail(r.email) : r.email,
       isPhoneNormalized: !r.isPhoneUnstandardized,
       contactChannel: (r.contactChannel as ContactChannel) || 'hotline',
+      sourceWebsite: r.sourceWebsite || null,
       selfReportedSource: r.selfReportedSource,
       areaType: r.areaType === 'tphcm' ? 'hcm' : r.areaType === 'other_province' ? 'other_province' : null,
       hcmDistrict: r.district,
@@ -624,27 +638,10 @@ export async function listLeadsForUser(
       })),
       tracking: r.tracking
         ? {
-          marketingSource:
-            r.selfReportedSource &&
-            r.selfReportedSource !== 'Nhập tay' &&
-            r.selfReportedSource !== 'Chưa xác định'
-              ? r.selfReportedSource
-              : !r.tracking.marketingSource ||
-                  r.tracking.marketingSource === 'Nhập tay' ||
-                  r.tracking.marketingSource === 'Chưa xác định'
-                ? r.contactChannel === 'zalo'
-                  ? 'Zalo'
-                  : r.contactChannel === 'form_web'
-                    ? 'Website Toàn Trung'
-                    : r.contactChannel === 'google_lead_form'
-                      ? 'Google Ads'
-                      : r.contactChannel === 'fanpage'
-                        ? 'Fanpage Facebook'
-                        : r.contactChannel === 'email'
-                          ? 'Email Dự án'
-                          : 'SĐT / Hotline'
-                : r.tracking.marketingSource,
+          marketingSource: r.tracking.marketingSource || 'Chưa xác định',
           attributionMethod: r.tracking.sourceResolutionMethod,
+          intakeProvider: r.tracking.intakeSourceProvider || null,
+          intakeAccountKey: r.tracking.intakeSourceAccountKey || null,
           utmSource: r.tracking.utmSource,
           utmMedium: r.tracking.utmMedium,
           utmCampaign: r.tracking.utmCampaign,
@@ -707,6 +704,7 @@ export async function exportAllLeadsForUser(
   user: SessionUserDto,
   filters?: {
     status?: string;
+    sourceWebsite?: string;
     search?: string;
     includeSpam?: boolean;
     overdueOnly?: boolean;
@@ -773,8 +771,14 @@ export async function createManualLead(actor: SessionUserDto, input: CreateManua
     contactName: input.contactName || null,
     companyName: input.companyName || null,
     projectName: input.projectName || null,
-    areaType: input.areaType === 'hcm' ? 'tphcm' : input.areaType === 'other_province' ? 'other_province' : null,
-    province: input.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : input.province || null,
+    areaType: (() => {
+      const prov = input.province?.trim();
+      if (prov) {
+        return inferAreaTypeFromProvince(prov) === 'hcm' ? 'tphcm' : 'other_province';
+      }
+      return input.areaType === 'hcm' ? 'tphcm' : input.areaType === 'other_province' ? 'other_province' : null;
+    })(),
+    province: input.province?.trim() || (input.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : null),
     district: input.hcmDistrict || null,
     installationAddress: input.installationAddress || null,
     selfReportedSource: resolvedSourceLabel,
@@ -953,16 +957,22 @@ export async function updateLeadInformation(
             ? input.selfReportedSource
             : existing.selfReportedSource,
         areaType:
-          input.areaType === 'hcm'
-            ? 'tphcm'
-            : input.areaType === 'other_province'
-              ? 'other_province'
-              : existing.areaType,
+          input.province !== undefined
+            ? input.province?.trim()
+              ? inferAreaTypeFromProvince(input.province) === 'hcm'
+                ? 'tphcm'
+                : 'other_province'
+              : null
+            : input.areaType === 'hcm'
+              ? 'tphcm'
+              : input.areaType === 'other_province'
+                ? 'other_province'
+                : existing.areaType,
         province:
-          input.areaType === 'hcm'
-            ? 'TP. Hồ Chí Minh'
-            : input.province !== undefined
-              ? input.province
+          input.province !== undefined
+            ? input.province?.trim() || null
+            : input.areaType === 'hcm'
+              ? 'TP. Hồ Chí Minh'
               : existing.province,
         district: input.hcmDistrict !== undefined ? input.hcmDistrict : existing.district,
         installationAddress:

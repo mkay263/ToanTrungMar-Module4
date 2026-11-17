@@ -13,6 +13,7 @@ import {
   resolveLeadReconciliationAlert,
   triggerPlatformSyncExecution,
 } from '../../../../modules/02-tracking-sync/service';
+import { getM02TrafficInteractionSpec } from '../../../../modules/02-tracking-sync/m02-spec.service';
 import {
   executeWorkerJobByCode,
   getAdapterReadinessMatrix,
@@ -29,10 +30,31 @@ export async function GET(req: Request) {
 
   try {
     const url = new URL(req.url);
+    const view = url.searchParams.get('view');
+    const websiteId = url.searchParams.get('websiteId');
+    const preset = url.searchParams.get('preset') || undefined;
+    const from = url.searchParams.get('from') || undefined;
+    const to = url.searchParams.get('to') || undefined;
+    const page = Number(url.searchParams.get('page') || 1);
+    const pageSize = Number(url.searchParams.get('pageSize') || 20);
+
+    if (view === 'spec') {
+      const m02 = await getM02TrafficInteractionSpec({
+        websiteId,
+        preset,
+        from,
+        to,
+        page,
+        pageSize,
+      });
+      return jsonSuccess(m02);
+    }
+
     const periodDays = Number(url.searchParams.get('periodDays') || 30);
     const [data, workerHistory] = await Promise.all([
       getTrackingDashboardData(
         Number.isFinite(periodDays) && periodDays > 0 ? periodDays : 30,
+        preset || from || to ? { preset, from, to } : undefined,
       ),
       getWorkerJobsHistory(12),
     ]);
