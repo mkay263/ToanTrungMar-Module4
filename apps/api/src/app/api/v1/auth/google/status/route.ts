@@ -13,14 +13,42 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
+    if (!auth.ok) return auth.response;
+
+    const canManageGoogleConfig =
+      auth.user.roleCode === 'ADMIN' || auth.user.roleCode === 'MKT_LEAD';
+
     const [status, clientConfig, adsConfig] = await Promise.all([
       getGoogleOAuthStatusDto(),
-      getGoogleClientConfigDto(),
-      getGoogleAdsApiConfigDto(),
+      canManageGoogleConfig
+        ? getGoogleClientConfigDto()
+        : Promise.resolve({ hasClientId: false, clientIdMasked: null, hasClientSecret: false }),
+      canManageGoogleConfig
+        ? getGoogleAdsApiConfigDto()
+        : Promise.resolve({
+            hasDeveloperToken: false,
+            developerTokenMasked: null,
+            customerId: null,
+            loginCustomerId: null,
+            oauthDirectSupported: true,
+          }),
     ]);
-    return jsonSuccess({ status, clientConfig, adsConfig });
+
+    const safeStatus = canManageGoogleConfig
+      ? status
+      : {
+          ...status,
+          connectedEmail: null,
+          connectedName: null,
+          connectedPicture: null,
+          scopes: [],
+          accessibleResources: [],
+        };
+
+    return jsonSuccess({ status: safeStatus, clientConfig, adsConfig });
   } catch (err) {
     return jsonError(
       'GET_GOOGLE_STATUS_ERROR',
@@ -32,7 +60,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
+    const auth = await requireAuthenticatedSession(req, { requireCsrf: true });
     if (!auth.ok) return auth.response;
     const user = auth.user;
 
@@ -53,11 +81,8 @@ export async function POST(req: Request) {
           403,
         );
       }
-      if (!body.developerToken?.trim()) {
-        return jsonError('INVALID_INPUT', 'Vui lòng nhập Developer Token của Google Ads.', 400);
-      }
       await saveGoogleAdsApiConfig({
-        developerToken: body.developerToken.trim(),
+        developerToken: body.developerToken?.trim() || null,
         customerId: body.customerId?.trim() || null,
         loginCustomerId: body.loginCustomerId?.trim() || null,
       });
@@ -68,7 +93,7 @@ export async function POST(req: Request) {
         getGoogleAdsApiConfigDto(),
       ]);
       return jsonSuccess({
-        message: 'Đã lưu Developer Token & đồng bộ chỉ số Google Ads thành công.',
+        message: 'Đã lưu cấu hình Google Ads & đồng bộ dữ liệu thành công.',
         status,
         clientConfig,
         adsConfig,
@@ -94,6 +119,9 @@ export async function POST(req: Request) {
     }
 
     if (body.action === 'demo_connect') {
+      if (user.roleCode !== 'ADMIN') {
+        return jsonError('FORBIDDEN', 'Chỉ Quản trị viên (ADMIN) mới được bật chế độ Kiểm thử Mẫu.', 403);
+      }
       await connectSandboxDemo(user.email || 'toantrung.marketing@gmail.com');
       const status = await getGoogleOAuthStatusDto();
       return jsonSuccess({
@@ -103,6 +131,9 @@ export async function POST(req: Request) {
     }
 
     if (body.action === 'disconnect') {
+      if (user.roleCode !== 'ADMIN' && user.roleCode !== 'MKT_LEAD') {
+        return jsonError('FORBIDDEN', 'Chỉ Quản trị viên hoặc Trưởng phòng Marketing mới được ngắt kết nối Google.', 403);
+      }
       await disconnectGoogleOAuth();
       const status = await getGoogleOAuthStatusDto();
       return jsonSuccess({ message: 'Đã ngắt kết nối tài khoản Google thành công.', status });

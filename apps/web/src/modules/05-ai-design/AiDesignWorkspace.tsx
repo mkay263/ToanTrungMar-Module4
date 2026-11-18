@@ -30,6 +30,7 @@ import {
   Info,
   KeyRound,
   Layers,
+  Loader2,
   Lock,
   Minus,
   Monitor,
@@ -684,7 +685,7 @@ export function AiDesignWorkspace() {
           leadOptions: LeadOpt[];
           productOptions: ProductOpt[];
           providerStatus: ProviderStatusInfo;
-        }>('/api/v1/design');
+        }>('/api/v1/design', { skipCache: Boolean(silent) });
         const list: DesignRequestItemDto[] = data.requests || [];
         setRequests(list);
         setLeadOptions(data.leadOptions || []);
@@ -777,6 +778,39 @@ export function AiDesignWorkspace() {
       null,
     [currentProject, selectedVersionId]
   );
+
+  // Rời trang không làm mất job đang chạy: tự động poll DB mỗi 2.5s khi activeJob === 'running'
+  const prevActiveJobRef = useRef<{ jobId: string; status: string } | null>(null);
+  useEffect(() => {
+    const job = currentProject?.activeJob;
+    if (!currentProject || !job) return;
+    const prev = prevActiveJobRef.current;
+    if (prev && prev.jobId === job.jobId && prev.status === 'running' && job.status === 'succeeded') {
+      const latestVer = currentProject.assetVersions[currentProject.assetVersions.length - 1];
+      if (latestVer) {
+        setSelectedVersionId(latestVer.id);
+        setShowHandles(false);
+        setViewMode('result');
+      }
+      setSuccessToast(
+        job.fallbackUsed
+          ? `Đã hoàn tất bản phối cảnh kỹ thuật nội bộ v${job.resultVersionNo ?? ''} (Studio Engine).`
+          : `Đã hoàn tất phiên bản Thiết kế AI v${job.resultVersionNo ?? ''}.`
+      );
+    }
+    prevActiveJobRef.current = { jobId: job.jobId, status: job.status };
+  }, [currentProject]);
+
+  useEffect(() => {
+    if (currentProject?.activeJob?.status !== 'running') return;
+    const pid = currentProject.id;
+    const timer = window.setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void loadData(pid, true);
+      }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [currentProject?.id, currentProject?.activeJob?.status, loadData]);
 
   // Two distinct photo vaults in Left Sidebar Card 2:
   // 1) 'site_photos': Ảnh Công trình của dự án đang chọn (Up hàng loạt khi đi chụp thực tế)
@@ -5332,13 +5366,57 @@ export function AiDesignWorkspace() {
                   )}
                 </div>
 
+                {/* Active background job notice (persists across navigation) */}
+                {currentProject?.activeJob?.status === 'running' && (
+                  <div className="mt-2.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-xs text-indigo-900 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-semibold">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600 shrink-0" />
+                      <span>
+                        Tiến trình đang chạy trên máy chủ ({currentProject.activeJob.action === 'GENERATE_BANNER' ? 'Tạo Banner' : 'Dựng Phối cảnh 3D'} ·{' '}
+                        {currentProject.activeJob.modelId}). Bạn có thể chuyển trang khác mà không mất tác vụ này.
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-indigo-700 font-medium">Tự động cập nhật mỗi 2,5 giây</span>
+                  </div>
+                )}
+                {currentProject?.activeJob?.status === 'failed' && currentProject.activeJob.message && (
+                  <div className="mt-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      <strong>Tiến trình AI gần nhất chưa thành công:</strong> {currentProject.activeJob.message}
+                    </span>
+                  </div>
+                )}
+
                 {/* C11: Dải đối chiếu nguồn tham chiếu của phiên bản đang xem */}
                 {currentVersion && (
                   <div className="mt-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-3">
                       <span>
                         <strong className="text-slate-800">Phiên bản:</strong> v{currentVersion.versionNumber} (
-                        {currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD' ? 'Designer hoàn thiện' : 'Nháp phối cảnh'})
+                        {currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD'
+                          ? 'Designer hoàn thiện'
+                          : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
+                              currentVersion.providerId === 'local_sandbox'
+                            ? 'Bản ghép kỹ thuật nội bộ (Studio Engine)'
+                            : `Ảnh sinh Cloud AI${currentVersion.modelUsed ? ` · ${currentVersion.modelUsed}` : ''}`}
+                        )
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD'
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                            : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
+                                currentVersion.providerId === 'local_sandbox'
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-blue-50 text-[#1E3A8A] border-blue-200'
+                        }`}
+                      >
+                        {currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD'
+                          ? 'Bản vẽ Designer tải lên'
+                          : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
+                              currentVersion.providerId === 'local_sandbox'
+                            ? 'Ghép kỹ thuật nội bộ · Không phải ảnh Cloud AI'
+                            : 'Cloud AI Image'}
                       </span>
                       <span>
                         <strong className="text-slate-800">Ảnh tham chiếu:</strong>{' '}

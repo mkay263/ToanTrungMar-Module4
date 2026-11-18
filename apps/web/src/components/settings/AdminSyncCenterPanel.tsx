@@ -81,13 +81,13 @@ export function AdminSyncCenterPanel() {
       await apiRequest('/api/v1/leads/gmail-sync', {
         method: 'POST',
         csrfToken: user?.csrfToken,
-        body: JSON.stringify({
+        body: {
           action: 'save_config',
           enabled,
           pollIntervalSec,
           onlyLeadKeywords,
           query,
-        }),
+        },
       });
       setNotice('Đã lưu cấu hình tự động đồng bộ Gmail Lead.');
       await loadAll();
@@ -108,7 +108,7 @@ export function AdminSyncCenterPanel() {
         {
           method: 'POST',
           csrfToken: user?.csrfToken,
-          body: JSON.stringify({ action: 'sync_now' }),
+          body: { action: 'sync_now' },
         },
       );
       setNotice(
@@ -130,7 +130,7 @@ export function AdminSyncCenterPanel() {
       await apiRequest('/api/v1/auth/google/sync', {
         method: 'POST',
         csrfToken: user?.csrfToken,
-        body: JSON.stringify({ slot: 'MANUAL_USER' }),
+        body: { slot: 'MANUAL_RETRY' },
       });
       setNotice('Đã đồng bộ dữ liệu GA4, Search Console và các chỉ số website mới nhất.');
       await loadAll();

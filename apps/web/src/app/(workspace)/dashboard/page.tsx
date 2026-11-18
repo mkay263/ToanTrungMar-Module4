@@ -539,13 +539,13 @@ export default function DashboardPage() {
               {report?.byChannel?.filter((c) => c.count > 0).length || 0} kênh phát sinh
             </span>
           </div>
-          <div className="flex items-baseline gap-2 mt-0.5">
-            <span className="text-2xl font-extrabold text-slate-900 tabular-nums">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mt-0.5">
+            <span className="text-xl 2xl:text-2xl font-extrabold text-slate-900 tabular-nums whitespace-nowrap">
               {report?.marketingSummary.totalAdsSpend
-                ? `${Math.round(Number(report.marketingSummary.totalAdsSpend.formattedDecimal || 0)).toLocaleString('vi-VN')} ₫`
+                ? `${Math.round(Number(report.marketingSummary.totalAdsSpend.formattedDecimal || 0)).toLocaleString('vi-VN')}\u00A0₫`
                 : `${report?.marketingSummary.effectiveLeadsFromAds ?? 0} Lead Ads`}
             </span>
-            <span className="text-xs text-slate-500 truncate">
+            <span className="text-xs text-slate-500">
               {report?.marketingSummary.totalAdsSpend ? 'chi tiêu Ads' : 'ghi nhận từ GCLID / UTM'}
             </span>
           </div>
@@ -572,7 +572,10 @@ export default function DashboardPage() {
               Thiết kế AI &amp; Phối cảnh
             </span>
             <span className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[11px] font-semibold">
-              TB: {report?.designSummary.avgProcessingSecText || '—'}
+              {report?.designSummary.avgProcessingSecText &&
+              report.designSummary.avgProcessingSecText !== 'Chưa phát sinh'
+                ? `TB: ${report.designSummary.avgProcessingSecText}`
+                : report?.designSummary.avgProcessingSecText || 'Chưa phát sinh'}
             </span>
           </div>
           <div className="flex items-baseline gap-2 mt-0.5">

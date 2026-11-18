@@ -490,7 +490,7 @@ export default function ProfilePage() {
               </div>
             </div>
 
-            {/* Right Action: Clean "Đổi mật khẩu" button */}
+            {/* Right Action: Chỉ giữ nút Gỡ ảnh (nút Đổi mật khẩu đã đặt duy nhất ở thẻ Bảo mật bên dưới) */}
             <div className="flex items-center gap-2.5 self-start md:self-end pt-2 md:pt-0">
               {(displayedAvatarUrl || user.avatarUrl) && !removeAvatarFlag && (
                 <button
@@ -502,15 +502,6 @@ export default function ProfilePage() {
                   <span>Gỡ ảnh</span>
                 </button>
               )}
-
-              <button
-                type="button"
-                onClick={() => setIsPasswordDialogOpen(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-sm font-medium text-xs transition-colors"
-              >
-                <KeyRound className="w-4 h-4" />
-                <span>Đổi mật khẩu</span>
-              </button>
             </div>
           </div>
         </div>
@@ -791,20 +782,11 @@ export default function ProfilePage() {
 
             {/* Quick Password Reset Card with Functioning Dialog Trigger (Fix 1) */}
             <div className="p-4 rounded-xl bg-slate-50/70 border border-slate-200/90 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-blue-700" />
-                  <strong className="text-xs font-bold text-slate-900">
-                    Mật khẩu đăng nhập
-                  </strong>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsPasswordDialogOpen(true)}
-                  className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline transition-colors"
-                >
-                  Mở hộp thoại đổi mật khẩu
-                </button>
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-blue-700" />
+                <strong className="text-xs font-bold text-slate-900">
+                  Mật khẩu đăng nhập
+                </strong>
               </div>
               <p className="text-xs text-slate-500 leading-relaxed">
                 Khi đổi mật khẩu mới, toàn bộ các phiên đăng nhập cũ trên thiết bị khác sẽ tự động

@@ -215,10 +215,6 @@ export function GoogleOAuthManager({
   };
 
   const handleSaveAdsConfig = async () => {
-    if (!devTokenInput.trim()) {
-      setErrorMsg('Vui lòng dán Developer Token (22 ký tự từ Google Ads API Center).');
-      return;
-    }
     setBusy(true);
     setErrorMsg(null);
     setFeedbackMsg(null);
@@ -237,7 +233,7 @@ export function GoogleOAuthManager({
         csrfToken: user?.csrfToken,
         body: {
           action: 'save_ads_config',
-          developerToken: devTokenInput.trim(),
+          developerToken: devTokenInput.trim() || undefined,
           customerId: adsCustomerIdInput.trim(),
           loginCustomerId: adsMccIdInput.trim(),
         },
@@ -299,7 +295,7 @@ export function GoogleOAuthManager({
               <div className="flex items-center gap-2 font-extrabold text-sm sm:text-base text-emerald-950 flex-wrap">
                 <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
                 <span>Google OAuth 2.0 Đã kết nối:</span>
-                <span className="font-mono text-emerald-900 underline font-bold">{status.connectedEmail}</span>
+                <span className="font-mono text-emerald-900 underline font-bold">{status.connectedEmail || 'Tài khoản Công ty'}</span>
                 {status.isSandboxDemo && (
                   <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-bold border border-amber-300">
                     Demo Sandbox
@@ -612,26 +608,29 @@ export function GoogleOAuthManager({
         </div>
       </div>
 
-      {/* Khối Cấu hình trực tiếp Google Ads API (Developer Token & Customer ID) */}
+      {/* Khối Cấu hình trực tiếp Google Ads API (v26 OAuth direct + Customer ID) */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2 flex-wrap">
               <Zap className="w-4 h-4 text-amber-600" />
               <span>Kết nối Google Ads API (Chi phí, Click &amp; Chuyển đổi Chiến dịch)</span>
-              {adsConfig?.hasDeveloperToken ? (
+              {status?.connected && !status.isSandboxDemo ? (
                 <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold inline-flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5" />
-                  Đã cấu hình ({adsConfig.developerTokenMasked})
+                  Đã kết nối qua Google OAuth v26
+                  {(status.selectedGadsCustomerId || adsConfig?.customerId)
+                    ? ` (ID: ${status.selectedGadsCustomerId || adsConfig?.customerId})`
+                    : ''}
                 </span>
               ) : (
                 <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold">
-                  Cần nhập Developer Token
+                  Chưa kết nối tài khoản Google
                 </span>
               )}
             </h3>
             <p className="text-xs text-slate-600 mt-1">
-              Tài khoản Google OAuth đã có quyền đọc quảng cáo (<code>adwords</code>). Dán thêm <strong>Developer Token</strong> từ tài khoản MCC Google Ads (Công cụ → Trung tâm API / API Center) và <strong>Mã tài khoản 10 số</strong> để tự động kéo chi phí &amp; lượt nhấp thực tế.
+              Google Ads API <code>v26</code> cho phép truy vấn trực tiếp qua tài khoản Google OAuth (quyền <code>adwords</code>) mà <strong>không bắt buộc Developer Token</strong>. Bạn chỉ cần nhập <strong>Customer ID 10 số</strong> (hoặc để trống để hệ thống tự phát hiện) rồi bấm đồng bộ.
             </p>
           </div>
         </div>
@@ -639,7 +638,7 @@ export function GoogleOAuthManager({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Developer Token (bắt buộc)
+              Developer Token (Tùy chọn — không bắt buộc với v26)
             </label>
             <input
               type="password"
@@ -649,8 +648,8 @@ export function GoogleOAuthManager({
               onChange={(e) => setDevTokenInput(e.target.value)}
               placeholder={
                 adsConfig?.hasDeveloperToken
-                  ? `Đang lưu: ${adsConfig.developerTokenMasked} (dán mới để đổi)`
-                  : 'Dán mã 22 ký tự từ Google Ads API Center...'
+                  ? `Đang lưu: ${adsConfig.developerTokenMasked} (không bắt buộc)`
+                  : 'Tùy chọn (bỏ trống nếu dùng OAuth trực tiếp)...'
               }
               className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
             />

@@ -103,7 +103,9 @@ async function performNetworkFetch<T>(
     body: options.isFormData
       ? (options.body as FormData)
       : options.body !== undefined
-        ? JSON.stringify(options.body)
+        ? typeof options.body === 'string'
+          ? options.body
+          : JSON.stringify(options.body)
         : undefined,
   });
 

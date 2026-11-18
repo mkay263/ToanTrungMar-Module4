@@ -15,6 +15,7 @@ import {
 } from '../../core/website-catalog';
 import { shouldAnonymizeLeadForRole } from '../01-leads/service';
 import { computeCostPerValidAdLead } from '../03-keywords-ads/m03-spec.service';
+import { getGoogleAdsApiConfig, getGoogleConnection } from '../02-tracking-sync/google-oauth.service';
 
 export async function getM04ResultsReportSpec(
   user: SessionUserDto,
@@ -29,12 +30,23 @@ export async function getM04ResultsReportSpec(
 ): Promise<M04ResultsReportDto> {
   const scope = await resolveDashboardScope(params);
   const anonymized = shouldAnonymizeLeadForRole(user.roleCode) || user.roleCode === 'DESIGNER';
-  const hasAdsToken = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
 
   const roleLeadFilter =
     user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
 
-  const [rawLeads, prevRawLeads, adsCampaignMetrics, latestSync] = await Promise.all([
+  const [
+    rawLeads,
+    prevRawLeads,
+    adsCampaignMetrics,
+    latestSync,
+    googleConn,
+    adsCfg,
+    realAdsCatalogCount,
+    receivedInPeriodRows,
+    firstQuoteInPeriodRows,
+    closedWonInPeriodRows,
+    periodActivityRows,
+  ] = await Promise.all([
     prisma.lead.findMany({
       where: {
         createdAt: {
@@ -95,7 +107,62 @@ export async function getM04ResultsReportSpec(
       where: { status: 'success' },
       orderBy: { id: 'desc' },
     }),
+    getGoogleConnection(),
+    getGoogleAdsApiConfig(),
+    prisma.campaign.count({
+      where: {
+        platform: 'google_ads',
+        NOT: [{ accountExternalId: 'default' }, { accountExternalId: { startsWith: 'GA4-' } }],
+      },
+    }),
+    prisma.lead.findMany({
+      where: {
+        receivedAt: { gte: scope.startDateTime, lte: scope.endDateTime },
+        isSpam: false,
+        ...roleLeadFilter,
+      },
+      select: { id: true, sourceWebsite: true },
+    }),
+    prisma.lead.findMany({
+      where: {
+        firstQuoteSentAt: { gte: scope.startDateTime, lte: scope.endDateTime },
+        isSpam: false,
+        ...roleLeadFilter,
+      },
+      select: { id: true, createdAt: true, sourceWebsite: true },
+    }),
+    prisma.lead.findMany({
+      where: {
+        pipelineStatus: 'won',
+        closedAt: { gte: scope.startDateTime, lte: scope.endDateTime },
+        isSpam: false,
+        ...roleLeadFilter,
+      },
+      select: { id: true, createdAt: true, sourceWebsite: true },
+    }),
+    prisma.leadActivity.findMany({
+      where: {
+        createdAt: { gte: scope.startDateTime, lte: scope.endDateTime },
+        actionType: { in: ['quote_sent', 'status_change'] },
+        lead: { isSpam: false, ...roleLeadFilter },
+      },
+      select: {
+        leadId: true,
+        actionType: true,
+        newStatus: true,
+        lead: { select: { createdAt: true, sourceWebsite: true } },
+      },
+    }),
   ]);
+
+  const hasAdsToken =
+    Boolean(adsCfg?.developerToken) ||
+    Boolean(
+      googleConn?.connected &&
+        !googleConn.isSandboxDemo &&
+        googleConn.scopes?.some((s) => s.includes('adwords')),
+    ) ||
+    realAdsCatalogCount > 0;
 
   const leads = rawLeads.filter((l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite));
   const prevLeads = prevRawLeads.filter((l) =>
@@ -176,10 +243,10 @@ export async function getM04ResultsReportSpec(
       }
     }
   } else {
-    attributedAdCost = null;
+    attributedAdCost = hasAdsToken && !scope.selectedWebsite ? 0 : null;
     adReconciliationNote = hasAdsToken
-      ? 'Chưa phát sinh dữ liệu chi phí quảng cáo trong kỳ đang chọn.'
-      : `Chưa kết nối chi phí Google Ads API (ghi nhận ${validAdLeads.length} Lead quảng cáo hợp lệ trong CRM).`;
+      ? 'Đã kết nối Google Ads v26; các chiến dịch hiện tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn.'
+      : `Chưa kết nối tài khoản Google Ads OAuth (ghi nhận ${validAdLeads.length} Lead quảng cáo hợp lệ trong CRM).`;
   }
 
   const costPerValidAdLead = computeCostPerValidAdLead(attributedAdCost, validAdLeads.length);
@@ -489,6 +556,49 @@ export async function getM04ResultsReportSpec(
     })
     .sort((a, b) => b.waitingDays - a.waitingDays);
 
+  // Hoạt động xử lý phát sinh trong kỳ [startDateTime..endDateTime], bao gồm cả Lead tạo từ kỳ trước
+  const receivedInPeriodCount = receivedInPeriodRows.filter((l) =>
+    matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite),
+  ).length;
+  const quotedInPeriodLeadMap = new Map<number, Date>();
+  for (const r of firstQuoteInPeriodRows) {
+    if (matchesWebsiteDomain(r.sourceWebsite, scope.selectedWebsite)) {
+      quotedInPeriodLeadMap.set(r.id, r.createdAt);
+    }
+  }
+  const wonInPeriodLeadMap = new Map<number, Date>();
+  for (const r of closedWonInPeriodRows) {
+    if (matchesWebsiteDomain(r.sourceWebsite, scope.selectedWebsite)) {
+      wonInPeriodLeadMap.set(r.id, r.createdAt);
+    }
+  }
+  const lostInPeriodLeadMap = new Map<number, Date>();
+  for (const act of periodActivityRows) {
+    if (!matchesWebsiteDomain(act.lead.sourceWebsite, scope.selectedWebsite)) continue;
+    if (
+      act.actionType === 'quote_sent' ||
+      (act.actionType === 'status_change' && act.newStatus === 'quote_sent')
+    ) {
+      quotedInPeriodLeadMap.set(act.leadId, act.lead.createdAt);
+    }
+    if (act.actionType === 'status_change' && act.newStatus === 'won') {
+      wonInPeriodLeadMap.set(act.leadId, act.lead.createdAt);
+    }
+    if (act.actionType === 'status_change' && act.newStatus === 'lost') {
+      lostInPeriodLeadMap.set(act.leadId, act.lead.createdAt);
+    }
+  }
+  const priorCohortLeadIds = new Set<number>();
+  for (const [lid, createdAt] of [
+    ...quotedInPeriodLeadMap.entries(),
+    ...wonInPeriodLeadMap.entries(),
+    ...lostInPeriodLeadMap.entries(),
+  ]) {
+    if (createdAt < scope.startDateTime) {
+      priorCohortLeadIds.add(lid);
+    }
+  }
+
   return {
     scope: {
       websiteId: scope.websiteId,
@@ -558,6 +668,15 @@ export async function getM04ResultsReportSpec(
       previousReceivedLeadCount: prevReceivedCount,
       previousValidLeadCount: prevValidCount,
       previousWonLeadCount: prevWonCount,
+    },
+    periodActivity: {
+      receivedInPeriodCount,
+      quotedInPeriodCount: quotedInPeriodLeadMap.size,
+      wonInPeriodCount: wonInPeriodLeadMap.size,
+      lostInPeriodCount: lostInPeriodLeadMap.size,
+      fromPriorCohortCount: priorCohortLeadIds.size,
+      definitionNote:
+        'Hoạt động xử lý phát sinh thực tế trong khoảng ngày chọn (bao gồm cả hồ sơ Lead được tạo từ các kỳ trước nhưng mới báo giá hoặc chốt trong kỳ này).',
     },
     charts: {
       leadFunnel,

@@ -17,6 +17,7 @@ import {
   type ChatDesignRequestDto,
   type ConfigureAiProvidersDto,
   type CreateDesignRequestDto,
+  type DesignActiveJobDto,
   type DesignAssetVersionItemDto,
   type DesignChatMessageDto,
   type DesignRequestItemDto,
@@ -146,10 +147,10 @@ function parseDimensions(dimStr: string | null): {
     };
   }
   return {
-    screenWidthM: 4.8,
-    screenHeightM: 2.7,
-    bannerWidthPx: 1920,
-    bannerHeightPx: 1080,
+    screenWidthM: null,
+    screenHeightM: null,
+    bannerWidthPx: null,
+    bannerHeightPx: null,
   };
 }
 
@@ -187,6 +188,7 @@ interface StoredMetadata {
   chatMessages?: DesignChatMessageDto[];
   productSpec?: LedProductSpecDto;
   designContext?: ProjectDesignContext;
+  activeJob?: DesignActiveJobDto | null;
   processedIdempotencyKeys?: Record<
     string,
     { versionId: number; versionNumber: number; timestamp: string }
@@ -219,11 +221,8 @@ export function canUserAccessDesignProject(
     lead?: { assignedSalesId?: number | null; createdByUserId?: number | null } | null;
   }
 ): boolean {
-  if (['ADMIN', 'CEO', 'MKT_LEAD', 'SALES_LEAD'].includes(user.roleCode)) {
+  if (['ADMIN', 'BOD', 'SALES_LEAD', 'DESIGNER'].includes(user.roleCode)) {
     return true;
-  }
-  if (user.roleCode === 'DESIGNER') {
-    return !project.assignedDesignerId || project.assignedDesignerId === user.id;
   }
   if (user.roleCode === 'SALES') {
     return (
@@ -259,8 +258,11 @@ export async function assertCanAccessStorageObjectKey(
   user: SessionUserDto,
   storageObjectKey: string
 ): Promise<void> {
-  if (['ADMIN', 'CEO', 'MKT_LEAD', 'SALES_LEAD'].includes(user.roleCode)) {
+  if (['ADMIN', 'BOD', 'SALES_LEAD', 'DESIGNER'].includes(user.roleCode)) {
     return;
+  }
+  if (user.roleCode !== 'SALES') {
+    throw new ForbiddenDesignProjectAccessError();
   }
 
   const versionMatch = await prisma.designAssetVersion.findFirst({
@@ -373,7 +375,19 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
   productOptions: Array<{ id: number; code: string; name: string; categoryGroup: string }>;
   providerStatus: ProviderStatusInfo;
 }> {
-  const isAnonymizedLead = ['MKT_STAFF', 'MKT_LEAD', 'ADS', 'DESIGNER'].includes(user.roleCode);
+  const canAccessDesignScope =
+    user.roleCode === 'ADMIN' ||
+    user.roleCode === 'BOD' ||
+    user.roleCode === 'SALES_LEAD' ||
+    user.roleCode === 'DESIGNER' ||
+    user.roleCode === 'SALES';
+  if (!canAccessDesignScope) {
+    throw new ForbiddenDesignProjectAccessError(
+      'Vai trò hiện tại không được phân quyền xem hồ sơ ảnh hiện trạng và bản vẽ thiết kế.'
+    );
+  }
+
+  const isAnonymizedLead = user.roleCode === 'DESIGNER';
   const requestScopeWhere =
     user.roleCode === 'SALES'
       ? {
@@ -382,9 +396,7 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
             { lead: { assignedSalesId: user.id } },
           ],
         }
-      : user.roleCode === 'DESIGNER'
-        ? { assignedDesignerId: user.id }
-        : undefined;
+      : undefined;
 
   const [rows, leads, products] = await Promise.all([
     prisma.designRequest.findMany({
@@ -430,6 +442,8 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       let parsedVerParams: {
         providerId?: string;
         modelUsed?: string;
+        generationOrigin?: 'CLOUD_AI' | 'LOCAL_COMPOSITE_FALLBACK' | 'DESIGNER_UPLOAD' | null;
+        studioComposite?: boolean;
         referenceSitePhotoId?: string | null;
         sourcePhotoId?: string | null;
         referenceProductPhotoIds?: string[];
@@ -460,11 +474,22 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
         measuredImg?.heightPx ??
         dims.bannerHeightPx ??
         null;
+      const inferredOrigin: DesignAssetVersionItemDto['generationOrigin'] =
+        parsedVerParams.generationOrigin ||
+        (v.versionType === 'final_render'
+          ? 'DESIGNER_UPLOAD'
+          : parsedVerParams.providerId === 'local_sandbox' ||
+              parsedVerParams.studioComposite ||
+              (parsedVerParams.modelUsed || '').includes('toantrung-studio') ||
+              (parsedVerParams.modelUsed || '').includes('Compositor')
+            ? 'LOCAL_COMPOSITE_FALLBACK'
+            : 'CLOUD_AI');
       return {
         id: v.id,
         designRequestId: v.designRequestId,
         versionNumber: v.versionNumber,
         sourceType: v.versionType === 'final_render' ? 'DESIGNER_FINAL_UPLOAD' : 'AI_DRAFT',
+        generationOrigin: inferredOrigin,
         providerId: parsedVerParams.providerId ?? null,
         modelUsed: parsedVerParams.modelUsed ?? v.aiUsageLog?.modelName ?? null,
         storageObjectKey: v.storageObjectKey,
@@ -606,12 +631,12 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       assignedDesignerName: r.assignedDesigner?.fullName ?? 'Designer Toàn Trung',
       designType: mapDbRequestTypeToDto(r.requestType),
       ledModuleSpec: r.ledCategory,
-      screenWidthM: effectiveWidthM,
-      screenHeightM: effectiveHeightM,
+      screenWidthM: meta.screenWidthM ?? dims.screenWidthM,
+      screenHeightM: meta.screenHeightM ?? dims.screenHeightM,
       installZoneBboxJson: r.installPositionJson,
       placementQuad: meta.placementQuad || DEFAULT_PLACEMENT_QUAD,
-      bannerWidthPx: effectiveBannerW,
-      bannerHeightPx: effectiveBannerH,
+      bannerWidthPx: meta.bannerWidthPx ?? dims.bannerWidthPx,
+      bannerHeightPx: meta.bannerHeightPx ?? dims.bannerHeightPx,
       aspectRatio: r.aspectRatio || '16:9',
       aspectLocked: meta.aspectLocked ?? true,
       isArchived: meta.isArchived ?? false,
@@ -631,6 +656,7 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
           ? toMonetaryAmountDto(r.totalCostMicros, currency, 'micros')
           : null,
       status: mapDbStatusToDto(r.designStatus),
+      activeJob: meta.activeJob ?? null,
       createdAt: r.createdAt.toISOString(),
       updatedAt: (r.completedAt ?? r.createdAt).toISOString(),
       completedAt: r.completedAt ? r.completedAt.toISOString() : null,
@@ -1996,67 +2022,150 @@ export async function processChatDesignRequest(
     currentMeta.compositingMode ||
     'STRICT';
 
-  const providerResult =
-    dbType === '3d_perspective'
-      ? await AiDesignProviderFactory.executePerspectiveWithFallback(
-          {
-            workflow: 'perspective_3d',
-            prompt: cleanImagePrompt,
-            referenceImageUrl:
-              input.selectedPhotoUrl ||
-              activePhotoObj?.url ||
-              existing.sitePhotoUrl ||
-              DEFAULT_SHOWROOM_PHOTO,
-            referenceImageBuffer: activePhotoFileData?.buffer,
-            referenceImageMimeType: activePhotoFileData?.mimeType,
-            productReferenceBuffers:
-              productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
-            placementQuad: effectiveQuad,
-            compositingMode: effectiveCompositingMode,
-            productSpec: {
-              productCode: currentMeta.productSpec?.productCode || 'LED_INDOOR',
-              productName:
-                input.referenceProductName ||
-                productReferencePhotoObjs[0]?.name ||
-                existing.ledCategory ||
-                'Màn hình LED Indoor',
-              pitch: effectivePitch,
-              screenStyle: effectiveStyle,
+  const runningJob: DesignActiveJobDto = {
+    jobId: `job-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+    status: 'running',
+    action: dbType === 'banner' ? 'GENERATE_BANNER' : 'GENERATE_SCENE',
+    providerId: normalizedProviderId || 'google_imagen',
+    modelId: input.modelId || 'auto',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    resultVersionNo: null,
+    fallbackUsed: false,
+    message: 'Đang xử lý tạo bản thiết kế trên máy chủ...',
+  };
+
+  await prisma.designRequest.update({
+    where: { id: requestId },
+    data: {
+      designStatus: 'ai_drafting',
+      installPositionJson: JSON.stringify({
+        ...currentMeta,
+        placementQuad: effectiveQuad,
+        designContext,
+        activeJob: runningJob,
+      }),
+    },
+  });
+
+  const markActiveJobFailed = async (errMessage: string, fallbackUsed = false) => {
+    const failedJob: DesignActiveJobDto = {
+      ...runningJob,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      fallbackUsed,
+      message: errMessage,
+    };
+    const latestRow = await prisma.designRequest.findUnique({
+      where: { id: requestId },
+      include: { assetVersions: { take: 1, select: { id: true } } },
+    });
+    const latestMeta = parseProjectMetadata(latestRow?.installPositionJson ?? null);
+    await prisma.designRequest
+      .update({
+        where: { id: requestId },
+        data: {
+          designStatus: latestRow?.assetVersions?.length ? 'ai_drafted' : latestRow?.designStatus || 'pending',
+          installPositionJson: JSON.stringify({
+            ...latestMeta,
+            activeJob: failedJob,
+          }),
+        },
+      })
+      .catch(() => null);
+  };
+
+  let providerResult: Awaited<ReturnType<typeof AiDesignProviderFactory.executePerspectiveWithFallback>>;
+  try {
+    providerResult =
+      dbType === '3d_perspective'
+        ? await AiDesignProviderFactory.executePerspectiveWithFallback(
+            {
+              workflow: 'perspective_3d',
+              prompt: cleanImagePrompt,
+              referenceImageUrl:
+                input.selectedPhotoUrl ||
+                activePhotoObj?.url ||
+                existing.sitePhotoUrl ||
+                DEFAULT_SHOWROOM_PHOTO,
+              referenceImageBuffer: activePhotoFileData?.buffer,
+              referenceImageMimeType: activePhotoFileData?.mimeType,
+              productReferenceBuffers:
+                productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
+              placementQuad: effectiveQuad,
+              compositingMode: effectiveCompositingMode,
+              productSpec: {
+                productCode: currentMeta.productSpec?.productCode || 'LED_INDOOR',
+                productName:
+                  input.referenceProductName ||
+                  productReferencePhotoObjs[0]?.name ||
+                  existing.ledCategory ||
+                  'Màn hình LED Indoor',
+                pitch: effectivePitch,
+                screenStyle: effectiveStyle,
+              },
+              dimensions: {
+                widthM: effectiveWidthM,
+                heightM: effectiveHeightM,
+                aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
+              },
+              quality: input.quality || 'draft',
+              modelId: input.modelId,
+              idempotencyKey:
+                input.idempotencyKey ||
+                `chat-design-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+              simulateTimeout: input.simulateAiTimeout,
             },
-            dimensions: {
-              widthM: effectiveWidthM,
-              heightM: effectiveHeightM,
-              aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
+            normalizedProviderId
+          )
+        : await AiDesignProviderFactory.executeBannerWithFallback(
+            {
+              workflow: 'banner',
+              prompt: cleanImagePrompt,
+              productReferenceBuffers:
+                productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
+              dimensions: {
+                widthPx: effectiveBannerW,
+                heightPx: effectiveBannerH,
+                aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
+              },
+              quality: input.quality || 'draft',
+              modelId: input.modelId,
+              idempotencyKey:
+                input.idempotencyKey ||
+                `chat-banner-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+              simulateTimeout: input.simulateAiTimeout,
             },
-            quality: input.quality || 'draft',
-            modelId: input.modelId,
-            idempotencyKey:
-              input.idempotencyKey ||
-              `chat-design-${requestId}-v${nextVersionNumber}-${Date.now()}`,
-            simulateTimeout: input.simulateAiTimeout,
-          },
-          normalizedProviderId
-        )
-      : await AiDesignProviderFactory.executeBannerWithFallback(
-          {
-            workflow: 'banner',
-            prompt: cleanImagePrompt,
-            productReferenceBuffers:
-              productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
-            dimensions: {
-              widthPx: effectiveBannerW,
-              heightPx: effectiveBannerH,
-              aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
-            },
-            quality: input.quality || 'draft',
-            modelId: input.modelId,
-            idempotencyKey:
-              input.idempotencyKey ||
-              `chat-banner-${requestId}-v${nextVersionNumber}-${Date.now()}`,
-            simulateTimeout: input.simulateAiTimeout,
-          },
-          normalizedProviderId
-        );
+            normalizedProviderId
+          );
+  } catch (execErr) {
+    const msg = execErr instanceof Error ? execErr.message : 'Lỗi kết xuất hình ảnh AI.';
+    await markActiveJobFailed(msg);
+    throw execErr;
+  }
+
+  if (Array.isArray(providerResult.failedCloudAttempts)) {
+    for (let idx = 0; idx < providerResult.failedCloudAttempts.length; idx++) {
+      const attempt = providerResult.failedCloudAttempts[idx];
+      await recordAiUsageAttempt(prisma, {
+        idempotencyKey: `${runningJob.jobId}-cloud-fail-${idx}-${attempt.provider}`,
+        attemptNumber: idx + 1,
+        providerRequestId: `${attempt.provider}-${requestId}-v${nextVersionNumber}-fail`,
+        moduleCode: '05-ai-design',
+        taskType: dbType,
+        userId: actor.id,
+        designRequestId: requestId,
+        modelName: attempt.modelUsed,
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        costMicros: null,
+        durationMs: attempt.durationMs ?? null,
+        status: 'failed',
+        errorMessage: attempt.errorMessage || attempt.errorCode || 'Cloud AI image generation failed',
+      }).catch(() => null);
+    }
+  }
 
   if (providerResult.status === 'timeout' || input.simulateAiTimeout) {
     await recordAiUsageAttempt(prisma, {
@@ -2075,6 +2184,7 @@ export async function processChatDesignRequest(
       status: 'timeout',
       errorMessage: 'Hệ thống AI dựng ảnh quá thời gian phản hồi (UC06 E1).',
     });
+    await markActiveJobFailed('Kết nối AI quá thời gian phản hồi (UC06 E1).');
     throw new Error(
       'Kết nối hệ thống AI quá thời gian phản hồi (UC06 E1). Phiên bản hiện tại vẫn được bảo toàn an toàn.'
     );
@@ -2123,6 +2233,12 @@ export async function processChatDesignRequest(
       placementQuad: effectiveQuad,
       chatMessages: updatedChat,
       designContext,
+      activeJob: {
+        ...runningJob,
+        status: 'failed',
+        finishedAt: new Date().toISOString(),
+        message: providerResult.errorMessage || imageValidation.errorMessage || 'Không sinh được ảnh từ Cloud AI.',
+      },
     };
 
     await prisma.designRequest.update({
@@ -2215,6 +2331,12 @@ export async function processChatDesignRequest(
 
   const savedFileMeta = validateGeneratedImageBuffer(finalBufferToSave);
 
+  const isLocalStudioOutput =
+    Boolean(providerResult.isLocalFallback) || providerResult.provider === 'local_sandbox';
+  const generationOrigin: 'CLOUD_AI' | 'LOCAL_COMPOSITE_FALLBACK' = isLocalStudioOutput
+    ? 'LOCAL_COMPOSITE_FALLBACK'
+    : 'CLOUD_AI';
+
   const createdVersion = await createDesignAssetVersionSafe(requestId, (versionNumber) => ({
     designRequestId: requestId,
     versionNumber,
@@ -2226,6 +2348,8 @@ export async function processChatDesignRequest(
     parametersJson: JSON.stringify({
       regeneratedFromVersion: existing.version,
       sourceOrigin: sourceImageOrigin,
+      generationOrigin,
+      isLocalFallback: Boolean(providerResult.isLocalFallback),
       sourcePhotoId: activePhotoObj?.id ?? null,
       referenceSitePhotoId: activePhotoObj?.id ?? null,
       referenceProductPhotoIds: productReferencePhotoObjs.map((p) => p.id),
@@ -2259,6 +2383,9 @@ export async function processChatDesignRequest(
   designContext.fields.activeVersionId = createdVersion.id;
 
   const extraNotices: string[] = [];
+  if (providerResult.fallbackNotice) {
+    extraNotices.push(`• ⚠️ ${providerResult.fallbackNotice}`);
+  }
   if (dbType === 'banner') {
     if (bannerResizeExplanation) extraNotices.push(`• 📐 ${bannerResizeExplanation}`);
     if (bannerTypographyWarning) extraNotices.push(`• ${bannerTypographyWarning}`);
@@ -2286,7 +2413,9 @@ export async function processChatDesignRequest(
       id: `msg-ai-${Date.now() + 1}`,
       role: 'assistant',
       text: [
-        `Đã kết xuất phiên bản thiết kế mới (v${createdVersion.versionNumber} · ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`,
+        isLocalStudioOutput
+          ? `Đã dựng bản phối cảnh kỹ thuật nội bộ (v${createdVersion.versionNumber} · Studio Engine ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`
+          : `Đã kết xuất phiên bản thiết kế Cloud AI (v${createdVersion.versionNumber} · ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`,
         ...extraNotices,
       ].join('\n'),
       timestamp: new Date().toISOString(),
@@ -2311,11 +2440,23 @@ export async function processChatDesignRequest(
     };
   }
 
+  const completedJob: DesignActiveJobDto = {
+    ...runningJob,
+    status: 'succeeded',
+    providerId: providerResult.provider,
+    modelId: providerResult.modelUsed,
+    finishedAt: new Date().toISOString(),
+    resultVersionNo: createdVersion.versionNumber,
+    fallbackUsed: Boolean(providerResult.isLocalFallback),
+    message: providerResult.fallbackNotice || 'Hoàn tất kết xuất bản thiết kế.',
+  };
+
   const updatedMetadata: StoredMetadata = {
     ...currentMeta,
     placementQuad: effectiveQuad,
     chatMessages: updatedChat,
     designContext,
+    activeJob: completedJob,
     processedIdempotencyKeys: processedKeys,
   };
 
@@ -2328,7 +2469,7 @@ export async function processChatDesignRequest(
       prompt: input.prompt,
       aiDraftImageUrl: savedFile.storageObjectKey,
       installPositionJson: JSON.stringify(updatedMetadata),
-      designStatus: 'ai_drafting',
+      designStatus: 'ai_drafted',
       processingTimeMs: (existing.processingTimeMs ?? 0) + providerResult.durationMs,
       tokenCost: newTotalTokens,
       totalCostMicros: newTotalCostMicros,

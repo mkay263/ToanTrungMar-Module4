@@ -39,6 +39,9 @@ import {
 } from '@toantrung/contracts';
 import { shouldAnonymizeLeadForRole } from '../01-leads/service';
 import { getUserCoverMap } from '../../core/auth/service';
+import { getGa4LiveSnapshotsForProperties } from '../02-tracking-sync/ga4-live-cache.service';
+import { getGoogleConnection } from '../02-tracking-sync/google-oauth.service';
+import { AiDesignProviderFactory } from '../05-ai-design/providers';
 
 function isAnonymizedViewerRole(roleCode: SessionUserDto['roleCode']): boolean {
   return shouldAnonymizeLeadForRole(roleCode) || roleCode === 'DESIGNER';
@@ -258,6 +261,9 @@ export async function getScopedReportsDashboard(
 
   const roleLeadWhere: Record<string, unknown> =
     user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
+  const allGa4PropIds = scope.availableWebsites
+    .map((w) => w.ga4PropertyId)
+    .filter((id): id is string => Boolean(id));
 
   const [
     rawLeads,
@@ -272,6 +278,8 @@ export async function getScopedReportsDashboard(
     recentSyncLogs,
     openAlertsCount,
     siteTrafficMetrics,
+    ga4LiveSnaps,
+    googleOAuthConn,
   ] = await Promise.all([
     prisma.lead.findMany({
       where: {
@@ -398,7 +406,11 @@ export async function getScopedReportsDashboard(
         pageViews: true,
       },
     }),
+    getGa4LiveSnapshotsForProperties(allGa4PropIds, fromDateStr, toDateStr, false),
+    getGoogleConnection(),
   ]);
+
+  const ga4SnapByProp = new Map(ga4LiveSnaps.map((s) => [s.propertyId, s]));
 
   // Tổng hợp đồng thời TẤT CẢ các website trên cùng 1 màn hình Tổng quan (không bắt bấm từng tab web)
   const matchedLeadIds = new Set<number>();
@@ -408,6 +420,7 @@ export async function getScopedReportsDashboard(
     for (const sl of siteLeads) matchedLeadIds.add(sl.id);
     const siteValid = siteLeads.filter(isL2Valid);
 
+    const liveSnap = site.ga4PropertyId ? ga4SnapByProp.get(site.ga4PropertyId) : undefined;
     const ga4Rows = site.ga4PropertyId
       ? siteTrafficMetrics.filter(
           (m) => m.platform === 'ga4' && m.accountPropertyId === site.ga4PropertyId,
@@ -421,7 +434,9 @@ export async function getScopedReportsDashboard(
     });
 
     const pageViews = site.ga4PropertyId
-      ? ga4Rows.reduce((s, r) => s + (r.pageViews || 0), 0)
+      ? liveSnap
+        ? liveSnap.totals.screenPageViews
+        : ga4Rows.reduce((s, r) => s + (r.pageViews || 0), 0)
       : null;
     const gscClicks =
       site.gscSiteUrl || gscRows.length > 0
@@ -881,9 +896,13 @@ export async function getScopedReportsDashboard(
   const totalAiTokens = aiLogs.reduce((sum, l) => sum + (l.totalTokens ?? 0), 0);
   const totalAiCostMicros = aiLogs.reduce((sum, l) => sum + (l.costMicros ?? 0n), 0n);
 
-  const liveIntegrationMode = process.env.TOANTRUNG_LIVE_INTEGRATION === 'true';
+  const isOAuthConnectedLive = Boolean(googleOAuthConn?.connected && !googleOAuthConn.isSandboxDemo);
+  const liveIntegrationMode =
+    process.env.TOANTRUNG_LIVE_INTEGRATION === 'true' || isOAuthConnectedLive;
   const distinctPlatforms = new Set(recentSyncLogs.map((c) => c.platform));
-  const configuredConnectionsCount = liveIntegrationMode ? Math.max(distinctPlatforms.size, 3) : 0;
+  const configuredConnectionsCount = liveIntegrationMode
+    ? Math.max(distinctPlatforms.size, isOAuthConnectedLive ? 3 : 0)
+    : 0;
   const failingConnectionsCount = recentSyncLogs.filter((c) => c.consecutiveFailures >= 3).length;
   const gclidPendingRetryCount = leads.filter(
     (l) => Boolean(l.tracking?.gclid && l.tracking?.isUnknownCampaign),
@@ -893,7 +912,16 @@ export async function getScopedReportsDashboard(
       process.env.WORDPRESS_USERNAME &&
       process.env.WORDPRESS_APP_PASSWORD,
   );
-  const geminiConfigured = Boolean(process.env.GEMINI_API_KEY);
+  let geminiConfigured = Boolean(process.env.GEMINI_API_KEY?.trim());
+  if (!geminiConfigured) {
+    try {
+      geminiConfigured = Boolean(
+        AiDesignProviderFactory.getCatalog()?.config?.providers?.google_imagen?.apiKey?.trim(),
+      );
+    } catch {
+      geminiConfigured = false;
+    }
+  }
 
   const needsReviewLeadsCount = leads.filter(
     (l) => l.needsManagerAttention || l.isDuplicateAlert || l.isPhoneUnstandardized,
@@ -1112,7 +1140,8 @@ export async function getScopedReportsDashboard(
       inReviewCount: inReviewDesignCount,
       completed3dCount,
       completedBannerCount,
-      avgProcessingSecText: `${avgProcessingSec.toFixed(1)} giây`,
+      avgProcessingSecText:
+        withDuration.length > 0 ? `${avgProcessingSec.toFixed(1)} giây` : 'Chưa phát sinh',
       totalAiTokens,
       totalAiCost: toMonetaryAmountDto(totalAiCostMicros, 'USD', 'micros'),
     },

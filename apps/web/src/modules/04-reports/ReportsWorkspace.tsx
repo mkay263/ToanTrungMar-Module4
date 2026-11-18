@@ -78,6 +78,30 @@ export function ReportsWorkspace() {
 
   const canExport = Boolean(user && hasBaPermission(user.roleCode, 'EXPORT_DATA'));
 
+  const buildLeadsDrilldownHref = useCallback(
+    (extra: Record<string, string | null | undefined>) => {
+      const qs = new URLSearchParams();
+      if (!Object.prototype.hasOwnProperty.call(extra, 'websiteId') && scope.websiteId && scope.websiteId !== 'all') {
+        qs.set('websiteId', scope.websiteId);
+      }
+      if (scope.preset) {
+        qs.set('preset', scope.preset);
+      }
+      if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+        qs.set('from', scope.from);
+        qs.set('to', scope.to);
+      }
+      for (const [k, v] of Object.entries(extra)) {
+        if (v !== undefined && v !== null && v !== '') {
+          qs.set(k, v);
+        }
+      }
+      const serialized = qs.toString();
+      return serialized ? `/leads?${serialized}` : '/leads';
+    },
+    [scope.websiteId, scope.preset, scope.from, scope.to],
+  );
+
   const loadReports = useCallback(
     async (forceFresh = false, signal?: AbortSignal) => {
       if (!hydrated) return;
@@ -421,7 +445,7 @@ export function ReportsWorkspace() {
             className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3"
           >
             <Link
-              href="/leads"
+              href={buildLeadsDrilldownHref({})}
               className="min-h-[108px] rounded-[12px] border border-slate-200 bg-white p-3.5 shadow-2xs hover:border-slate-300 transition flex flex-col justify-between"
             >
               <div className="text-xs font-medium text-slate-600">Lead tiếp nhận</div>
@@ -438,7 +462,7 @@ export function ReportsWorkspace() {
             </Link>
 
             <Link
-              href="/leads"
+              href={buildLeadsDrilldownHref({ validOnly: '1' })}
               className="min-h-[108px] rounded-[12px] border border-slate-200 bg-white p-3.5 shadow-2xs hover:border-slate-300 transition flex flex-col justify-between"
             >
               <div className="text-xs font-medium text-slate-600">Lead hợp lệ</div>
@@ -456,7 +480,7 @@ export function ReportsWorkspace() {
             </Link>
 
             <Link
-              href="/leads?status=QUOTE_SENT"
+              href={buildLeadsDrilldownHref({ status: 'quote_sent' })}
               className="min-h-[108px] rounded-[12px] border border-slate-200 bg-white p-3.5 shadow-2xs hover:border-slate-300 transition flex flex-col justify-between"
             >
               <div className="text-xs font-medium text-slate-600">Báo giá chờ phản hồi</div>
@@ -471,7 +495,7 @@ export function ReportsWorkspace() {
             </Link>
 
             <Link
-              href="/leads?status=WON"
+              href={buildLeadsDrilldownHref({ status: 'won' })}
               className="min-h-[108px] rounded-[12px] border border-slate-200 bg-white p-3.5 shadow-2xs hover:border-slate-300 transition flex flex-col justify-between"
             >
               <div className="text-xs font-medium text-slate-600">Chốt thành công</div>
@@ -506,7 +530,7 @@ export function ReportsWorkspace() {
                   <AnimatedMetricNumber value={data.metrics.costPerValidAdLead} format={formatVnd} />
                 ) : (
                   <span className="text-sm font-semibold text-slate-500">
-                    {UI_VOCABULARY.fallbacks.unconnected}
+                    {data?.metrics.attributedAdCost === 0 ? '0 ₫ (Chưa đủ mẫu)' : UI_VOCABULARY.fallbacks.unconnected}
                   </span>
                 )}
               </div>
@@ -519,7 +543,7 @@ export function ReportsWorkspace() {
             </div>
 
             <Link
-              href="/leads?overdue=1"
+              href={buildLeadsDrilldownHref({ overdueOnly: 'true' })}
               className="min-h-[108px] rounded-[12px] border border-slate-200 bg-white p-3.5 shadow-2xs hover:border-amber-300 transition flex flex-col justify-between"
             >
               <div className="flex items-center justify-between gap-1">
@@ -536,6 +560,40 @@ export function ReportsWorkspace() {
               <div className="text-[11px] text-slate-500">Quá 7 ngày chưa cập nhật</div>
             </Link>
           </section>
+
+          {/* Dải đối chiếu minh bạch: Kết quả Cohort tạo trong kỳ vs Hoạt động phát sinh thực tế trong kỳ */}
+          {data?.periodActivity && (
+            <section
+              aria-label="Đối chiếu Cohort tạo trong kỳ với Hoạt động phát sinh trong kỳ"
+              className="rounded-[12px] border border-slate-200 bg-slate-50/70 px-4 py-2.5 text-xs flex flex-wrap items-center justify-between gap-3"
+            >
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+                <span className="font-bold text-slate-800">
+                  Phát sinh xử lý trong kỳ (mọi Cohort):
+                </span>
+                <span className="text-slate-600">
+                  Xác nhận tiếp nhận: <strong className="text-slate-900 tabular-nums">{data.periodActivity.receivedInPeriodCount}</strong>
+                </span>
+                <span className="text-slate-600">
+                  Gửi báo giá: <strong className="text-slate-900 tabular-nums">{data.periodActivity.quotedInPeriodCount}</strong>
+                </span>
+                <span className="text-slate-600">
+                  Chốt đơn: <strong className="text-emerald-700 tabular-nums">{data.periodActivity.wonInPeriodCount}</strong>
+                </span>
+                <span className="text-slate-600">
+                  Đóng thất bại: <strong className="text-slate-800 tabular-nums">{data.periodActivity.lostInPeriodCount}</strong>
+                </span>
+                {data.periodActivity.fromPriorCohortCount > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-[11px] font-semibold text-[#1E3A8A]">
+                    Gồm {data.periodActivity.fromPriorCohortCount} hồ sơ tạo từ kỳ trước
+                  </span>
+                )}
+              </div>
+              <span className="text-[11px] text-slate-500">
+                So với tập Lead tạo mới trong kỳ ({data.metrics.wonLeadCount} chốt / {data.metrics.totalLeadCount} tạo mới)
+              </span>
+            </section>
+          )}
 
           {/* Hàng biểu đồ: Phân bố trạng thái hiện tại (thanh 0 = width 0%) + Nhu cầu sản phẩm (không dựng card rỗng cao) */}
           <section className="grid grid-cols-1 gap-4 lg:grid-cols-12 items-start">
@@ -607,7 +665,7 @@ export function ReportsWorkspace() {
                     Hiện có <strong className="text-slate-900">{unclassifiedProductCount} Lead</strong> chưa phân loại nhóm sản phẩm nên chưa hiển thị biểu đồ nhu cầu sản phẩm.
                   </span>
                   <Link
-                    href="/leads?missingProduct=1"
+                    href={buildLeadsDrilldownHref({ missingProduct: '1' })}
                     className="font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
                   >
                     Phân loại trong Lead
@@ -665,7 +723,7 @@ export function ReportsWorkspace() {
                     </span>
                     {unclassifiedProductCount > 0 && (
                       <Link
-                        href="/leads?missingProduct=1"
+                        href={buildLeadsDrilldownHref({ missingProduct: '1' })}
                         className="font-semibold text-[#1E3A8A] hover:underline"
                       >
                         Mở danh sách chưa phân loại
@@ -737,7 +795,14 @@ export function ReportsWorkspace() {
                         <tr key={row.salesId} className="hover:bg-slate-50/80">
                           <td className="px-4 py-2.5 font-medium text-slate-900">
                             <div className="flex flex-wrap items-center gap-1.5">
-                              <span>{row.salesName}</span>
+                              <Link
+                                href={buildLeadsDrilldownHref({
+                                  salesId: row.salesId === 0 ? 'unassigned' : String(row.salesId),
+                                })}
+                                className="hover:text-[#1E3A8A] hover:underline"
+                              >
+                                {row.salesName}
+                              </Link>
                               {row.isReconciliationBucket && (
                                 <span className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-medium text-slate-600">
                                   {row.roleLabel || 'Đối soát ngoài nhóm Sales'}
@@ -802,7 +867,16 @@ export function ReportsWorkspace() {
                           <tr key={row.website} className="hover:bg-slate-50/80">
                             <td className="px-4 py-2.5 font-medium text-slate-900">
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span>{row.website}</span>
+                                <Link
+                                  href={buildLeadsDrilldownHref(
+                                    row.isUnclassifiedWebsite
+                                      ? { missingWebsite: '1' }
+                                      : { websiteId: row.website },
+                                  )}
+                                  className="hover:text-[#1E3A8A] hover:underline"
+                                >
+                                  {row.website}
+                                </Link>
                                 {row.isUnclassifiedWebsite && (
                                   <span className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-medium text-slate-600">
                                     Kênh trực tiếp / chưa gắn domain
@@ -926,10 +1000,19 @@ export function ReportsWorkspace() {
                           <tr key={row.productId || row.productName} className="hover:bg-slate-50/80">
                             <td className="px-4 py-2.5 font-medium text-slate-900">
                               <div className="flex flex-wrap items-center gap-1.5">
-                                <span>{row.productName}</span>
+                                <Link
+                                  href={buildLeadsDrilldownHref(
+                                    row.isUnclassifiedProduct
+                                      ? { missingProduct: '1' }
+                                      : { productId: String(row.productId) },
+                                  )}
+                                  className="hover:text-[#1E3A8A] hover:underline"
+                                >
+                                  {row.productName}
+                                </Link>
                                 {row.isUnclassifiedProduct && (
                                   <Link
-                                    href="/leads?missingProduct=1"
+                                    href={buildLeadsDrilldownHref({ missingProduct: '1' })}
                                     className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
                                   >
                                     (Cập nhật phân loại)

@@ -13,8 +13,7 @@ export async function GET(req: Request) {
 
   const canView =
     hasBaPermission(auth.user.roleCode, 'AI_DESIGN') ||
-    hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW') ||
-    hasBaPermission(auth.user.roleCode, 'LEAD_VIEW_OWN');
+    hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW');
 
   if (!canView) {
     return jsonError('FORBIDDEN', 'Tài khoản không có quyền xem tệp tài sản thiết kế.', 403);

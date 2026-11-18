@@ -46,7 +46,7 @@ interface StoredClientConfig {
 }
 
 export interface StoredGoogleAdsApiConfig {
-  developerToken: string;
+  developerToken: string | null;
   customerId: string | null;
   loginCustomerId: string | null;
 }
@@ -56,6 +56,7 @@ export interface GoogleAdsApiConfigDto {
   developerTokenMasked: string | null;
   customerId: string | null;
   loginCustomerId: string | null;
+  oauthDirectSupported?: boolean;
 }
 
 const SETTING_KEY_CONNECTION = 'google_oauth_connection';
@@ -217,23 +218,28 @@ function normalizeDigitsId(raw?: string | null): string | null {
 
 export async function getGoogleAdsApiConfig(): Promise<StoredGoogleAdsApiConfig | null> {
   // 1. Check encrypted DB setting first (so UI-saved config takes effect immediately without restart)
+  let dbCustomerId: string | null = null;
+  let dbLoginCustomerId: string | null = null;
   try {
     const row = await prisma.systemSetting.findUnique({
       where: { key: SETTING_KEY_ADS_CONFIG },
     });
     if (row?.value) {
       const parsed = JSON.parse(row.value) as {
-        developerToken?: string;
+        developerToken?: string | null;
         customerId?: string | null;
         loginCustomerId?: string | null;
       };
       const plainToken = parsed.developerToken ? decryptSecret(parsed.developerToken).trim() : '';
-      if (plainToken) {
+      dbCustomerId = normalizeDigitsId(parsed.customerId) || normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID);
+      dbLoginCustomerId =
+        normalizeDigitsId(parsed.loginCustomerId) || normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
+
+      if (plainToken || dbCustomerId || dbLoginCustomerId) {
         return {
-          developerToken: plainToken,
-          customerId: normalizeDigitsId(parsed.customerId) || normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID),
-          loginCustomerId:
-            normalizeDigitsId(parsed.loginCustomerId) || normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+          developerToken: plainToken || null,
+          customerId: dbCustomerId,
+          loginCustomerId: dbLoginCustomerId,
         };
       }
     }
@@ -243,11 +249,13 @@ export async function getGoogleAdsApiConfig(): Promise<StoredGoogleAdsApiConfig 
 
   // 2. Fallback to environment variables
   const envToken = (process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '').trim().replace(/^["']+|["']+$/g, '');
-  if (envToken) {
+  const envCust = normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID);
+  const envMcc = normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID);
+  if (envToken || envCust || envMcc) {
     return {
-      developerToken: envToken,
-      customerId: normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID),
-      loginCustomerId: normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+      developerToken: envToken || null,
+      customerId: envCust,
+      loginCustomerId: envMcc,
     };
   }
 
@@ -255,16 +263,18 @@ export async function getGoogleAdsApiConfig(): Promise<StoredGoogleAdsApiConfig 
 }
 
 export async function saveGoogleAdsApiConfig(input: {
-  developerToken: string;
+  developerToken?: string | null;
   customerId?: string | null;
   loginCustomerId?: string | null;
 }): Promise<void> {
-  const cleanToken = input.developerToken.trim();
+  const existing = await getGoogleAdsApiConfig();
+  const rawInputToken = typeof input.developerToken === 'string' ? input.developerToken.trim() : '';
+  const finalToken = rawInputToken || existing?.developerToken || null;
   const cleanCust = normalizeDigitsId(input.customerId);
   const cleanMcc = normalizeDigitsId(input.loginCustomerId);
 
   const payload = JSON.stringify({
-    developerToken: encryptSecret(cleanToken),
+    developerToken: finalToken ? encryptSecret(finalToken) : null,
     customerId: cleanCust,
     loginCustomerId: cleanMcc,
   });
@@ -286,19 +296,19 @@ export async function saveGoogleAdsApiConfig(input: {
 
 export async function getGoogleAdsApiConfigDto(): Promise<GoogleAdsApiConfigDto> {
   const cfg = await getGoogleAdsApiConfig();
-  if (!cfg || !cfg.developerToken) {
-    return {
-      hasDeveloperToken: false,
-      developerTokenMasked: null,
-      customerId: normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID),
-      loginCustomerId: normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
-    };
-  }
+  const conn = await getGoogleConnection();
+  const resolvedCustomerId =
+    cfg?.customerId ||
+    normalizeDigitsId(conn?.selectedGadsCustomerId) ||
+    normalizeDigitsId(conn?.detectedGadsCustomerId) ||
+    normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID);
+
   return {
-    hasDeveloperToken: true,
-    developerTokenMasked: maskSecret(cfg.developerToken),
-    customerId: cfg.customerId,
-    loginCustomerId: cfg.loginCustomerId,
+    hasDeveloperToken: Boolean(cfg?.developerToken),
+    developerTokenMasked: cfg?.developerToken ? maskSecret(cfg.developerToken) : null,
+    customerId: resolvedCustomerId,
+    loginCustomerId: cfg?.loginCustomerId || normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+    oauthDirectSupported: true,
   };
 }
 
@@ -500,42 +510,47 @@ export async function testGoogleConnection(): Promise<GoogleTestConnectionResult
     // non-fatal
   }
 
-  // 3. Probe Google Ads Accessible Customers (requires developer-token header)
+  // 3. Probe Google Ads Accessible Customers (Google Ads v26 supports OAuth directly; developer-token optional)
   try {
     const adsCfg = await getGoogleAdsApiConfig();
+    const adsHeaders: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+    };
     if (adsCfg?.developerToken) {
-      const adsHeaders: Record<string, string> = {
-        Authorization: `Bearer ${token}`,
-        'developer-token': adsCfg.developerToken,
-      };
-      if (adsCfg.loginCustomerId) {
-        adsHeaders['login-customer-id'] = adsCfg.loginCustomerId;
-      }
-      let resAds = await fetch('https://googleads.googleapis.com/v19/customers:listAccessibleCustomers', {
+      adsHeaders['developer-token'] = adsCfg.developerToken;
+    }
+    if (adsCfg?.loginCustomerId) {
+      adsHeaders['login-customer-id'] = adsCfg.loginCustomerId;
+    }
+
+    let resAds: Response | null = null;
+    for (const apiVer of ['v26', 'v25', 'v24']) {
+      resAds = await fetch(`https://googleads.googleapis.com/${apiVer}/customers:listAccessibleCustomers`, {
         headers: adsHeaders,
       });
-      if (resAds.status === 404) {
-        resAds = await fetch('https://googleads.googleapis.com/v18/customers:listAccessibleCustomers', {
-          headers: adsHeaders,
-        });
-      }
-      if (resAds.ok) {
-        canAccessAds = true;
-        const adsData = (await resAds.json()) as { resourceNames?: string[] };
-        for (const resName of adsData.resourceNames || []) {
-          const custId = resName.replace('customers/', '');
-          adsCustomersCount++;
-          if (!conn.detectedGadsCustomerId) {
-            conn.detectedGadsCustomerId = custId;
-          }
-          accessibleResources.push({
-            id: custId,
-            name: `Khách hàng Google Ads ${custId}`,
-            type: 'GOOGLE_ADS_CUSTOMER',
-            permissionLevel: 'Viewer (Read-Only)',
-            isAccessible: true,
-          });
+      if (resAds.status !== 404) break;
+    }
+
+    if (resAds?.ok) {
+      canAccessAds = true;
+      const adsData = (await resAds.json()) as { resourceNames?: string[] };
+      for (const resName of adsData.resourceNames || []) {
+        const custId = resName.replace('customers/', '').replace(/\D/g, '');
+        if (!custId) continue;
+        adsCustomersCount++;
+        if (!conn.detectedGadsCustomerId) {
+          conn.detectedGadsCustomerId = custId;
         }
+        if (!conn.selectedGadsCustomerId) {
+          conn.selectedGadsCustomerId = custId;
+        }
+        accessibleResources.push({
+          id: custId,
+          name: `Khách hàng Google Ads ${custId}`,
+          type: 'GOOGLE_ADS_CUSTOMER',
+          permissionLevel: 'Viewer (Read-Only)',
+          isAccessible: true,
+        });
       }
     }
   } catch {
@@ -889,7 +904,7 @@ export function triggerBackgroundTrackingSyncIfStale(): void {
 export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_1100' | 'LIGHT_1700' | 'MANUAL_RETRY' = 'MANUAL_RETRY') {
   const token = await getValidAccessToken();
   const conn = await getGoogleConnection();
-  const windowDays = slot === 'FULL_0200' ? 30 : 2;
+  const windowDays = slot === 'FULL_0200' ? 30 : 7;
   const dateRange = getCanonicalDateRange(windowDays);
   const startStr = dateRange.startDateStr;
   const todayStr = dateRange.endDateStr;
@@ -940,7 +955,8 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
     }
 
     const adsCfg = await getGoogleAdsApiConfig();
-    if (adsCfg?.developerToken) {
+    const hasAdsScope = Boolean(conn?.scopes?.some((s) => s.includes('adwords')));
+    if (hasAdsScope || adsCfg?.developerToken) {
       try {
         adsOutcome = await syncRealGoogleAds(token, conn, adsCfg, Math.max(windowDays, 30));
         realAdsCount = adsOutcome.synced;
@@ -962,7 +978,7 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
         data: {
           platform: 'google_ads',
           accountPropertyId:
-            adsCfg.customerId || conn?.selectedGadsCustomerId || conn?.detectedGadsCustomerId || 'GADS_ACCOUNT',
+            adsCfg?.customerId || conn?.selectedGadsCustomerId || conn?.detectedGadsCustomerId || 'GADS_ACCOUNT',
           runType: slot === 'FULL_0200' ? 'full' : 'light',
           windowStartDate: startStr,
           windowEndDate: todayStr,
@@ -1860,10 +1876,40 @@ async function syncRealSearchConsole(
   return { success: true, synced, isEmpty: synced === 0 };
 }
 
+function inferDomainFromCampaignMetadata(campaignName: string, finalUrls?: string[]): string | null {
+  for (const rawUrl of finalUrls || []) {
+    try {
+      const host = new URL(rawUrl).hostname.replace(/^www\./i, '').toLowerCase();
+      if (host) return host;
+    } catch {
+      // ignore invalid url
+    }
+  }
+  const lower = (campaignName || '').toLowerCase();
+  if (lower.includes('bangdientu')) return 'bangdientu.com.vn';
+  if (lower.includes('bangled')) return 'bangled.vn';
+  if (lower.includes('manhinhled')) return 'manhinhled.net.vn';
+  if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt')) return 'toantrung.com.vn';
+  return null;
+}
+
+async function fetchGoogleAdsWithFallback(
+  relativePath: string,
+  init: RequestInit,
+): Promise<Response> {
+  let lastRes: Response | null = null;
+  for (const apiVer of ['v26', 'v25', 'v24']) {
+    const res = await fetch(`https://googleads.googleapis.com/${apiVer}/${relativePath}`, init);
+    lastRes = res;
+    if (res.status !== 404) return res;
+  }
+  return lastRes!;
+}
+
 async function syncRealGoogleAds(
   token: string,
   conn: StoredGoogleConnection | null,
-  adsCfg: StoredGoogleAdsApiConfig,
+  adsCfg: StoredGoogleAdsApiConfig | null,
   windowDays = 30,
 ): Promise<{ success: boolean; synced: number; error?: string }> {
   const dateRange = getCanonicalDateRange(windowDays);
@@ -1872,27 +1918,24 @@ async function syncRealGoogleAds(
 
   const baseHeaders: Record<string, string> = {
     Authorization: `Bearer ${token}`,
-    'developer-token': adsCfg.developerToken,
     'Content-Type': 'application/json',
   };
-  if (adsCfg.loginCustomerId) {
+  if (adsCfg?.developerToken) {
+    baseHeaders['developer-token'] = adsCfg.developerToken;
+  }
+  if (adsCfg?.loginCustomerId) {
     baseHeaders['login-customer-id'] = adsCfg.loginCustomerId;
   }
 
   let targetCustomerId =
-    adsCfg.customerId ||
+    adsCfg?.customerId ||
     normalizeDigitsId(conn?.selectedGadsCustomerId) ||
     normalizeDigitsId(conn?.detectedGadsCustomerId);
 
   if (!targetCustomerId) {
-    let listRes = await fetch('https://googleads.googleapis.com/v19/customers:listAccessibleCustomers', {
+    const listRes = await fetchGoogleAdsWithFallback('customers:listAccessibleCustomers', {
       headers: baseHeaders,
     });
-    if (listRes.status === 404) {
-      listRes = await fetch('https://googleads.googleapis.com/v18/customers:listAccessibleCustomers', {
-        headers: baseHeaders,
-      });
-    }
     if (!listRes.ok) {
       const errTxt = await listRes.text();
       return {
@@ -1913,36 +1956,139 @@ async function syncRealGoogleAds(
     targetCustomerId = first;
     if (conn) {
       conn.detectedGadsCustomerId = first;
+      if (!conn.selectedGadsCustomerId) {
+        conn.selectedGadsCustomerId = first;
+      }
+      const hasCustResource = conn.accessibleResources?.some(
+        (r) => r.type === 'GOOGLE_ADS_CUSTOMER' && r.id === first,
+      );
+      if (!hasCustResource) {
+        conn.accessibleResources = [
+          ...(conn.accessibleResources || []),
+          {
+            id: first,
+            name: `Khách hàng Google Ads ${first}`,
+            type: 'GOOGLE_ADS_CUSTOMER',
+            permissionLevel: 'Viewer (Read-Only)',
+            isAccessible: true,
+          },
+        ];
+      }
+      await saveGoogleConnection(conn).catch(() => null);
     }
   }
 
-  const gaql = `SELECT campaign.id, campaign.name, campaign.status, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startStr}' AND '${endStr}'`;
-
-  let searchRes = await fetch(
-    `https://googleads.googleapis.com/v19/customers/${targetCustomerId}/googleAds:search`,
-    {
-      method: 'POST',
-      headers: baseHeaders,
-      body: JSON.stringify({ query: gaql }),
-    },
-  );
-  if (searchRes.status === 404) {
-    searchRes = await fetch(
-      `https://googleads.googleapis.com/v18/customers/${targetCustomerId}/googleAds:search`,
-      {
-        method: 'POST',
-        headers: baseHeaders,
-        body: JSON.stringify({ query: gaql }),
-      },
-    );
+  // Step A: Sync campaign catalog + ad landing final_urls (captures PAUSED campaigns with 0 daily metrics)
+  const finalUrlsByCampaign = new Map<string, string[]>();
+  const urlsGaql =
+    `SELECT campaign.id, ad_group_ad.ad.final_urls FROM ad_group_ad WHERE campaign.status != 'REMOVED' LIMIT 200`;
+  const urlsRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
+    method: 'POST',
+    headers: baseHeaders,
+    body: JSON.stringify({ query: urlsGaql }),
+  });
+  if (urlsRes.ok) {
+    const urlsJson = (await urlsRes.json()) as {
+      results?: Array<{
+        campaign?: { id?: string };
+        adGroupAd?: { ad?: { finalUrls?: string[] } };
+      }>;
+    };
+    for (const row of urlsJson.results || []) {
+      const cid = String(row.campaign?.id || '').trim();
+      const urls = row.adGroupAd?.ad?.finalUrls || [];
+      if (!cid || urls.length === 0) continue;
+      const existing = finalUrlsByCampaign.get(cid) || [];
+      for (const u of urls) {
+        if (!existing.includes(u)) existing.push(u);
+      }
+      finalUrlsByCampaign.set(cid, existing);
+    }
   }
+
+  const catalogGaql =
+    `SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros FROM campaign WHERE campaign.status != 'REMOVED'`;
+  const catalogRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
+    method: 'POST',
+    headers: baseHeaders,
+    body: JSON.stringify({ query: catalogGaql }),
+  });
+  if (!catalogRes.ok) {
+    const errTxt = await catalogRes.text();
+    return {
+      success: false,
+      synced: 0,
+      error: `Google Ads API (${catalogRes.status}) cho Customer ${targetCustomerId}: ${errTxt.slice(0, 220)}`,
+    };
+  }
+
+  const catalogData = (await catalogRes.json()) as {
+    results?: Array<{
+      campaign?: { id?: string; name?: string; status?: string };
+      campaignBudget?: { amountMicros?: string | number };
+    }>;
+  };
+
+  let synced = 0;
+  const domainByCampaignId = new Map<string, string | null>();
+  for (const row of catalogData.results || []) {
+    const extId = String(row.campaign?.id || '').trim();
+    const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
+    if (!extId) continue;
+
+    const resolvedDomain = inferDomainFromCampaignMetadata(
+      campName,
+      finalUrlsByCampaign.get(extId),
+    );
+    domainByCampaignId.set(extId, resolvedDomain);
+
+    const campCode = `GADS_${extId}`;
+    const isActive = row.campaign?.status === 'ENABLED';
+    const budgetMicros = row.campaignBudget?.amountMicros
+      ? BigInt(String(row.campaignBudget.amountMicros))
+      : null;
+
+    await prisma.campaign.upsert({
+      where: {
+        uq_campaign_platform_account_code: {
+          platform: 'google_ads',
+          accountExternalId: targetCustomerId,
+          campaignCode: campCode,
+        },
+      },
+      update: {
+        campaignName: campName,
+        isActive,
+        ...(budgetMicros !== null ? { dailyBudgetMicros: budgetMicros } : {}),
+        ...(resolvedDomain ? { utmCampaignSlug: `domain:${resolvedDomain}` } : {}),
+      },
+      create: {
+        campaignCode: campCode,
+        campaignName: campName,
+        platform: 'google_ads',
+        accountExternalId: targetCustomerId,
+        isActive,
+        dailyBudgetMicros: budgetMicros,
+        utmCampaignSlug: resolvedDomain ? `domain:${resolvedDomain}` : null,
+      },
+    });
+    synced += 1;
+  }
+
+  // Step B: Sync daily campaign performance metrics within window
+  const gaql = `SELECT campaign.id, campaign.name, campaign.status, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startStr}' AND '${endStr}'`;
+  const searchRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
+    method: 'POST',
+    headers: baseHeaders,
+    body: JSON.stringify({ query: gaql }),
+  });
 
   if (!searchRes.ok) {
     const errTxt = await searchRes.text();
     return {
       success: false,
-      synced: 0,
-      error: `Google Ads API (${searchRes.status}) cho Customer ${targetCustomerId}: ${errTxt.slice(0, 220)}`,
+      synced,
+      error: `Google Ads metrics (${searchRes.status}) cho Customer ${targetCustomerId}: ${errTxt.slice(0, 220)}`,
     };
   }
 
@@ -1959,13 +2105,14 @@ async function syncRealGoogleAds(
     }>;
   };
 
-  let synced = 0;
   for (const row of data.results || []) {
     const extId = String(row.campaign?.id || '').trim();
     const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
     const metricDate = String(row.segments?.date || '').trim();
     if (!extId || !metricDate) continue;
 
+    const resolvedDomain =
+      domainByCampaignId.get(extId) ?? inferDomainFromCampaignMetadata(campName);
     const campCode = `GADS_${extId}`;
     const isActive = row.campaign?.status === 'ENABLED';
     const campRecord = await prisma.campaign.upsert({
@@ -1986,6 +2133,7 @@ async function syncRealGoogleAds(
         platform: 'google_ads',
         accountExternalId: targetCustomerId,
         isActive,
+        utmCampaignSlug: resolvedDomain ? `domain:${resolvedDomain}` : null,
       },
     });
 
@@ -2002,6 +2150,7 @@ async function syncRealGoogleAds(
       grain: 'campaign',
       campaignId: campRecord.id,
       campaignExternalId: extId,
+      pageUrlRaw: resolvedDomain ? `https://${resolvedDomain}` : undefined,
       impressions,
       clicks,
       spendMicros,

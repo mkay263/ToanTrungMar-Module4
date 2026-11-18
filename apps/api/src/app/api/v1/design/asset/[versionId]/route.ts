@@ -17,8 +17,7 @@ export async function GET(
 
   const canDownload =
     hasBaPermission(auth.user.roleCode, 'AI_DESIGN') ||
-    hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW') ||
-    hasBaPermission(auth.user.roleCode, 'LEAD_VIEW_OWN');
+    hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW');
 
   if (!canDownload) {
     return jsonError(

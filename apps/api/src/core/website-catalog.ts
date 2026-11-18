@@ -63,6 +63,7 @@ const FRIENDLY_DOMAIN_NAMES: Record<string, string> = {
   'toantrung.com.vn': 'Website Toàn Trung',
   'bangled.vn': 'Chuyên trang Bảng LED',
   'manhinhled.net.vn': 'Chuyên trang Màn hình LED',
+  'bangdientu.com.vn': 'Chuyên trang Bảng điện tử',
   'ledtoantrung.vn': 'LED Toàn Trung',
 };
 
@@ -105,8 +106,14 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
         if (r.type === 'GA4_PROPERTY') {
           const cleanName = (r.name || r.id).replace(/\s*\(\d+\)\s*$/, '').trim();
           const domainMatch = cleanName.match(/([a-z0-9.-]+\.[a-z]{2,})/i);
-          const domain = domainMatch ? normalizeDomainKey(domainMatch[1]) : `ga4-${r.id}`;
-          const resolvedDomain = domainMatch ? domain : cleanName;
+          const inferredSpecialDomain =
+            r.id === '508951192' || /bảng điện tử|bangdientu/i.test(cleanName)
+              ? 'bangdientu.com.vn'
+              : null;
+          const domain = domainMatch
+            ? normalizeDomainKey(domainMatch[1])
+            : inferredSpecialDomain || `ga4-${r.id}`;
+          const resolvedDomain = domainMatch ? domain : inferredSpecialDomain || cleanName;
           const existing = byDomain.get(domain);
           byDomain.set(domain, {
             websiteId: domain,
@@ -203,7 +210,9 @@ export async function resolveDashboardScope(params?: {
           (w) =>
             w.websiteId.toLowerCase() === reqWebsite ||
             w.domain.toLowerCase() === reqWebsite ||
-            w.ga4PropertyId === reqWebsite,
+            w.ga4PropertyId === reqWebsite ||
+            (w.ga4PropertyId &&
+              (reqWebsite === `ga4-${w.ga4PropertyId}` || reqWebsite === `ga4_${w.ga4PropertyId}`)),
         ) || null
       : null;
 

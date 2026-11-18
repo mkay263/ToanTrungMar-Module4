@@ -300,8 +300,14 @@ export async function listLeadsForUser(
     sourceWebsite?: string;
     search?: string;
     includeSpam?: boolean;
+    validOnly?: boolean;
     overdueOnly?: boolean;
     unreceivedOnly?: boolean;
+    missingProductOnly?: boolean;
+    salesId?: string;
+    productId?: string;
+    fromDateStr?: string;
+    toDateStr?: string;
     page?: number;
     pageSize?: number;
     limit?: number;
@@ -333,10 +339,12 @@ export async function listLeadsForUser(
     }
   }
 
-  if (filters?.status && filters.status !== 'all') {
-    whereClause.pipelineStatus = filters.status;
+  const rawNormStatus = (filters?.status || '').trim().toLowerCase();
+  const normalizedStatus = rawNormStatus === 'new_info' ? 'new_lead' : rawNormStatus;
+  if (normalizedStatus && normalizedStatus !== 'all') {
+    whereClause.pipelineStatus = normalizedStatus;
   }
-  if (!filters?.includeSpam) {
+  if (filters?.validOnly || !filters?.includeSpam) {
     whereClause.isSpam = false;
   }
   if (filters?.overdueOnly) {
@@ -350,14 +358,45 @@ export async function listLeadsForUser(
     whereClause.pipelineStatus = 'new_lead';
     whereClause.receivedAt = null;
   }
+  if (filters?.salesId && filters.salesId !== 'all') {
+    if (filters.salesId === 'unassigned' || filters.salesId === '0') {
+      whereClause.assignedSalesId = null;
+    } else {
+      const parsedSid = Number(filters.salesId);
+      if (Number.isInteger(parsedSid) && parsedSid > 0) {
+        whereClause.assignedSalesId = parsedSid;
+      }
+    }
+  }
+  if (filters?.missingProductOnly || filters?.productId === 'unclassified' || filters?.productId === '0') {
+    whereClause.leadProducts = { none: {} };
+  } else if (filters?.productId && filters.productId !== 'all') {
+    const parsedPid = Number(filters.productId);
+    if (Number.isInteger(parsedPid) && parsedPid > 0) {
+      whereClause.leadProducts = { some: { productId: parsedPid } };
+    }
+  }
+  if (filters?.fromDateStr || filters?.toDateStr) {
+    const createdAtFilter: Record<string, Date> = {};
+    if (filters.fromDateStr && /^\d{4}-\d{2}-\d{2}$/.test(filters.fromDateStr)) {
+      createdAtFilter.gte = new Date(`${filters.fromDateStr}T00:00:00.000+07:00`);
+    }
+    if (filters.toDateStr && /^\d{4}-\d{2}-\d{2}$/.test(filters.toDateStr)) {
+      createdAtFilter.lte = new Date(`${filters.toDateStr}T23:59:59.999+07:00`);
+    }
+    if (createdAtFilter.gte || createdAtFilter.lte) {
+      whereClause.createdAt = createdAtFilter;
+    }
+  }
   if (filters?.sourceWebsite && filters.sourceWebsite !== 'all') {
-    if (filters.sourceWebsite === '__unresolved__') {
+    const normWeb = filters.sourceWebsite.trim().toLowerCase();
+    if (normWeb === '__unresolved__' || normWeb === 'missing') {
       whereClause.AND = [
         ...(Array.isArray(whereClause.AND) ? (whereClause.AND as unknown[]) : []),
         { OR: [{ sourceWebsite: null }, { sourceWebsite: '' }] },
       ];
     } else {
-      whereClause.sourceWebsite = filters.sourceWebsite.trim().toLowerCase();
+      whereClause.sourceWebsite = normWeb;
     }
   }
   if (filters?.search && filters.search.trim()) {
@@ -733,8 +772,14 @@ export async function exportAllLeadsForUser(
     sourceWebsite?: string;
     search?: string;
     includeSpam?: boolean;
+    validOnly?: boolean;
     overdueOnly?: boolean;
     unreceivedOnly?: boolean;
+    missingProductOnly?: boolean;
+    salesId?: string;
+    productId?: string;
+    fromDateStr?: string;
+    toDateStr?: string;
   },
 ): Promise<{ leads: LeadItemDto[]; totalCount: number }> {
   const BATCH_SIZE = 100;

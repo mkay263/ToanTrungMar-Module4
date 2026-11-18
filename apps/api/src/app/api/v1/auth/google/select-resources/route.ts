@@ -7,8 +7,15 @@ export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
   try {
-    const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
+    const auth = await requireAuthenticatedSession(req, { requireCsrf: true });
     if (!auth.ok) return auth.response;
+    if (auth.user.roleCode !== 'ADMIN' && auth.user.roleCode !== 'MKT_LEAD') {
+      return jsonError(
+        'FORBIDDEN',
+        'Chỉ Quản trị viên hoặc Trưởng phòng Marketing mới được chọn tài nguyên Google.',
+        403,
+      );
+    }
 
     const body = await req.json().catch(() => ({}));
     const parsed = SelectGoogleResourcesSchema.safeParse(body);

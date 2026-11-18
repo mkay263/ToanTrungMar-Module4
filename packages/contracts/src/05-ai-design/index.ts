@@ -124,11 +124,25 @@ export interface LedProductSpecDto {
   technicalNotes: string;
 }
 
+export interface DesignActiveJobDto {
+  jobId: string;
+  status: 'running' | 'succeeded' | 'failed';
+  action: 'GENERATE_SCENE' | 'GENERATE_BANNER' | 'RETRY';
+  providerId: string;
+  modelId: string;
+  startedAt: string;
+  finishedAt?: string | null;
+  resultVersionNo?: number | null;
+  fallbackUsed?: boolean;
+  message?: string | null;
+}
+
 export interface DesignAssetVersionItemDto {
   id: number;
   designRequestId: number;
   versionNumber: number;
   sourceType: 'AI_DRAFT' | 'DESIGNER_FINAL_UPLOAD';
+  generationOrigin?: 'CLOUD_AI' | 'LOCAL_COMPOSITE_FALLBACK' | 'DESIGNER_UPLOAD' | null;
   providerId?: string | null;
   modelUsed?: string | null;
   storageObjectKey: string;
@@ -191,6 +205,7 @@ export interface DesignRequestItemDto {
   tokenCost: number | null;
   totalCost: MonetaryAmountDto | null;
   status: DesignStatus;
+  activeJob?: DesignActiveJobDto | null;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;

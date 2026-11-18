@@ -44,7 +44,17 @@ export async function POST(req: Request) {
       mockConnectedEmail?: string;
     };
 
+    const canManageGmailConfig =
+      auth.user.roleCode === 'ADMIN' || auth.user.roleCode === 'MKT_LEAD';
+
     if (body.action === 'save_config') {
+      if (!canManageGmailConfig) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Quản trị viên hoặc Trưởng phòng Marketing mới được thay đổi cấu hình đồng bộ Gmail.',
+          403,
+        );
+      }
       const updatedConfig = await saveGmailLeadSyncConfig({
         enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
         query: typeof body.query === 'string' ? body.query : undefined,
@@ -59,11 +69,23 @@ export async function POST(req: Request) {
     }
 
     if (
-      typeof body.enabled === 'boolean' ||
-      typeof body.query === 'string' ||
-      typeof body.maxMessages === 'number' ||
-      typeof body.pollIntervalSec === 'number' ||
-      typeof body.onlyLeadKeywords === 'boolean'
+      (Array.isArray(body.mockMessages) || body.mockConnectedEmail) &&
+      auth.user.roleCode !== 'ADMIN'
+    ) {
+      return jsonError(
+        'FORBIDDEN_PERMISSION',
+        'Chỉ Quản trị viên (ADMIN) mới được truyền dữ liệu Gmail giả lập kiểm thử.',
+        403,
+      );
+    }
+
+    if (
+      canManageGmailConfig &&
+      (typeof body.enabled === 'boolean' ||
+        typeof body.query === 'string' ||
+        typeof body.maxMessages === 'number' ||
+        typeof body.pollIntervalSec === 'number' ||
+        typeof body.onlyLeadKeywords === 'boolean')
     ) {
       await saveGmailLeadSyncConfig({
         enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
@@ -77,11 +99,15 @@ export async function POST(req: Request) {
     }
 
     const result = await syncLeadsFromGmail({
-      query: body.query,
-      maxMessages: body.maxMessages,
-      onlyLeadKeywords: body.onlyLeadKeywords,
-      mockMessages: Array.isArray(body.mockMessages) ? body.mockMessages : undefined,
-      mockConnectedEmail: body.mockConnectedEmail,
+      query: canManageGmailConfig ? body.query : undefined,
+      maxMessages: canManageGmailConfig ? body.maxMessages : undefined,
+      onlyLeadKeywords: canManageGmailConfig ? body.onlyLeadKeywords : undefined,
+      mockMessages:
+        auth.user.roleCode === 'ADMIN' && Array.isArray(body.mockMessages)
+          ? body.mockMessages
+          : undefined,
+      mockConnectedEmail:
+        auth.user.roleCode === 'ADMIN' ? body.mockConnectedEmail : undefined,
     });
     const status = await getGmailLeadSyncStatus();
 

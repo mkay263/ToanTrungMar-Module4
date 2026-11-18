@@ -272,13 +272,31 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       icon: Bell,
       badge: unreadCount,
     },
-    {
-      href: '/profile',
-      label: UI_VOCABULARY.menu.profile,
-      shortLabel: UI_VOCABULARY.menu.profile,
-      icon: UserCircle2,
-    },
   ];
+
+  // Chỉ hiển thị ô tìm kiếm trên thanh Topbar ở các phân hệ dùng tìm kiếm toàn trang, tránh trùng với ô tìm kiếm nội bộ bảng
+  const showTopbarSearch =
+    pathname === '/dashboard' ||
+    pathname === '/leads' ||
+    pathname.startsWith('/leads/') ||
+    pathname === '/tracking' ||
+    pathname === '/reports' ||
+    pathname === '/design';
+
+  // Các trang đã có thẻ tiêu đề H1 lớn ngay đầu trang thì không lặp lại tên trang lần 2 ở Topbar desktop
+  const pageHasOwnHeaderTitle =
+    pathname === '/dashboard' ||
+    pathname === '/tracking' ||
+    pathname === '/ads' ||
+    pathname === '/reports' ||
+    pathname === '/notifications' ||
+    pathname.startsWith('/admin/') ||
+    pathname.startsWith('/settings');
+
+  const topbarSearchPlaceholder =
+    pathname === '/leads' || pathname.startsWith('/leads/')
+      ? 'Tìm SĐT, tên khách, công ty, mã hồ sơ Lead...'
+      : `Tìm kiếm nhanh trong ${currentBreadcrumb}...`;
 
   const systemNav: NavItem[] = [
     {
@@ -502,12 +520,17 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           {renderNavGroup(visibleSystemNav, 'Quản trị hệ thống', true)}
         </nav>
 
-        {/* Tài khoản ở cuối sidebar — đồng bộ hiển thị hình nền cá nhân */}
+        {/* Tài khoản ở cuối sidebar — điểm truy cập Tài khoản cá nhân duy nhất trên desktop */}
         <div className="p-2.5 border-t border-white/[0.08]">
           <Link
             href="/profile"
+            aria-current={pathname === '/profile' ? 'page' : undefined}
             style={user.coverUrl ? resolveCoverBackgroundStyle(user.coverUrl) : undefined}
-            className={`relative overflow-hidden flex items-center gap-2.5 rounded-xl p-2 border border-white/15 hover:border-sky-400/50 transition-all ${
+            className={`relative overflow-hidden flex items-center gap-2.5 rounded-xl p-2 border transition-all ${
+              pathname === '/profile'
+                ? 'border-sky-300 ring-1 ring-sky-300/40'
+                : 'border-white/15 hover:border-sky-400/50'
+            } ${
               user.coverUrl ? '' : 'bg-white/[0.05] hover:bg-white/[0.09]'
             } ${sidebarCollapsed ? 'lg:justify-center' : 'lg:justify-start'}`}
           >
@@ -529,7 +552,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
             </div>
             <div className={`relative z-10 min-w-0 flex-1 ${sidebarCollapsed ? 'lg:hidden' : 'lg:block'}`}>
               <p className="text-xs font-semibold text-white truncate drop-shadow-2xs">{user.fullName}</p>
-              <p className="text-[11px] text-sky-200/90 truncate">{user.roleName}</p>
+              <p className="text-[11px] text-sky-200/90 truncate">{user.roleName} · Tài khoản</p>
             </div>
           </Link>
         </div>
@@ -537,9 +560,9 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
 
       {/* Vùng nội dung chính bên phải (một vùng cuộn dọc chính duy nhất — C03) */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
-        {/* Topbar 58px hiện đại: Điều hướng nhanh · Tìm kiếm thông minh · Thông báo · Hồ sơ */}
-        <header className="sticky top-0 z-30 h-[56px] shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-2.5 sm:px-3 lg:px-3 flex items-center justify-between gap-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
-          <div className="flex items-center gap-2.5 min-w-0">
+        {/* Topbar gọn sạch: không lặp lại danh sách phân hệ, tên thương hiệu hay hồ sơ đã có ở thanh bên trái */}
+        <header className="sticky top-0 z-30 h-[52px] shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-2.5 sm:px-3 lg:px-3 flex items-center justify-between gap-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+          <div className="flex items-center gap-2 min-w-0">
             <button
               type="button"
               onClick={() => setMobileOpen(true)}
@@ -549,104 +572,87 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               <Menu aria-hidden="true" className="w-5 h-5" />
             </button>
 
-            <nav aria-label="Vị trí trang" className="flex items-center gap-2 min-w-0">
-              <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-md bg-blue-50 text-[#1E3A8A] text-[11px] font-bold border border-blue-200/70">
-                Toàn Trung
-              </span>
-              <span className="hidden sm:inline text-slate-300">/</span>
-              <span className="text-slate-900 font-bold text-sm sm:text-base truncate">
-                {currentBreadcrumb}
-              </span>
-            </nav>
-
-            {/* Lối tắt chuyển nhanh Module trên thanh trên cùng */}
-            <nav aria-label="Chuyển nhanh phân hệ" className="hidden 2xl:flex items-center gap-1 ml-3 pl-3 border-l border-slate-200">
-              {visibleWorkNav.map((nav) => {
-                const active = pathname === nav.href || pathname.startsWith(`${nav.href}/`);
-                return (
-                  <Link
-                    key={`top-${nav.href}`}
-                    href={nav.href}
-                    aria-current={active ? 'page' : undefined}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
-                      active
-                        ? 'bg-[#0F275C] text-white shadow-2xs'
-                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
-                    }`}
-                  >
-                    {nav.label}
-                  </Link>
-                );
-              })}
-            </nav>
+            <span
+              className={`text-slate-900 font-bold text-sm sm:text-base truncate ${
+                pageHasOwnHeaderTitle ? 'lg:hidden' : ''
+              }`}
+            >
+              {currentBreadcrumb}
+            </span>
           </div>
 
-          {/* Tìm kiếm gọn */}
-          <div className="hidden md:flex flex-1 max-w-md items-center gap-2 min-h-9 px-3 rounded-[10px] bg-slate-50 hover:bg-slate-100/70 focus-within:bg-white border border-slate-200 focus-within:border-[#1E3A8A] focus-within:ring-2 focus-within:ring-blue-500/15 text-sm text-slate-800 transition-colors">
-            <Search aria-hidden="true" className="w-4 h-4 text-slate-400 shrink-0" />
-            <label htmlFor="tt-global-search-input" className="sr-only">
-              Tìm kiếm nhanh trong {currentBreadcrumb}
-            </label>
-            <input
-              id="tt-global-search-input"
-              ref={globalSearchInputRef}
-              type="search"
-              name="tt-crm-scoped-search"
-              autoComplete="off"
-              spellCheck={false}
-              value={globalSearchText}
-              onChange={(e) => {
-                const val = e.target.value;
-                setGlobalSearchText(val);
-                if (typeof window !== 'undefined') {
-                  window.dispatchEvent(new CustomEvent('tt-global-search', { detail: val }));
-                  window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: val }));
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape' && globalSearchText) {
-                  setGlobalSearchText('');
+          {/* Ô tìm kiếm duy nhất cho các trang dữ liệu không có thanh tìm riêng */}
+          {showTopbarSearch ? (
+            <div className="hidden md:flex flex-1 max-w-lg items-center gap-2 min-h-9 px-3 rounded-[10px] bg-slate-50 hover:bg-slate-100/70 focus-within:bg-white border border-slate-200 focus-within:border-[#1E3A8A] focus-within:ring-2 focus-within:ring-blue-500/15 text-sm text-slate-800 transition-colors">
+              <Search aria-hidden="true" className="w-4 h-4 text-slate-400 shrink-0" />
+              <label htmlFor="tt-global-search-input" className="sr-only">
+                {topbarSearchPlaceholder}
+              </label>
+              <input
+                id="tt-global-search-input"
+                ref={globalSearchInputRef}
+                type="search"
+                name="tt-crm-scoped-search"
+                autoComplete="off"
+                spellCheck={false}
+                value={globalSearchText}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setGlobalSearchText(val);
                   if (typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
-                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
-                  }
-                }
-              }}
-              placeholder={`Tìm kiếm trong ${currentBreadcrumb}...`}
-              className="flex-1 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400 min-w-0"
-            />
-            {globalSearchText ? (
-              <button
-                type="button"
-                aria-label="Xóa từ khóa tìm kiếm"
-                onClick={() => {
-                  setGlobalSearchText('');
-                  if (typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
-                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+                    window.dispatchEvent(new CustomEvent('tt-global-search', { detail: val }));
+                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: val }));
                   }
                 }}
-                className="min-w-6 min-h-6 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-900 text-xs font-bold grid place-items-center shrink-0"
-              >
-                ×
-              </button>
-            ) : (
-              <kbd className="text-[11px] font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-slate-400 shrink-0">
-                /
-              </kbd>
-            )}
-          </div>
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape' && globalSearchText) {
+                    setGlobalSearchText('');
+                    if (typeof window !== 'undefined') {
+                      window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
+                      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+                    }
+                  }
+                }}
+                placeholder={topbarSearchPlaceholder}
+                className="flex-1 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400 min-w-0"
+              />
+              {globalSearchText ? (
+                <button
+                  type="button"
+                  aria-label="Xóa từ khóa tìm kiếm"
+                  onClick={() => {
+                    setGlobalSearchText('');
+                    if (typeof window !== 'undefined') {
+                      window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
+                      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+                    }
+                  }}
+                  className="min-w-6 min-h-6 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-900 text-xs font-bold grid place-items-center shrink-0"
+                >
+                  ×
+                </button>
+              ) : (
+                <kbd className="text-[11px] font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-slate-400 shrink-0">
+                  /
+                </kbd>
+              )}
+            </div>
+          ) : (
+            <div className="flex-1" />
+          )}
 
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setMobileSearchOpen(!mobileSearchOpen)}
-              aria-label="Mở ô tìm kiếm"
-              aria-expanded={mobileSearchOpen}
-              className="md:hidden min-w-9 min-h-9 rounded-[10px] border border-slate-200 bg-white text-slate-600 grid place-items-center"
-            >
-              <Search aria-hidden="true" className="w-4 h-4" />
-            </button>
+            {showTopbarSearch && (
+              <button
+                type="button"
+                onClick={() => setMobileSearchOpen(!mobileSearchOpen)}
+                aria-label="Mở ô tìm kiếm"
+                aria-expanded={mobileSearchOpen}
+                className="md:hidden min-w-9 min-h-9 rounded-[10px] border border-slate-200 bg-white text-slate-600 grid place-items-center"
+              >
+                <Search aria-hidden="true" className="w-4 h-4" />
+              </button>
+            )}
 
             {/* Thông báo */}
             <div ref={bellRef} className="relative">
@@ -769,10 +775,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               )}
             </div>
 
-            {/* Tài khoản gọn (không lặp lại tên công ty & vai trò ở topbar) */}
+            {/* Chỉ hiện avatar gọn trên mobile (vì desktop đã có thẻ Hồ sơ ở thanh bên trái) */}
             <Link
               href="/profile"
-              className="hidden sm:flex items-center gap-2 min-h-9 pl-1.5 pr-3 rounded-full border border-slate-200 bg-white hover:border-slate-300 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+              aria-label="Tài khoản cá nhân"
+              className="lg:hidden flex items-center justify-center w-9 h-9 rounded-full border border-slate-200 bg-white hover:border-slate-300 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
             >
               {user.avatarUrl ? (
                 <img
@@ -785,9 +792,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   {getInitials(user.fullName)}
                 </span>
               )}
-              <span className="hidden md:inline text-xs font-medium text-slate-700 max-w-[130px] truncate">
-                {user.fullName}
-              </span>
             </Link>
 
             <button

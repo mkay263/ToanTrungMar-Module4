@@ -8,7 +8,10 @@
  * 5. Cảnh báo báo giá > 7 ngày chưa phản hồi (hằng ngày) — UC02
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { prisma } from '@toantrung/database';
+import { AiDesignProviderFactory } from '../modules/05-ai-design/providers';
 import { upsertActionableNotification } from '../core/notifications/service';
 import {
   retryUnresolvedGclids,
@@ -275,57 +278,93 @@ export interface WorkerJobHistoryItem {
   executedAt: string;
 }
 
+function hasLiveOAuthVaultRuntime(): { connected: boolean; hasAdsCustomer: boolean } {
+  const candidates = [
+    path.join(process.cwd(), 'config', 'google-realtime-config.json'),
+    path.join(process.cwd(), 'apps', 'web', 'config', 'google-realtime-config.json'),
+  ];
+  for (const p of candidates) {
+    try {
+      if (!fs.existsSync(p)) continue;
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf8')) as {
+        ga4AccessToken?: string;
+        gadsCustomerId?: string;
+      };
+      if (parsed.ga4AccessToken === 'VAULT_PROTECTED_TOKEN') {
+        return { connected: true, hasAdsCustomer: Boolean(parsed.gadsCustomerId) };
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return { connected: false, hasAdsCustomer: false };
+}
+
 export function getAdapterReadinessMatrix(): AdapterConnectionStatusItem[] {
+  const oauthRuntime = hasLiveOAuthVaultRuntime();
   const hasGoogleAds = Boolean(
-    process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim() &&
+    oauthRuntime.connected ||
+      process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim() ||
       process.env.GOOGLE_ADS_CLIENT_ID?.trim(),
   );
-  const hasGa4Gsc = Boolean(process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim());
+  const hasGa4Gsc = Boolean(
+    oauthRuntime.connected || process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim(),
+  );
   const hasWebhookSecret = Boolean(process.env.WEBHOOK_SHARED_SECRET?.trim());
+  let hasCatalogGeminiKey = false;
+  try {
+    hasCatalogGeminiKey = Boolean(
+      AiDesignProviderFactory.getCatalog()?.config?.providers?.google_imagen?.apiKey?.trim(),
+    );
+  } catch {
+    hasCatalogGeminiKey = false;
+  }
   const hasGeminiKey = Boolean(
-    process.env.GEMINI_API_KEY?.trim() || process.env.GOOGLE_GENAI_API_KEY?.trim(),
+    process.env.GEMINI_API_KEY?.trim() ||
+      process.env.GOOGLE_GENAI_API_KEY?.trim() ||
+      hasCatalogGeminiKey,
   );
 
   return [
     {
       code: 'WEB_WEBHOOK_GTM',
-      name: 'Webhook Form 3 Website & GTM (toantrung.com.vn, bangled.vn, manhinhled.net.vn)',
+      name: 'Webhook Form Website & GTM (toantrung.com.vn, bangled.vn, manhinhled.net.vn, bangdientu.com.vn)',
       moduleScope: 'M01 Leads & M02 Tracking',
       mode: hasWebhookSecret ? 'LIVE_CONNECTED' : 'SIMULATED_FALLBACK',
       envKeysRequired: ['WEBHOOK_SHARED_SECRET'],
       description: hasWebhookSecret
-        ? 'Đã cấu hình khóa xác thực Webhook nhận Lead trực tiếp từ 3 website.'
+        ? 'Đã cấu hình khóa xác thực Webhook nhận Lead trực tiếp từ các website.'
         : 'Đang mở chế độ nhận Payload thử nghiệm nội bộ (chưa khóa WEBHOOK_SHARED_SECRET).',
     },
     {
       code: 'GOOGLE_ADS_API',
-      name: 'Google Ads API & Google Lead Form Extension',
+      name: 'Google Ads API v26 (OAuth Direct) & Google Lead Form',
       moduleScope: 'M02 Tracking & M03 Ads',
       mode: hasGoogleAds ? 'LIVE_CONNECTED' : 'SIMULATED_FALLBACK',
-      envKeysRequired: ['GOOGLE_ADS_DEVELOPER_TOKEN', 'GOOGLE_ADS_CLIENT_ID', 'GOOGLE_ADS_REFRESH_TOKEN'],
+      envKeysRequired: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'],
       description: hasGoogleAds
-        ? 'Kết nối trực tiếp Google Ads API để kéo chi phí chiến dịch và tra cứu gclid.'
-        : 'Đang chạy bộ dữ liệu mô phỏng (Fixture Simulation) do chưa điền Google Ads Developer Token.',
+        ? 'Kết nối trực tiếp Google Ads API v26 qua OAuth 2.0 để đồng bộ danh mục chiến dịch, chi phí và tra cứu gclid.'
+        : 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads.',
     },
     {
       code: 'GA4_SEARCH_CONSOLE',
       name: 'Google Analytics 4 (Data API) & Google Search Console',
       moduleScope: 'M02 Tracking & M03 SEO',
       mode: hasGa4Gsc ? 'LIVE_CONNECTED' : 'SIMULATED_FALLBACK',
-      envKeysRequired: ['GOOGLE_SERVICE_ACCOUNT_JSON', 'GA4_PROPERTY_IDS'],
+      envKeysRequired: ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'],
       description: hasGa4Gsc
-        ? 'Đang đồng bộ chỉ số Organic Clicks & Thứ hạng từ khóa thực tế từ GSC/GA4.'
-        : 'Đang dùng dữ liệu mẫu nội bộ; tự động chuyển sang Live ngay khi cấp Service Account JSON.',
+        ? 'Đang đồng bộ trực tiếp phiên GA4, trang đích, click/hiển thị và vị trí từ khóa Search Console qua Google OAuth.'
+        : 'Chưa kết nối Google OAuth cho GA4 / Search Console.',
     },
     {
       code: 'GEMINI_IMAGEN_AI',
-      name: 'Google Gemini & Imagen AI (Dựng Phối cảnh 3D & Viết bài SEO)',
+      name: 'Google Gemini & Imagen AI (Phân tích SEO & Hỗ trợ Thiết kế)',
       moduleScope: 'M03 SEO & M05 AI Design',
       mode: hasGeminiKey ? 'LIVE_CONNECTED' : 'SIMULATED_FALLBACK',
       envKeysRequired: ['GEMINI_API_KEY'],
       description: hasGeminiKey
-        ? 'Đang gọi trực tiếp mô hình Gemini / Imagen thật và ghi log Token/Cost vào D5.'
-        : 'Đang dùng bộ sinh phối cảnh 3D & bài chuẩn kỹ thuật LED nội bộ (Local Fallback).',
+        ? 'Đã cấu hình khóa Google Gemini API; báo cáo SEO AI sử dụng model Gemini sống và ghi nhận AiUsageLog.'
+        : 'Chưa cấu hình khóa Gemini API; đang dùng bộ tổng hợp dự phòng nội bộ.',
     },
   ];
 }

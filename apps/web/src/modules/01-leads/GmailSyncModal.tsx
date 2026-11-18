@@ -188,14 +188,14 @@ export function GmailSyncModal({
       const res = await apiRequest<GmailSyncRunPayload>('/api/v1/leads/gmail-sync', {
         method: 'POST',
         csrfToken,
-        body: JSON.stringify({
+        body: {
           action: 'sync_now',
           enabled,
           query,
           maxMessages,
           pollIntervalSec,
           onlyLeadKeywords,
-        }),
+        },
       });
       setRunResult(res);
       if (res.status) setStatus(res.status);
@@ -218,14 +218,14 @@ export function GmailSyncModal({
       const res = await apiRequest<GmailSyncStatusPayload>('/api/v1/leads/gmail-sync', {
         method: 'POST',
         csrfToken,
-        body: JSON.stringify({
+        body: {
           action: 'save_config',
           enabled: nextEnabled,
           query,
           maxMessages,
           pollIntervalSec,
           onlyLeadKeywords,
-        }),
+        },
       });
       setStatus(res);
     } catch (err) {

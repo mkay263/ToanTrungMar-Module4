@@ -439,21 +439,39 @@ export async function GET(request: Request) {
     }
 
     const statusParam = url.searchParams.get('status') || undefined;
+    const sourceWebsiteParam =
+      url.searchParams.get('sourceWebsite') ||
+      url.searchParams.get('websiteId') ||
+      (url.searchParams.get('missingWebsite') === '1' ? '__unresolved__' : undefined) ||
+      undefined;
     const searchParam = url.searchParams.get('search') || undefined;
-    const includeSpam = url.searchParams.get('includeSpam') === 'true';
-    const overdueOnly = url.searchParams.get('overdueOnly') === 'true';
+    const validOnly =
+      url.searchParams.get('validOnly') === '1' ||
+      url.searchParams.get('validOnly') === 'true';
+    const includeSpam = !validOnly && url.searchParams.get('includeSpam') === 'true';
+    const overdueOnly =
+      url.searchParams.get('overdueOnly') === 'true' ||
+      url.searchParams.get('overdue') === '1';
     const unreceivedOnly =
       url.searchParams.get('unreceived') === '1' ||
       url.searchParams.get('unreceivedOnly') === 'true';
+    const missingProductOnly = url.searchParams.get('missingProduct') === '1';
+    const salesIdParam = url.searchParams.get('salesId') || undefined;
+    const productIdParam = url.searchParams.get('productId') || undefined;
 
     const isAnonymized = shouldAnonymizeLeadForRole(auth.user.roleCode);
 
     const { leads } = await exportAllLeadsForUser(auth.user, {
       status: statusParam as PipelineStatus | 'all' | undefined,
+      sourceWebsite: sourceWebsiteParam,
       search: searchParam,
       includeSpam,
+      validOnly,
       overdueOnly,
       unreceivedOnly,
+      missingProductOnly,
+      salesId: salesIdParam,
+      productId: productIdParam,
     });
 
     const dateStamp = new Date().toISOString().slice(0, 10);

@@ -20,7 +20,7 @@ import {
   getGa4LiveSnapshotsForProperties,
   getGa4RealtimeSnapshotNonBlocking,
 } from './ga4-live-cache.service';
-import { getGoogleAdsApiConfig } from './google-oauth.service';
+import { getGoogleAdsApiConfig, getGoogleConnection } from './google-oauth.service';
 import { getStoredTouchpoints } from './service';
 
 function mapGa4ChannelGroup(rawChannelGroup: string): {
@@ -89,13 +89,14 @@ export async function getM02TrafficInteractionSpec(params?: {
   const scope = await resolveDashboardScope(params);
   const propIds = scope.ga4PropertyIds;
   const adsCfg = await getGoogleAdsApiConfig();
-  const hasAdsToken = Boolean(adsCfg?.developerToken);
 
   const [
     accountRows,
     prevAccountRows,
     pageRows,
     adsMetricRows,
+    realAdsCatalog,
+    googleOAuthConn,
     leads,
     prevLeads,
     products,
@@ -111,6 +112,7 @@ export async function getM02TrafficInteractionSpec(params?: {
             grain: 'account',
             accountPropertyId: { in: propIds },
             metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
+            NOT: { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
           },
           orderBy: { metricDate: 'asc' },
         })
@@ -122,6 +124,7 @@ export async function getM02TrafficInteractionSpec(params?: {
             grain: 'account',
             accountPropertyId: { in: propIds },
             metricDate: { gte: scope.prevStartDateStr, lte: scope.prevEndDateStr },
+            NOT: { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
           },
         })
       : Promise.resolve([]),
@@ -151,6 +154,7 @@ export async function getM02TrafficInteractionSpec(params?: {
             id: true,
             campaignCode: true,
             campaignName: true,
+            utmCampaignSlug: true,
             isActive: true,
             platform: true,
           },
@@ -158,6 +162,14 @@ export async function getM02TrafficInteractionSpec(params?: {
       },
       orderBy: { metricDate: 'asc' },
     }),
+    prisma.campaign.findMany({
+      where: {
+        platform: 'google_ads',
+        NOT: [{ accountExternalId: 'default' }, { accountExternalId: { startsWith: 'GA4-' } }],
+      },
+      orderBy: { id: 'asc' },
+    }),
+    getGoogleConnection(),
     prisma.lead.findMany({
       where: {
         createdAt: { gte: scope.startDateTime, lte: scope.endDateTime },
@@ -620,6 +632,31 @@ export async function getM02TrafficInteractionSpec(params?: {
   const wonScopedAdLeads = validScopedAdLeads.filter((l) => l.pipelineStatus === 'won');
 
   // Tổng hợp chiến dịch quảng cáo (không chia đều chi phí campaign cho nhiều website nếu thiếu dữ liệu phân bổ!)
+  const resolveCampaignDomain = (
+    campaignName: string,
+    utmSlug?: string | null,
+    pageUrlRaw?: string | null,
+  ): string | null => {
+    if (utmSlug && utmSlug.startsWith('domain:')) {
+      return utmSlug.slice('domain:'.length).toLowerCase();
+    }
+    if (pageUrlRaw) {
+      for (const w of scope.availableWebsites) {
+        if (pageUrlRaw.toLowerCase().includes(w.domain.toLowerCase())) {
+          return w.domain;
+        }
+      }
+    }
+    const lower = (campaignName || '').toLowerCase();
+    if (lower.includes('bangdientu')) return 'bangdientu.com.vn';
+    if (lower.includes('bangled')) return 'bangled.vn';
+    if (lower.includes('manhinhled')) return 'manhinhled.net.vn';
+    if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt')) {
+      return 'toantrung.com.vn';
+    }
+    return null;
+  };
+
   const campAggMap = new Map<
     string,
     {
@@ -647,21 +684,41 @@ export async function getM02TrafficInteractionSpec(params?: {
       impressions: 0,
       clicks: 0,
       conversionsMicros: 0n,
-      mappedWebsite: null,
+      mappedWebsite: resolveCampaignDomain(
+        cname,
+        m.campaign?.utmCampaignSlug,
+        m.pageUrlRaw,
+      ),
     };
     cur.costMicros += m.spendMicros ?? 0n;
     cur.impressions += m.impressions || 0;
     cur.clicks += m.clicks || 0;
     cur.conversionsMicros += m.conversionsMicros ?? 0n;
-    if (!cur.mappedWebsite && m.pageUrlRaw) {
-      for (const w of scope.availableWebsites) {
-        if (m.pageUrlRaw.toLowerCase().includes(w.domain.toLowerCase())) {
-          cur.mappedWebsite = w.domain;
-          break;
-        }
-      }
+    if (!cur.mappedWebsite) {
+      cur.mappedWebsite = resolveCampaignDomain(
+        cname,
+        m.campaign?.utmCampaignSlug,
+        m.pageUrlRaw,
+      );
     }
     campAggMap.set(cid, cur);
+  }
+
+  for (const camp of realAdsCatalog) {
+    const cid = camp.campaignCode.replace(/^GADS_/, '') || String(camp.id);
+    if (!campAggMap.has(cid)) {
+      campAggMap.set(cid, {
+        campaignId: cid,
+        campaignName: camp.campaignName,
+        status: camp.isActive ? 'ENABLED' : 'PAUSED',
+        channelType: camp.platform,
+        costMicros: 0n,
+        impressions: 0,
+        clicks: 0,
+        conversionsMicros: 0n,
+        mappedWebsite: resolveCampaignDomain(camp.campaignName, camp.utmCampaignSlug, null),
+      });
+    }
   }
 
   // Đối soát Lead CRM theo tên chiến dịch / utmCampaign / campaignId
@@ -748,7 +805,17 @@ export async function getM02TrafficInteractionSpec(params?: {
 
   campaignList.sort((a, b) => b.cost - a.cost || b.validAttributedLeadCount - a.validAttributedLeadCount);
 
-  const hasConnectedAdsData = hasAdsToken || campaignRowsFromDb.length > 0;
+  const includedCampaignIds = new Set(campaignList.map((c) => c.campaignId));
+  const hasOAuthAdsConnected = Boolean(
+    googleOAuthConn?.connected &&
+      !googleOAuthConn.isSandboxDemo &&
+      googleOAuthConn.scopes?.some((s) => s.includes('adwords')),
+  );
+  const hasConnectedAdsData =
+    Boolean(adsCfg?.developerToken) ||
+    hasOAuthAdsConnected ||
+    realAdsCatalog.length > 0 ||
+    campaignRowsFromDb.length > 0;
   const adsTotalCost = hasConnectedAdsData
     ? Number(campaignList.reduce((s, c) => s + c.cost, 0).toFixed(0))
     : null;
@@ -778,10 +845,12 @@ export async function getM02TrafficInteractionSpec(params?: {
       ? Number((adsTotalCost / validScopedAdLeads.length).toFixed(0))
       : null;
 
-  // Chuỗi ngày cho Quảng cáo
+  // Chuỗi ngày cho Quảng cáo (lọc theo đúng các chiến dịch thuộc phạm vi website đang chọn)
   const adsDayMap = new Map<string, { cost: number; conversions: number; clicks: number }>();
-  if (hasConnectedAdsData && !scope.selectedWebsite) {
+  if (hasConnectedAdsData) {
     for (const m of campaignRowsFromDb) {
+      const cid = m.campaignExternalId || String(m.campaignId || 'unmapped');
+      if (scope.selectedWebsite && !includedCampaignIds.has(cid)) continue;
       const cur = adsDayMap.get(m.metricDate) || { cost: 0, conversions: 0, clicks: 0 };
       cur.cost += microsToUnitNumber(m.spendMicros);
       cur.conversions += conversionsMicrosToNumber(m.conversionsMicros);
@@ -790,13 +859,14 @@ export async function getM02TrafficInteractionSpec(params?: {
     }
   }
 
+  const canBuildZeroSeries = hasConnectedAdsData && (!scope.selectedWebsite || campaignList.length > 0);
   const adsSeries = trafficSeries.map((pt) => {
     const hit = adsDayMap.get(pt.date);
     return {
       date: pt.date,
-      cost: hit ? Number(hit.cost.toFixed(0)) : hasConnectedAdsData && !scope.selectedWebsite ? 0 : null,
-      conversions: hit ? Number(hit.conversions.toFixed(2)) : hasConnectedAdsData && !scope.selectedWebsite ? 0 : null,
-      clicks: hit ? hit.clicks : hasConnectedAdsData && !scope.selectedWebsite ? 0 : null,
+      cost: hit ? Number(hit.cost.toFixed(0)) : canBuildZeroSeries ? 0 : null,
+      conversions: hit ? Number(hit.conversions.toFixed(2)) : canBuildZeroSeries ? 0 : null,
+      clicks: hit ? hit.clicks : canBuildZeroSeries ? 0 : null,
     };
   });
 
@@ -805,8 +875,10 @@ export async function getM02TrafficInteractionSpec(params?: {
     statusMessage: hasConnectedAdsData
       ? unattributedAccountCampaignCount > 0 && scope.selectedWebsite
         ? `Có ${unattributedAccountCampaignCount} chiến dịch cấp tài khoản chưa gắn riêng cho ${scope.selectedWebsite.domain}; chọn "Tất cả website" để xem tổng chi phí cấp tài khoản.`
-        : 'Đã đồng bộ chỉ số chiến dịch quảng cáo và đối soát Lead CRM.'
-      : 'Chưa kết nối Google Ads API (thiếu Developer Token). Bấm "Kiểm tra kết nối" để dán Developer Token & Mã tài khoản Google Ads ngay trên giao diện Cài đặt (không hiển thị số 0 giả cho chi phí/click).',
+        : adsTotalCost === 0
+          ? `Đã kết nối tài khoản Google Ads v26 (${campaignList.length} chiến dịch trong phạm vi; hiện đang tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn).`
+          : 'Đã đồng bộ chỉ số chiến dịch Google Ads v26 và đối soát Lead CRM.'
+      : 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads. Vào Cài đặt → Tích hợp Google để kết nối trực tiếp qua OAuth.',
     currencyCode: 'VND',
     metrics: {
       cost: adsTotalCost,

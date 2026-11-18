@@ -177,13 +177,19 @@ export function SeoAiReportPanel({
 
     return lines
       .map((line) => {
-        const trimmed = line.replace(/\s*\[Tham chiếu:[^\]]*\]/gi, '').trim();
+        const trimmed = line.trim();
         if (!trimmed) return '<div style="height:6px;"></div>';
-        if (/^\[Tham chiếu/i.test(trimmed)) return '';
-        const escaped = trimmed
+        const escapedRaw = trimmed
           .replace(/&/g, '&amp;')
           .replace(/</g, '&lt;')
           .replace(/>/g, '&gt;');
+        const escaped = escapedRaw
+          .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+          .replace(
+            /\[(Đối chiếu [^:\]]+|Tham chiếu):\s*([^\]]+)\]/gi,
+            (_m, prefix: string, body: string) =>
+              ` <span style="display:inline-block;padding:1px 8px;margin-left:4px;border-radius:999px;background:#EFF6FF;border:1px solid #BFDBFE;color:#1E40AF;font-size:11px;font-weight:600;vertical-align:middle;">${prefix}: ${body.trim()}</span>`,
+          );
         if (trimmed.startsWith('BÁO CÁO ')) {
           return `<div style="border-bottom:2px solid #0F275C;padding-bottom:12px;margin-bottom:14px;">
             <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;color:#64748B;text-transform:uppercase;margin-bottom:4px;">CÔNG TY CỔ PHẦN ĐIỆN TỬ VIỄN THÔNG TOÀN TRUNG</div>
@@ -576,10 +582,34 @@ export function SeoAiReportPanel({
                 <span className="text-lg font-extrabold text-emerald-700 tabular-nums">
                   {activeReport.snapshot.leadsFromWebsiteCount} Lead
                 </span>
-                <span className="text-[11px] text-slate-500">
-                  {activeReport.generationMode === 'LIVE_AI' ? 'Gemini AI' : 'Đối soát chuẩn'}
+                <span
+                  className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${
+                    activeReport.generationMode === 'LIVE_AI'
+                      ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                      : 'bg-amber-50 text-amber-800 border border-amber-200'
+                  }`}
+                >
+                  {activeReport.generationMode === 'LIVE_AI' ? 'LIVE AI' : 'Dự phòng chuẩn'}
                 </span>
               </div>
+            </div>
+          </div>
+
+          {/* Thanh xác nhận nguồn AI sống vs Dự phòng */}
+          <div
+            className={`px-3.5 py-2 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-2 ${
+              activeReport.generationMode === 'LIVE_AI'
+                ? 'bg-emerald-50/60 border-emerald-200 text-emerald-950'
+                : 'bg-amber-50/70 border-amber-200 text-amber-950'
+            }`}
+          >
+            <div className="font-semibold">
+              {activeReport.generationMode === 'LIVE_AI'
+                ? `Phân tích trực tiếp bởi AI (${activeReport.modelUsed}) · Đã đối chiếu số liệu Search Console`
+                : `Bản tổng hợp đối chiếu tự động (Dự phòng${activeReport.fallbackReason ? `: ${activeReport.fallbackReason}` : ''})`}
+            </div>
+            <div className="text-[11px] opacity-80">
+              Cập nhật: {new Date(activeReport.updatedAt).toLocaleString('vi-VN')}
             </div>
           </div>
 

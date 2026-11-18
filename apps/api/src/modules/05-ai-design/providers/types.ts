@@ -80,6 +80,14 @@ export interface ProviderGenerationResult {
   errorCode?: string;
   errorMessage?: string;
   fallbackNotice?: string;
+  isLocalFallback?: boolean;
+  failedCloudAttempts?: Array<{
+    provider: AiProviderId;
+    modelUsed: string;
+    errorCode?: string;
+    errorMessage?: string;
+    durationMs?: number;
+  }>;
 }
 
 export interface ProviderStatusInfo {

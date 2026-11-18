@@ -597,6 +597,10 @@ export function LeadsWorkspace() {
   const [editProductSearch, setEditProductSearch] = useState('');
   const [b2bHorizonFilter, setB2bHorizonFilter] = useState<string>('all');
   const [sourceWebsiteFilter, setSourceWebsiteFilter] = useState<string>('all');
+  const [salesIdFilter, setSalesIdFilter] = useState<string>('all');
+  const [productIdFilter, setProductIdFilter] = useState<string>('all');
+  const [validOnly, setValidOnly] = useState<boolean>(false);
+  const [urlFiltersHydrated, setUrlFiltersHydrated] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
   const [includeSpam, setIncludeSpam] = useState(true);
@@ -604,8 +608,8 @@ export function LeadsWorkspace() {
   const [unreceivedOnly, setUnreceivedOnly] = useState(false);
   const [showOptionalColumns, setShowOptionalColumns] = useState(false);
   const [isReceivingLeads, setIsReceivingLeads] = useState(true);
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const fetchSeqRef = useRef<number>(0);
 
   const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
   const [leadDetailTab, setLeadDetailTab] = useState<
@@ -637,20 +641,42 @@ export function LeadsWorkspace() {
   const [importFileName, setImportFileName] = useState<string | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Sync initial filters from URL query params (?status=..., ?websiteId=..., ?preset=..., ?needsReview=1, ?missingWebsite=1, ?missingProduct=1, ?leadId=...)
+  // Sync initial filters from URL query params (?status=..., ?websiteId=..., ?preset=..., ?salesId=..., ?productId=..., ?validOnly=1, ?overdueOnly=true)
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
-    const st = params.get('status');
-    if (st && (st === 'all' || PIPELINE_STATUSES.includes(st as PipelineStatus))) {
-      setStatusFilter(st);
+    const rawSt = params.get('status')?.trim().toLowerCase();
+    const mappedSt = rawSt === 'new_info' ? 'new_lead' : rawSt;
+    if (mappedSt && (mappedSt === 'all' || PIPELINE_STATUSES.includes(mappedSt as PipelineStatus))) {
+      setStatusFilter(mappedSt);
     }
+    const normalizeWebParam = (raw: string): string => {
+      const low = raw.trim().toLowerCase();
+      if (low === 'ga4-508951192' || low === 'ga4_508951192' || low === '508951192') return 'bangdientu.com.vn';
+      if (low === 'ga4-512879968' || low === 'ga4_512879968' || low === '512879968') return 'toantrung.com.vn';
+      if (low === 'ga4-538179128' || low === 'ga4_538179128' || low === '538179128') return 'bangled.vn';
+      if (low === 'ga4-509190194' || low === 'ga4_509190194' || low === '509190194') return 'manhinhled.net.vn';
+      if (low === '__unresolved__' || low === 'missing') return '__unresolved__';
+      return low;
+    };
     const webParam = params.get('websiteId') || params.get('sourceWebsite');
     if (webParam && webParam.trim()) {
-      setSourceWebsiteFilter(webParam.trim());
+      setSourceWebsiteFilter(normalizeWebParam(webParam));
     }
     if (params.get('missingWebsite') === '1') {
       setSourceWebsiteFilter('__unresolved__');
+    }
+    const salesParam = params.get('salesId')?.trim();
+    if (salesParam && salesParam !== 'all') {
+      setSalesIdFilter(salesParam === '0' ? 'unassigned' : salesParam);
+    }
+    const productParam = params.get('productId')?.trim();
+    if (productParam && productParam !== 'all') {
+      if (productParam === 'unclassified' || productParam === '0') {
+        setMissingProductOnly(true);
+      } else {
+        setProductIdFilter(productParam);
+      }
     }
     if (params.get('missingProduct') === '1') {
       setMissingProductOnly(true);
@@ -684,8 +710,13 @@ export function LeadsWorkspace() {
       setSearchQuery(q.trim());
       setDebouncedSearchQuery(q.trim());
     }
-    if (params.get('overdueOnly') === 'true') {
+    if (params.get('validOnly') === '1' || params.get('validOnly') === 'true') {
+      setValidOnly(true);
+      setIncludeSpam(false);
+    }
+    if (params.get('overdueOnly') === 'true' || params.get('overdue') === '1') {
       setOverdueOnly(true);
+      setValidOnly(true);
       setIncludeSpam(false);
     }
     if (params.get('unreceived') === '1' || params.get('unreceivedOnly') === 'true') {
@@ -693,6 +724,7 @@ export function LeadsWorkspace() {
       setStatusFilter('new_lead');
       setIncludeSpam(false);
     }
+    setUrlFiltersHydrated(true);
   }, []);
 
   // Listen to global search bar from WorkspaceShell topbar
@@ -770,7 +802,7 @@ export function LeadsWorkspace() {
 
       if (e.key === '/') {
         e.preventDefault();
-        searchInputRef.current?.focus();
+        (document.getElementById('tt-global-search-input') as HTMLInputElement | null)?.focus();
       } else if (e.key === 'n' || e.key === 'N') {
         if (user && hasBaPermission(user.roleCode, 'LEAD_CREATE')) {
           e.preventDefault();
@@ -855,9 +887,10 @@ export function LeadsWorkspace() {
     abortControllerRef.current?.abort();
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    const seq = ++fetchSeqRef.current;
 
     const qs = new URLSearchParams();
-    if (includeSpam) qs.set('includeSpam', 'true');
+    if (includeSpam && !validOnly) qs.set('includeSpam', 'true');
     const url = `/api/v1/leads?${qs.toString()}`;
 
     if (!forceFresh) {
@@ -898,6 +931,8 @@ export function LeadsWorkspace() {
         isReceivingLeads?: boolean;
       }>(url, { signal: controller.signal, skipCache: forceFresh });
 
+      if (seq !== fetchSeqRef.current || controller.signal.aborted) return;
+
       // C10: Đồng bộ định kỳ chạy ngầm không bật toast lặp trên màn hình
       setLeads(data.leads);
       setTotalCount(data.totalCount ?? data.leads.length);
@@ -909,15 +944,16 @@ export function LeadsWorkspace() {
       }
       setLastLeadsPolledAt(new Date());
     } catch (err) {
+      if (seq !== fetchSeqRef.current || controller.signal.aborted) return;
       if (err instanceof Error && err.name === 'AbortError') return;
       setErrorMsg(err instanceof Error ? err.message : 'Lỗi tải danh sách Lead.');
     } finally {
-      setIsLeadsPolling(false);
-      if (abortControllerRef.current === controller) {
+      if (seq === fetchSeqRef.current && !controller.signal.aborted) {
+        setIsLeadsPolling(false);
         setLoading(false);
       }
     }
-  }, [includeSpam]);
+  }, [includeSpam, validOnly]);
 
   useEffect(() => {
     let active = true;
@@ -1342,6 +1378,19 @@ export function LeadsWorkspace() {
         list = list.filter((l) => l.pipelineStatus === statusFilter);
       }
     }
+    if (validOnly) {
+      list = list.filter((l) => l.spamStatus === 'NONE');
+    }
+    if (salesIdFilter !== 'all') {
+      if (salesIdFilter === 'unassigned') {
+        list = list.filter((l) => !l.assignedSalesId);
+      } else {
+        list = list.filter((l) => String(l.assignedSalesId ?? '') === salesIdFilter);
+      }
+    }
+    if (productIdFilter !== 'all') {
+      list = list.filter((l) => l.products.some((p) => String(p.id) === productIdFilter));
+    }
     if (overdueOnly) {
       list = list.filter((l) => l.isQuoteOverdue7Days && l.spamStatus === 'NONE');
     }
@@ -1418,6 +1467,9 @@ export function LeadsWorkspace() {
     statusFilter,
     overdueOnly,
     unreceivedOnly,
+    validOnly,
+    salesIdFilter,
+    productIdFilter,
     sourceWebsiteFilter,
     missingProductOnly,
     b2bHorizonFilter,
@@ -1435,9 +1487,64 @@ export function LeadsWorkspace() {
     }
   }, [currentPage, totalPages]);
 
+  const hasAnyActiveFilter = useMemo(
+    () =>
+      statusFilter !== 'all' ||
+      sourceWebsiteFilter !== 'all' ||
+      dateRangePreset !== 'ALL' ||
+      specialAlertFilter !== 'none' ||
+      reminderFilter !== 'none' ||
+      missingProductOnly ||
+      overdueOnly ||
+      unreceivedOnly ||
+      validOnly ||
+      salesIdFilter !== 'all' ||
+      productIdFilter !== 'all' ||
+      b2bHorizonFilter !== 'all' ||
+      Boolean(searchQuery.trim()),
+    [
+      statusFilter,
+      sourceWebsiteFilter,
+      dateRangePreset,
+      specialAlertFilter,
+      reminderFilter,
+      missingProductOnly,
+      overdueOnly,
+      unreceivedOnly,
+      validOnly,
+      salesIdFilter,
+      productIdFilter,
+      b2bHorizonFilter,
+      searchQuery,
+    ],
+  );
+
+  const handleResetAllFilters = useCallback(() => {
+    setStatusFilter('all');
+    setSourceWebsiteFilter('all');
+    setDateRangePreset('ALL');
+    setCustomStartDate('');
+    setCustomEndDate('');
+    setSpecialAlertFilter('none');
+    setReminderFilter('none');
+    setMissingProductOnly(false);
+    setOverdueOnly(false);
+    setUnreceivedOnly(false);
+    setValidOnly(false);
+    setIncludeSpam(true);
+    setSalesIdFilter('all');
+    setProductIdFilter('all');
+    setB2bHorizonFilter('all');
+    setSearchQuery('');
+    setCurrentPage(1);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+    }
+  }, []);
+
   // C06: Đồng bộ trạng thái bộ lọc, chế độ xem và trang hiện tại lên URL để giữ nguyên ngữ cảnh khi quay lại
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (typeof window === 'undefined' || !urlFiltersHydrated) return;
     const url = new URL(window.location.href);
     if (statusFilter !== 'all') url.searchParams.set('status', statusFilter);
     else url.searchParams.delete('status');
@@ -1453,6 +1560,39 @@ export function LeadsWorkspace() {
       url.searchParams.delete('missingWebsite');
     }
 
+    if (dateRangePreset !== 'ALL') {
+      url.searchParams.set('preset', dateRangePreset);
+      if (dateRangePreset === 'CUSTOM' && customStartDate && customEndDate) {
+        url.searchParams.set('from', customStartDate);
+        url.searchParams.set('to', customEndDate);
+      } else {
+        url.searchParams.delete('from');
+        url.searchParams.delete('to');
+      }
+    } else {
+      url.searchParams.delete('preset');
+      url.searchParams.delete('from');
+      url.searchParams.delete('to');
+    }
+
+    if (salesIdFilter !== 'all') url.searchParams.set('salesId', salesIdFilter);
+    else url.searchParams.delete('salesId');
+
+    if (productIdFilter !== 'all') url.searchParams.set('productId', productIdFilter);
+    else url.searchParams.delete('productId');
+
+    if (validOnly) url.searchParams.set('validOnly', '1');
+    else url.searchParams.delete('validOnly');
+
+    if (overdueOnly) url.searchParams.set('overdueOnly', 'true');
+    else {
+      url.searchParams.delete('overdueOnly');
+      url.searchParams.delete('overdue');
+    }
+
+    if (unreceivedOnly) url.searchParams.set('unreceived', '1');
+    else url.searchParams.delete('unreceived');
+
     if (specialAlertFilter !== 'none') url.searchParams.set('needsReview', '1');
     else url.searchParams.delete('needsReview');
 
@@ -1467,8 +1607,17 @@ export function LeadsWorkspace() {
 
     window.history.replaceState({}, '', url.toString());
   }, [
+    urlFiltersHydrated,
     statusFilter,
     sourceWebsiteFilter,
+    dateRangePreset,
+    customStartDate,
+    customEndDate,
+    salesIdFilter,
+    productIdFilter,
+    validOnly,
+    overdueOnly,
+    unreceivedOnly,
     specialAlertFilter,
     missingProductOnly,
     viewMode,
@@ -1550,12 +1699,27 @@ export function LeadsWorkspace() {
     if (statusFilter !== 'all') qs.set('status', statusFilter);
     if (sourceWebsiteFilter !== 'all') qs.set('sourceWebsite', sourceWebsiteFilter);
     if (searchQuery.trim()) qs.set('search', searchQuery.trim());
-    if (specialAlertFilter !== 'none') qs.set('includeSpam', 'true');
+    if (validOnly) qs.set('validOnly', '1');
+    else if (specialAlertFilter !== 'none') qs.set('includeSpam', 'true');
     if (overdueOnly) qs.set('overdueOnly', 'true');
     if (unreceivedOnly) qs.set('unreceived', '1');
+    if (missingProductOnly) qs.set('missingProduct', '1');
+    if (salesIdFilter !== 'all') qs.set('salesId', salesIdFilter);
+    if (productIdFilter !== 'all') qs.set('productId', productIdFilter);
     const queryStr = qs.toString();
     return queryStr ? `/api/v1/leads/export?${queryStr}` : '/api/v1/leads/export';
-  }, [statusFilter, sourceWebsiteFilter, searchQuery, specialAlertFilter, overdueOnly, unreceivedOnly]);
+  }, [
+    statusFilter,
+    sourceWebsiteFilter,
+    searchQuery,
+    validOnly,
+    specialAlertFilter,
+    overdueOnly,
+    unreceivedOnly,
+    missingProductOnly,
+    salesIdFilter,
+    productIdFilter,
+  ]);
 
   const selectedLead = useMemo(
     () => leads.find((l) => l.id === selectedLeadId) || null,
@@ -2429,9 +2593,9 @@ export function LeadsWorkspace() {
       </section>
 
       {/* Toolbar 1 hàng trải sát 2 bên: Trái (Website · Thời gian · Chế độ xem) | Giữa (Xuất/Nhập Excel · Tạo Lead) | Phải (Tìm kiếm · Cần kiểm tra · Nhắc việc) */}
-      <div className="rounded-[12px] bg-white text-slate-900 px-2.5 py-2 shadow-2xs border border-slate-200/90 flex flex-wrap xl:flex-nowrap items-center justify-between gap-1.5">
+      <div className="rounded-[12px] bg-white text-slate-900 px-2.5 py-2 shadow-2xs border border-slate-200/90 flex flex-wrap 2xl:flex-nowrap items-center justify-between gap-1.5">
         {/* Cụm Trái: Bộ lọc phạm vi */}
-        <div className="flex flex-wrap xl:flex-nowrap items-center gap-1.5 shrink-0">
+        <div className="flex flex-wrap 2xl:flex-nowrap items-center gap-1.5 shrink-0">
           <select
             aria-label="Lọc theo website nguồn"
             value={sourceWebsiteFilter}
@@ -2445,6 +2609,7 @@ export function LeadsWorkspace() {
             <option value="toantrung.com.vn">Website Toàn Trung (toantrung.com.vn)</option>
             <option value="bangled.vn">Chuyên trang Bảng LED (bangled.vn)</option>
             <option value="manhinhled.net.vn">Chuyên trang Màn hình LED (manhinhled.net.vn)</option>
+            <option value="bangdientu.com.vn">Chuyên trang Bảng điện tử (bangdientu.com.vn)</option>
             <option value="__unresolved__">Chưa xác định website</option>
           </select>
 
@@ -2570,38 +2735,23 @@ export function LeadsWorkspace() {
           )}
         </div>
 
-        {/* Cụm Phải: Tìm kiếm + Cần kiểm tra + Nhắc việc */}
+        {/* Cụm Phải: Cần kiểm tra + Nhắc việc (ô Tìm kiếm đã đặt duy nhất trên Topbar để tránh lặp 2 ô tìm kiếm) */}
         <div className="flex items-center gap-1.5 min-w-0">
-          <div className="flex items-center gap-1.5 min-h-8 px-2 rounded-[10px] border border-slate-200 bg-slate-50 focus-within:bg-white focus-within:border-[#1E3A8A] min-w-0">
-            <Search aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-            <label htmlFor="leads-toolbar-search" className="sr-only">
-              Tìm kiếm Lead
-            </label>
-            <input
-              id="leads-toolbar-search"
-              ref={searchInputRef}
-              type="search"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm SĐT, tên, mã..."
-              className="w-28 2xl:w-44 bg-transparent outline-none text-xs text-slate-800 placeholder:text-slate-400"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                aria-label="Xóa tìm kiếm"
-                onClick={() => {
-                  setSearchQuery('');
-                  if (typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
-                  }
-                }}
-                className="text-slate-400 hover:text-slate-700 font-bold text-xs"
-              >
-                ×
-              </button>
-            )}
-          </div>
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                setSearchQuery('');
+                if (typeof window !== 'undefined') {
+                  window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+                }
+              }}
+              className="min-h-8 px-2.5 rounded-[10px] bg-blue-50 border border-blue-200 text-[#0F275C] text-xs font-semibold inline-flex items-center gap-1.5 max-w-[200px]"
+            >
+              <span className="truncate">Tìm: &ldquo;{searchQuery}&rdquo;</span>
+              <span className="font-bold">×</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -2657,6 +2807,78 @@ export function LeadsWorkspace() {
             >
               <span>Chưa gắn SP</span>
               <span>×</span>
+            </button>
+          )}
+          {salesIdFilter !== 'all' && (
+            <button
+              type="button"
+              onClick={() => setSalesIdFilter('all')}
+              className="min-h-8 px-2 rounded-[10px] bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>
+                Sales:{' '}
+                {salesIdFilter === 'unassigned'
+                  ? 'Chưa phân bổ'
+                  : salesOptions.find((s) => String(s.id) === salesIdFilter)?.fullName ||
+                    `#${salesIdFilter}`}
+              </span>
+              <span>×</span>
+            </button>
+          )}
+          {productIdFilter !== 'all' && (
+            <button
+              type="button"
+              onClick={() => setProductIdFilter('all')}
+              className="min-h-8 px-2 rounded-[10px] bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>
+                SP:{' '}
+                {products.find((p) => String(p.id) === productIdFilter)?.productName ||
+                  `#${productIdFilter}`}
+              </span>
+              <span>×</span>
+            </button>
+          )}
+          {overdueOnly && (
+            <button
+              type="button"
+              onClick={() => setOverdueOnly(false)}
+              className="min-h-8 px-2 rounded-[10px] bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>Quá hạn &gt;7 ngày</span>
+              <span>×</span>
+            </button>
+          )}
+          {unreceivedOnly && (
+            <button
+              type="button"
+              onClick={() => setUnreceivedOnly(false)}
+              className="min-h-8 px-2 rounded-[10px] bg-amber-50 border border-amber-200 text-amber-900 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>Chờ tiếp nhận</span>
+              <span>×</span>
+            </button>
+          )}
+          {validOnly && (
+            <button
+              type="button"
+              onClick={() => {
+                setValidOnly(false);
+                setIncludeSpam(true);
+              }}
+              className="min-h-8 px-2 rounded-[10px] bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <span>Chỉ Lead hợp lệ (L2)</span>
+              <span>×</span>
+            </button>
+          )}
+          {hasAnyActiveFilter && (
+            <button
+              type="button"
+              onClick={handleResetAllFilters}
+              className="min-h-8 px-2.5 rounded-[10px] border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap transition-colors"
+            >
+              <span>Đặt lại bộ lọc</span>
             </button>
           )}
         </div>

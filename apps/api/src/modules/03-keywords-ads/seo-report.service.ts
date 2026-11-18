@@ -1,6 +1,20 @@
-import { prisma } from '@toantrung/database';
+import { prisma, recordAiUsageAttempt } from '@toantrung/database';
 import type { SessionUserDto } from '@toantrung/contracts';
 import { buildStandardXlsxBuffer, ZipArchive } from '../../core/export/xlsx-builder';
+import { AiDesignProviderFactory } from '../05-ai-design/providers';
+
+function resolveLiveGeminiApiKey(): string {
+  const envKey = process.env.GEMINI_API_KEY?.trim();
+  if (envKey) return envKey;
+  try {
+    const catalog = AiDesignProviderFactory.getCatalog();
+    const gKey = catalog?.config?.providers?.google_imagen?.apiKey?.trim();
+    if (gKey) return gKey;
+  } catch {
+    // ignore catalog read errors
+  }
+  return '';
+}
 
 const SETTING_KEY_SEO_AI_REPORTS = 'seo_ai_reports_history_v1';
 
@@ -445,29 +459,32 @@ function buildFallbackSeoReportText(snapshot: SeoComparisonSnapshot): string {
     `BÁO CÁO PHÂN TÍCH TÌM KIẾM TỰ NHIÊN & TỪ KHÓA (${siteLabel})`,
     `Kỳ báo cáo: ${snapshot.current.startDate} đến ${snapshot.current.endDate} (Đối chiếu kỳ trước: ${snapshot.previous.startDate} đến ${snapshot.previous.endDate})`,
     '',
-    'I. KẾT QUẢ CHÍNH & BIẾN ĐỘNG SO KỲ TRƯỚC',
-    `• Lượt nhấp tìm kiếm (Clicks): đạt ${snapshot.current.totalClicks} lượt (kỳ trước đạt ${snapshot.previous.totalClicks} lượt, ${clicksTrendText}) [Tham chiếu: snapshot.current.totalClicks, snapshot.comparison.clicksDelta].`,
-    `• Lượt hiển thị tìm kiếm (Impressions): đạt ${snapshot.current.totalImpressions} lượt (kỳ trước đạt ${snapshot.previous.totalImpressions} lượt, biến động ${snapshot.comparison.impressionsDeltaLabel}) [Tham chiếu: snapshot.current.totalImpressions].`,
-    `• Tỷ lệ nhấp tổng hợp (CTR): đạt ${snapshot.current.overallCtrPct}% (kỳ trước đạt ${snapshot.previous.overallCtrPct}%, chênh lệch ${snapshot.comparison.ctrDeltaPctPoints >= 0 ? '+' : ''}${snapshot.comparison.ctrDeltaPctPoints} điểm phần trăm) [Tham chiếu: snapshot.current.overallCtrPct].`,
-    `• Lead hợp lệ ghi nhận từ website trong kỳ: ${snapshot.leadsFromWebsiteCount} Lead (lưu ý: chỉ các Lead có tham số UTM/nguồn tìm kiếm mới khẳng định từ kênh Organic; phần thiếu UTM chưa đủ bằng chứng phân bổ kênh) [Tham chiếu: snapshot.leadsFromWebsiteCount].`,
+    'I. TỔNG QUAN HIỆU SUẤT TÌM KIẾM & ĐỐI CHIẾU KỲ TRƯỚC',
+    `• Lượt nhấp tìm kiếm (Clicks): đạt ${snapshot.current.totalClicks} lượt (kỳ trước đạt ${snapshot.previous.totalClicks} lượt, ${clicksTrendText}) [Đối chiếu GSC: Tổng Clicks kỳ hiện tại & kỳ trước].`,
+    `• Lượt hiển thị tìm kiếm (Impressions): đạt ${snapshot.current.totalImpressions} lượt (kỳ trước đạt ${snapshot.previous.totalImpressions} lượt, biến động ${snapshot.comparison.impressionsDeltaLabel}) [Đối chiếu GSC: Tổng Impressions kỳ hiện tại & kỳ trước].`,
+    `• Tỷ lệ nhấp tổng hợp (CTR): đạt ${snapshot.current.overallCtrPct}% (kỳ trước đạt ${snapshot.previous.overallCtrPct}%, chênh lệch ${snapshot.comparison.ctrDeltaPctPoints >= 0 ? '+' : ''}${snapshot.comparison.ctrDeltaPctPoints} điểm phần trăm) [Đối chiếu GSC: CTR trung bình toàn kỳ].`,
+    `• Lead hợp lệ ghi nhận từ website trong kỳ: ${snapshot.leadsFromWebsiteCount} Lead (lưu ý: chỉ các Lead có tham số UTM/nguồn tìm kiếm mới khẳng định từ kênh Organic; phần thiếu UTM chưa đủ bằng chứng phân bổ kênh) [Đối chiếu CRM: Hồ sơ Lead L2 trong kỳ].`,
     ...(snapshot.dataCompleteness.warnings.length > 0
       ? ['', 'Lưu ý về độ mới và phần thiếu dữ liệu:', ...snapshot.dataCompleteness.warnings.map((w) => `• ${w}`)]
       : []),
     '',
-    'II. TRANG ĐÍCH & TỪ KHÓA ĐÓNG GÓP CHÍNH',
+    'II. BẰNG CHỨNG DỮ LIỆU TỪ TỪ KHÓA & TRANG ĐÍCH (GSC)',
     '1. Nhóm từ khóa đóng góp lượt nhấp / hiển thị cao nhất:',
-    topKwLines || '• Chưa ghi nhận từ khóa chi tiết phát sinh lượt nhấp trong kỳ này [Tham chiếu: bảng topKeywords].',
-    ...(topPageLines ? ['', '2. Các trang đích đóng góp truy cập tìm kiếm cao nhất:', topPageLines] : []),
+    topKwLines.replace(/\[Tham chiếu: bảng topKeywords\]/g, '[Đối chiếu GSC: Bảng từ khóa topKeywords]') ||
+      '• Chưa ghi nhận từ khóa chi tiết phát sinh lượt nhấp trong kỳ này [Đối chiếu GSC: topKeywords].',
+    ...(topPageLines
+      ? ['', '2. Các trang đích đóng góp truy cập tìm kiếm cao nhất:', topPageLines.replace(/\[Tham chiếu: bảng topPages\]/g, '[Đối chiếu GSC: Bảng trang đích topPages]')]
+      : []),
     '',
-    'III. GIẢ THUYẾT NGUYÊN NHÂN (CẦN KIỂM CHỨNG)',
+    'III. GIẢ THUYẾT NGUYÊN NHÂN (CẦN KIỂM CHỨNG THÊM)',
     snapshot.current.overallCtrPct < 3
-      ? `• Giả thuyết 1: CTR tổng hợp đạt ${snapshot.current.overallCtrPct}% trên ${snapshot.current.totalImpressions} lượt hiển thị cho thấy thẻ tiêu đề (Title) hoặc mô tả tìm kiếm (Meta Description) có thể chưa sát ý định tra cứu báo giá thực tế${snapshot.current.weightedAvgPosition ? ` ở vùng vị trí trung bình ${snapshot.current.weightedAvgPosition}` : ''} (chưa đủ bằng chứng khẳng định do thuật toán Google).`
+      ? `• Giả thuyết 1: CTR tổng hợp đạt ${snapshot.current.overallCtrPct}% trên ${snapshot.current.totalImpressions} lượt hiển thị cho thấy thẻ tiêu đề (Title) hoặc mô tả tìm kiếm (Meta Description) có thể chưa sát ý định tra cứu báo giá thực tế${snapshot.current.weightedAvgPosition ? ` ở vùng vị trí trung bình ${snapshot.current.weightedAvgPosition}` : ''} (giả thuyết phân tích, chưa đủ bằng chứng kết luận nguyên nhân thuật toán).`
       : `• Giả thuyết 1: CTR đạt ${snapshot.current.overallCtrPct}% cho thấy thông điệp tiêu đề đang phù hợp nhóm truy vấn thương hiệu và sản phẩm cốt lõi; biến động lượt nhấp chủ yếu phụ thuộc nhu cầu tìm kiếm theo tuần.`,
     snapshot.comparison.clicksDelta < 0
       ? `• Giả thuyết 2: Mức giảm ${Math.abs(snapshot.comparison.clicksDelta)} lượt nhấp có thể đến từ độ trễ chốt sổ tự nhiên của Google Search Console ở những ngày cuối kỳ hoặc biến động hiển thị trên nhóm từ khóa ngách.`
       : `• Giả thuyết 2: Mức tăng hoặc giữ nhịp lượt nhấp phản ánh các URL chủ lực đang giữ ổn định chỉ mục tìm kiếm.`,
     '',
-    'IV. ƯU TIÊN CÔNG VIỆC & CÁCH KIỂM CHỨNG',
+    'IV. ĐỀ XUẤT CÔNG VIỆC ƯU TIÊN & CÁCH ĐO LƯỜNG KẾT QUẢ',
     '1. Tối ưu Title & Meta Description cho nhóm từ khóa có hiển thị cao nhưng CTR thấp trong bảng Cơ hội; đưa trực tiếp các chủ đề đề xuất bên dưới vào Kế hoạch nội dung SEO.',
     '2. Rà soát nội dung kỹ thuật, hình ảnh dự án thực tế và biểu mẫu liên hệ có gắn tham số nguồn trên các trang đích top đầu để đủ bằng chứng đối soát Lead.',
     '3. Cách kiểm chứng: So sánh lại CTR, vị trí trung bình và lượt nhấp của đúng các URL/từ khóa đã chỉnh sửa trên Search Console sau 14 ngày kể từ thời điểm Google thu thập lại dữ liệu.',
@@ -516,8 +533,23 @@ export function validateAiClaimsAgainstSnapshot(
     if (pg.avgPosition != null) positionSet.add(pg.avgPosition);
   }
 
+  const keywordEmbeddedNumbers = new Set<number>();
+  for (const kw of [...snapshot.topKeywords, ...(snapshot.recommendedTopics || [])]) {
+    const matches = String(kw.keyword || '').match(/\d+(?:\.\d+)?/g) || [];
+    for (const m of matches) {
+      const n = Number(m);
+      if (Number.isFinite(n)) keywordEmbeddedNumbers.add(n);
+    }
+    const r = kw as { impressions?: number; clicks?: number; ctrPct?: number; avgPosition?: number | null };
+    if (typeof r.impressions === 'number') impressionsSet.add(r.impressions);
+    if (typeof r.clicks === 'number') clicksSet.add(r.clicks);
+    if (typeof r.ctrPct === 'number') ctrSet.add(r.ctrPct);
+    if (typeof r.avgPosition === 'number') positionSet.add(r.avgPosition);
+  }
+
   const allAllowedNumbers = new Set<number>([
-    0, 1, 2, 3, 4, 5, 6, 7, 10, 14, 15, 20, 30, 60, 90, 100,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15, 20, 24, 28, 30, 48, 60, 90, 100,
+    2025, 2026, 2027,
     snapshot.periodDays,
     snapshot.dataCompleteness.expectedDays,
     snapshot.dataCompleteness.currentDaysWithData,
@@ -527,6 +559,7 @@ export function validateAiClaimsAgainstSnapshot(
     ...ctrSet,
     ...positionSet,
     ...leadsSet,
+    ...keywordEmbeddedNumbers,
   ]);
   if (snapshot.comparison.clicksDeltaPct != null) {
     allAllowedNumbers.add(Math.abs(snapshot.comparison.clicksDeltaPct));
@@ -536,6 +569,17 @@ export function validateAiClaimsAgainstSnapshot(
     allAllowedNumbers.add(Math.abs(snapshot.comparison.impressionsDeltaPct));
     allAllowedNumbers.add(Number(Math.abs(snapshot.comparison.impressionsDeltaPct).toFixed(1)));
   }
+
+  const normalizeClauseNumbers = (raw: string): string => {
+    // Normalize dot-grouped thousands (e.g. 1.409 or 59.464 -> 1409 or 59464) when matching allowed totals
+    let out = raw.replace(/\b(\d{1,3}(?:\.\d{3})+)\b/g, (full) => {
+      const plain = Number(full.replace(/\./g, ''));
+      return allAllowedNumbers.has(plain) ? String(plain) : full;
+    });
+    // Normalize comma decimal notation in Vietnamese percentages/decimals (3,08 -> 3.08)
+    out = out.replace(/(\d+),(\d+)/g, '$1.$2');
+    return out;
+  };
 
   const allowedDates = new Set<string>([
     snapshot.current.startDate,
@@ -559,7 +603,7 @@ export function validateAiClaimsAgainstSnapshot(
   const clauses = content.split(/\r?\n|(?<=[.!?;])\s+/);
 
   for (const rawClause of clauses) {
-    const clause = rawClause.trim();
+    const clause = normalizeClauseNumbers(rawClause.trim());
     if (!clause) continue;
     const lowerClause = clause.toLowerCase();
 
@@ -664,6 +708,7 @@ export function validateAiClaimsAgainstSnapshot(
     // 6. Kiểm tra số bịa ngoài snapshot (UNVERIFIED_NUMBER)
     const strippedClause = clause
       .replace(/\b20\d{2}-\d{2}-\d{2}\b/g, ' ')
+      .replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, ' ')
       .replace(/https?:\/\/[^\s)]+/gi, ' ')
       .replace(/\/[a-z0-9._/-]+/gi, ' ');
     const numTokens = strippedClause.match(/(?<![a-zA-Z0-9_])\d+(?:\.\d+)?(?![a-zA-Z0-9_])/g) || [];
@@ -743,57 +788,162 @@ export async function generateSeoAiReportFromSnapshot(params: {
     let fallbackReason: string | null = 'MISSING_GEMINI_API_KEY';
     let validationResult: SeoClaimValidationResult = validateAiClaimsAgainstSnapshot(aiContent, snapshot);
 
-    const apiKey = process.env.GEMINI_API_KEY?.trim();
+    const apiKey = resolveLiveGeminiApiKey();
     if (apiKey) {
-      const model = process.env.GEMINI_TEXT_MODEL?.trim() || 'gemini-2.5-flash';
+      const candidateModels = Array.from(
+        new Set(
+          [
+            process.env.GEMINI_TEXT_MODEL?.trim(),
+            'gemini-3-flash-preview',
+            'gemini-2.5-flash',
+          ].filter((m): m is string => Boolean(m)),
+        ),
+      );
+      const compactSnapshot = {
+        website: snapshot.website,
+        periodDays: snapshot.periodDays,
+        current: snapshot.current,
+        previous: snapshot.previous,
+        comparison: snapshot.comparison,
+        leadsFromWebsiteCount: snapshot.leadsFromWebsiteCount,
+        dataCompleteness: snapshot.dataCompleteness,
+        topKeywords: snapshot.topKeywords.slice(0, 12),
+        topPages: snapshot.topPages.slice(0, 8),
+        recommendedTopics: (snapshot.recommendedTopics || []).slice(0, 6).map((t) => ({
+          keyword: t.keyword,
+          targetWebsite: t.targetWebsite,
+          priorityCategory: t.priorityCategory,
+          impressions: t.impressions,
+          clicks: t.clicks,
+          ctrPct: t.ctrPct,
+          avgPosition: t.avgPosition,
+        })),
+      };
       const prompt = [
-        'Bạn là chuyên gia phân tích SEO B2B cho công ty Toàn Trung (Màn hình LED, Bảng điện tử).',
+        'Bạn là chuyên gia phân tích SEO B2B cho Công ty Điện tử Viễn thông Toàn Trung (Màn hình LED, Bảng điện tử).',
         'QUY TẮC BẮT BUỘC:',
-        '- CHỈ ĐƯỢC dùng số liệu, từ khóa, URL có trong JSON Snapshot dưới đây. TUYỆT ĐỐI KHÔNG tự bịa thêm số liệu hay dẫn chứng ngoài snapshot.',
-        '- Không gán nhầm số liệu giữa các website, URL, loại chỉ số (Clicks vs Impressions vs Lead) hoặc kỳ báo cáo.',
-        '- Phân biệt rạch ròi 4 mục: (1) Tổng quan số liệu, (2) Quan sát thực tế (Observations kèm dẫn chứng số liệu/từ khóa/URL), (3) Giả thuyết nguyên nhân (Hypotheses), (4) 3–5 công việc ưu tiên (Action Plan).',
-        '- Trình bày bằng tiếng Việt rõ ràng, súc tích.',
+        '1. CHỈ ĐƯỢC sử dụng đúng con số, từ khóa và URL có trong JSON SNAPSHOT bên dưới. TUYỆT ĐỐI KHÔNG tự suy đoán hay thêm bất kỳ con số nào khác ngoài snapshot.',
+        '2. KHÔNG dùng dấu chấm phân tách hàng nghìn khi viết số (ví dụ viết 1409 thay vì 1.409, viết 59464 thay vì 59.464); giữ nguyên dấu chấm thập phân (ví dụ 2.37%).',
+        '3. Không gán nhầm số liệu giữa các website, giữa các từ khóa/URL, giữa Clicks với Impressions hay giữa kỳ này với kỳ trước.',
+        '4. Trình bày đúng 4 đề mục tiếng Việt theo thứ tự sau (không dùng ký tự Markdown # hay bảng):',
+        `BÁO CÁO PHÂN TÍCH TÌM KIẾM TỰ NHIÊN & TỪ KHÓA (${snapshot.website === 'all' ? 'toàn bộ hệ thống website' : snapshot.website})`,
+        `Kỳ báo cáo: ${snapshot.current.startDate} đến ${snapshot.current.endDate} (Đối chiếu kỳ trước: ${snapshot.previous.startDate} đến ${snapshot.previous.endDate})`,
+        'I. TỔNG QUAN HIỆU SUẤT TÌM KIẾM & ĐỐI CHIẾU KỲ TRƯỚC',
+        'II. BẰNG CHỨNG DỮ LIỆU TỪ TỪ KHÓA & TRANG ĐÍCH (GSC)',
+        'III. GIẢ THUYẾT NGUYÊN NHÂN (CẦN KIỂM CHỨNG THÊM)',
+        'IV. ĐỀ XUẤT CÔNG VIỆC ƯU TIÊN & CÁCH ĐO LƯỜNG KẾT QUẢ',
+        '5. Ở cuối mỗi nhận định có số liệu thuộc Mục I và Mục II, gắn nhãn trích dẫn ngắn: [Đối chiếu GSC: <mô tả ngắn nguồn từ khóa/URL/chỉ số>].',
+        '6. Mục III phải nêu rõ là "Giả thuyết" cần kiểm chứng, không khẳng định chắc chắn nguyên nhân khi dữ liệu GSC chưa đủ bằng chứng.',
         '',
-        'SNAPSHOT JSON:',
-        JSON.stringify(snapshot),
+        'JSON SNAPSHOT:',
+        JSON.stringify(compactSnapshot),
       ].join('\n');
 
-      try {
-        const resp = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              contents: [{ role: 'user', parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0.2, maxOutputTokens: 2048 },
-            }),
-          },
-        );
-        if (resp.ok) {
+      for (let i = 0; i < candidateModels.length; i++) {
+        const model = candidateModels[i];
+        const startedAt = Date.now();
+        try {
+          const resp = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                generationConfig: { temperature: 0.15, maxOutputTokens: 2048 },
+              }),
+              signal: AbortSignal.timeout(22_000),
+            },
+          );
+          const durationMs = Date.now() - startedAt;
+
+          if (!resp.ok) {
+            const errTxt = (await resp.text()).slice(0, 200);
+            fallbackReason = `GEMINI_HTTP_${resp.status}`;
+            await recordAiUsageAttempt(prisma, {
+              idempotencyKey: `seo-report-${params.user.id}-${startedAt}-${model}`,
+              attemptNumber: i + 1,
+              moduleCode: '03-keywords-ads',
+              taskType: 'seo_draft',
+              userId: params.user.id,
+              modelName: model,
+              durationMs,
+              status: 'failed',
+              errorMessage: `HTTP ${resp.status}: ${errTxt}`,
+            }).catch(() => null);
+            continue;
+          }
+
           const json = (await resp.json()) as {
             candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+            usageMetadata?: {
+              promptTokenCount?: number;
+              candidatesTokenCount?: number;
+              totalTokenCount?: number;
+            };
           };
           const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('\n').trim();
-          if (text && text.length > 80) {
-            const check = validateAiClaimsAgainstSnapshot(text, snapshot);
-            if (check.valid) {
-              aiContent = text;
-              modelUsed = model;
-              generationMode = 'LIVE_AI';
-              fallbackReason = null;
-              validationResult = check;
-            } else {
-              fallbackReason = `AI_CLAIM_REJECTED: ${check.violations[0]}`;
-            }
-          } else {
+          if (!text || text.length <= 80) {
             fallbackReason = 'AI_EMPTY_RESPONSE';
+            await recordAiUsageAttempt(prisma, {
+              idempotencyKey: `seo-report-${params.user.id}-${startedAt}-${model}`,
+              attemptNumber: i + 1,
+              moduleCode: '03-keywords-ads',
+              taskType: 'seo_draft',
+              userId: params.user.id,
+              modelName: model,
+              durationMs,
+              promptTokens: json.usageMetadata?.promptTokenCount ?? null,
+              completionTokens: json.usageMetadata?.candidatesTokenCount ?? null,
+              totalTokens: json.usageMetadata?.totalTokenCount ?? null,
+              status: 'failed',
+              errorMessage: 'AI_EMPTY_RESPONSE',
+            }).catch(() => null);
+            continue;
           }
-        } else {
-          fallbackReason = `GEMINI_HTTP_${resp.status}`;
+
+          const check = validateAiClaimsAgainstSnapshot(text, snapshot);
+          await recordAiUsageAttempt(prisma, {
+            idempotencyKey: `seo-report-${params.user.id}-${startedAt}-${model}`,
+            attemptNumber: i + 1,
+            moduleCode: '03-keywords-ads',
+            taskType: 'seo_draft',
+            userId: params.user.id,
+            modelName: model,
+            durationMs,
+            promptTokens: json.usageMetadata?.promptTokenCount ?? null,
+            completionTokens: json.usageMetadata?.candidatesTokenCount ?? null,
+            totalTokens: json.usageMetadata?.totalTokenCount ?? null,
+            status: check.valid ? 'success' : 'failed',
+            errorMessage: check.valid ? null : check.violations[0] || 'AI_CLAIM_REJECTED',
+          }).catch(() => null);
+
+          if (check.valid) {
+            aiContent = text;
+            modelUsed = model;
+            generationMode = 'LIVE_AI';
+            fallbackReason = null;
+            validationResult = check;
+            break;
+          } else {
+            fallbackReason = `AI_CLAIM_REJECTED: ${check.violations[0]}`;
+          }
+        } catch (err) {
+          const durationMs = Date.now() - startedAt;
+          const msg = err instanceof Error ? err.message : 'unknown';
+          fallbackReason = `GEMINI_NETWORK_ERROR: ${msg}`;
+          await recordAiUsageAttempt(prisma, {
+            idempotencyKey: `seo-report-${params.user.id}-${startedAt}-${model}`,
+            attemptNumber: i + 1,
+            moduleCode: '03-keywords-ads',
+            taskType: 'seo_draft',
+            userId: params.user.id,
+            modelName: model,
+            durationMs,
+            status: /abort|timeout/i.test(msg) ? 'timeout' : 'failed',
+            errorMessage: msg,
+          }).catch(() => null);
         }
-      } catch (err) {
-        fallbackReason = `GEMINI_NETWORK_ERROR: ${err instanceof Error ? err.message : 'unknown'}`;
       }
     }
 

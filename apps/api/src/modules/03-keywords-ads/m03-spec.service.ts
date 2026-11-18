@@ -17,6 +17,8 @@ import {
 } from '../../core/website-catalog';
 import {
   classifyGscDateBySourceMetadata,
+  getGoogleAdsApiConfig,
+  getGoogleConnection,
   getGscDataStateMetadataMap,
 } from '../02-tracking-sync/google-oauth.service';
 import {
@@ -59,7 +61,24 @@ export async function getM03AdsSeoDashboardSpec(params?: {
   roleCode?: RoleCode;
 }): Promise<M03AdsSeoDashboardDto> {
   const scope = await resolveDashboardScope(params);
-  const hasAdsToken = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
+  const [googleConn, adsCfg, realAdsCatalogCount] = await Promise.all([
+    getGoogleConnection(),
+    getGoogleAdsApiConfig(),
+    prisma.campaign.count({
+      where: {
+        platform: 'google_ads',
+        NOT: [{ accountExternalId: 'default' }, { accountExternalId: { startsWith: 'GA4-' } }],
+      },
+    }),
+  ]);
+  const hasAdsToken =
+    Boolean(adsCfg?.developerToken) ||
+    Boolean(
+      googleConn?.connected &&
+        !googleConn.isSandboxDemo &&
+        googleConn.scopes?.some((s) => s.includes('adwords')),
+    ) ||
+    realAdsCatalogCount > 0;
   const isAdsReadOnly = params?.roleCode === 'ADS';
 
   const gscSites = scope.gscSiteUrls;
@@ -550,8 +569,8 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     ads: {
       status: hasAdsToken ? 'CONNECTED' : 'UNCONFIGURED',
       statusMessage: hasAdsToken
-        ? 'Đã kết nối dữ liệu quảng cáo.'
-        : 'Chưa kết nối Google Ads API (thiếu GOOGLE_ADS_DEVELOPER_TOKEN). Vui lòng xem chi tiết quảng cáo tại mục Chiến dịch.',
+        ? 'Đã kết nối tài khoản Google Ads v26 qua OAuth. Xem chi tiết chiến dịch và chi tiêu tại mục Chiến dịch → Quảng cáo.'
+        : 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads. Vui lòng xem chi tiết kết nối tại mục Cài đặt hoặc Chiến dịch.',
       currencyCode: 'VND',
       metrics: {
         adCost: null,

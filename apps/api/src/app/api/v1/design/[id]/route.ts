@@ -1,3 +1,4 @@
+import { hasBaPermission } from '@toantrung/contracts';
 import { ConcurrencyConflictError } from '@toantrung/database';
 import {
   AddProjectPhotoSchema,
@@ -35,6 +36,17 @@ export async function GET(
   const auth = await requireAuthenticatedSession(req);
   if (!auth.ok) return auth.response;
 
+  const canViewDesign =
+    hasBaPermission(auth.user.roleCode, 'AI_DESIGN') ||
+    hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW');
+  if (!canViewDesign) {
+    return jsonError(
+      'FORBIDDEN_PERMISSION',
+      'Tài khoản không có quyền xem hồ sơ thiết kế và ảnh hiện trạng.',
+      403
+    );
+  }
+
   const requestId = Number(context.params.id);
   if (!Number.isInteger(requestId) || requestId <= 0) {
     return jsonError('INVALID_ID', 'Mã yêu cầu thiết kế không hợp lệ.', 400);
@@ -70,6 +82,32 @@ export async function PATCH(
   try {
     const raw = (await req.json()) as Record<string, unknown>;
     const action = String(raw.action || 'regenerate_ai');
+    const canViewOrUploadSurvey =
+      hasBaPermission(auth.user.roleCode, 'AI_DESIGN') ||
+      hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW');
+
+    if (!canViewOrUploadSurvey) {
+      return jsonError(
+        'FORBIDDEN_PERMISSION',
+        'Tài khoản không có quyền thao tác trên hồ sơ thiết kế này.',
+        403
+      );
+    }
+
+    const aiDesignOnlyActions = new Set([
+      'retry_last_failed',
+      'chat_edit',
+      'approve_version',
+      'save_finished',
+      'regenerate_ai',
+    ]);
+    if (aiDesignOnlyActions.has(action) && !hasBaPermission(auth.user.roleCode, 'AI_DESIGN')) {
+      return jsonError(
+        'FORBIDDEN_PERMISSION',
+        'Chỉ Designer hoặc Quản trị viên (quyền AI_DESIGN) mới được sinh ảnh AI hoặc phê duyệt phiên bản thiết kế.',
+        403
+      );
+    }
 
     if (action === 'evaluate_technical_bom') {
       const res = await evaluateProjectTechnicalBom(auth.user, requestId, {
@@ -179,12 +217,27 @@ export async function POST(
       const action = String(raw.action || 'upload_final');
 
       if (action === 'add_photo') {
+        if (!hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW')) {
+          return jsonError(
+            'FORBIDDEN_PERMISSION',
+            'Tài khoản không có quyền tải ảnh hiện trạng công trình.',
+            403
+          );
+        }
         const parsed = AddProjectPhotoSchema.safeParse(raw);
         if (!parsed.success) {
           return jsonError('VALIDATION_ERROR', parsed.error.issues[0]?.message || 'Dữ liệu ảnh không hợp lệ.', 400);
         }
         const res = await addProjectPhoto(auth.user, requestId, parsed.data);
         return jsonSuccess(res, 201);
+      }
+
+      if (!hasBaPermission(auth.user.roleCode, 'AI_DESIGN')) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Designer hoặc Quản trị viên (quyền AI_DESIGN) mới được lưu bản phối cảnh hoặc bản vẽ hoàn thiện.',
+          403
+        );
       }
 
       if (action === 'save_composited_version') {
@@ -234,6 +287,13 @@ export async function POST(
       const buffer = Buffer.from(arrayBuf);
 
       if (action === 'add_photo') {
+        if (!hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW')) {
+          return jsonError(
+            'FORBIDDEN_PERMISSION',
+            'Tài khoản không có quyền tải ảnh hiện trạng công trình.',
+            403
+          );
+        }
         const photo = await addProjectPhoto(auth.user, requestId, {
           photoName: file.name,
           fileName: file.name,
@@ -241,6 +301,14 @@ export async function POST(
           base64Data: buffer.toString('base64'),
         });
         return jsonSuccess(photo, 201);
+      }
+
+      if (!hasBaPermission(auth.user.roleCode, 'AI_DESIGN')) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Designer hoặc Quản trị viên (quyền AI_DESIGN) mới được tải bản vẽ hoàn thiện.',
+          403
+        );
       }
 
       const res = await uploadDesignerFinalRender(auth.user, requestId, {

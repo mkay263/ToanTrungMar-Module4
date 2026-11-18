@@ -580,7 +580,8 @@ export default function SettingsPage() {
         };
       }>('/api/v1/settings/backup', {
         method: 'POST',
-        body: JSON.stringify({ action: 'create_backup' }),
+        csrfToken: user?.csrfToken,
+        body: { action: 'create_backup' },
       });
 
       const nowStr = new Date(res.backup.createdAt).toLocaleString('vi-VN');
@@ -612,13 +613,14 @@ export default function SettingsPage() {
         };
       }>('/api/v1/settings/backup', {
         method: 'POST',
-        body: JSON.stringify({
+        csrfToken: user?.csrfToken,
+        body: {
           action: 'save_company_profile',
           companyName,
           companyTaxCode,
           companyHotline,
           companyAddress,
-        }),
+        },
       });
       setBrandingState({
         ...adminBranding,

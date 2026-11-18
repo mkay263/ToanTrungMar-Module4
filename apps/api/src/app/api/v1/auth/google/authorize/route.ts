@@ -1,11 +1,22 @@
 import { NextResponse } from 'next/server';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
+import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import { buildGoogleAuthorizeUrl } from '../../../../../../modules/02-tracking-sync/google-oauth.service';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: Request) {
   try {
+    const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
+    if (!auth.ok) return auth.response;
+    if (auth.user.roleCode !== 'ADMIN' && auth.user.roleCode !== 'MKT_LEAD') {
+      return jsonError(
+        'FORBIDDEN',
+        'Chỉ Quản trị viên hoặc Trưởng phòng Marketing mới được cấp quyền kết nối Google OAuth.',
+        403,
+      );
+    }
+
     const url = new URL(req.url);
     const returnPath = url.searchParams.get('returnPath') || '/tracking';
     const redirectMode = url.searchParams.get('redirect') === 'true';

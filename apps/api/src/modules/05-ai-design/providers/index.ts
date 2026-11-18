@@ -484,34 +484,51 @@ export class AiDesignProviderFactory {
     }
 
     if (allowFallback && targetProviderId !== 'local_sandbox') {
-      // Step 1: If Google Free Tier blocked image generation, try configured Custom Gateway (e.g. gpt-image-2) first
+      const failedCloudAttempts: NonNullable<ProviderGenerationResult['failedCloudAttempts']> = [
+        {
+          provider: targetProviderId,
+          modelUsed: res.modelUsed || input.modelId || provider.getStatusInfo().activeModel,
+          errorCode: res.errorCode,
+          errorMessage: res.errorMessage,
+          durationMs: res.durationMs,
+        },
+      ];
+
+      // Step 1: If primary cloud provider failed, try configured Custom Gateway if different
       if (
         targetProviderId !== 'custom_endpoint' &&
         config.providers.custom_endpoint?.apiKey &&
         !process.env.NODE_TEST_CONTEXT
       ) {
-        const customProv = this.getProvider(
-          'custom_endpoint',
-          config.providers.custom_endpoint.activeModel || 'gpt-image-2'
-        );
+        const customModel = config.providers.custom_endpoint.activeModel || 'gpt-image-2';
+        const customProv = this.getProvider('custom_endpoint', customModel);
         const customRes = await customProv.generatePerspectiveDraft({
           ...input,
-          modelId: config.providers.custom_endpoint.activeModel || 'gpt-image-2',
+          modelId: customModel,
         });
         if (customRes.status === 'success' && validateGeneratedImageBuffer(customRes.imageBuffer).isValid) {
-          return customRes;
+          return { ...customRes, failedCloudAttempts };
         }
+        failedCloudAttempts.push({
+          provider: 'custom_endpoint',
+          modelUsed: customModel,
+          errorCode: customRes.errorCode,
+          errorMessage: customRes.errorMessage,
+          durationMs: customRes.durationMs,
+        });
       }
 
-      // Step 2: Guaranteed instant Studio Engine composite fallback
-      const fallback = new LocalSandboxAiProvider(input.modelId || provider.getStatusInfo().activeModel);
+      // Step 2: Guaranteed instant Studio Engine composite fallback (NEVER impersonate Cloud AI model names)
+      const fallback = new LocalSandboxAiProvider('toantrung-studio-v3');
       const fallbackRes = await fallback.generatePerspectiveDraft(input);
+      const reasonBrief = res.errorCode || res.errorMessage || 'Cloud AI tạm thời không phản hồi';
       return {
         ...fallbackRes,
-        provider: targetProviderId,
-        modelUsed: input.modelId || provider.getStatusInfo().activeModel,
-        fallbackNotice:
-          'Đã tự động kết xuất qua Toàn Trung Studio Engine.',
+        provider: 'local_sandbox',
+        modelUsed: 'toantrung-studio-v3',
+        isLocalFallback: true,
+        failedCloudAttempts,
+        fallbackNotice: `Cloud AI (${targetProviderId}: ${reasonBrief}) không thể sinh ảnh; đã dựng bản phối cảnh kỹ thuật nội bộ (Studio Engine toantrung-studio-v3), không phải ảnh từ Cloud AI.`,
       };
     }
 
@@ -563,34 +580,51 @@ export class AiDesignProviderFactory {
     }
 
     if (allowFallback && targetProviderId !== 'local_sandbox') {
-      // Step 1: If Google Free Tier blocked image generation, try configured Custom Gateway (e.g. gpt-image-2) first
+      const failedCloudAttempts: NonNullable<ProviderGenerationResult['failedCloudAttempts']> = [
+        {
+          provider: targetProviderId,
+          modelUsed: res.modelUsed || input.modelId || provider.getStatusInfo().activeModel,
+          errorCode: res.errorCode,
+          errorMessage: res.errorMessage,
+          durationMs: res.durationMs,
+        },
+      ];
+
+      // Step 1: If primary cloud provider failed, try configured Custom Gateway if different
       if (
         targetProviderId !== 'custom_endpoint' &&
         config.providers.custom_endpoint?.apiKey &&
         !process.env.NODE_TEST_CONTEXT
       ) {
-        const customProv = this.getProvider(
-          'custom_endpoint',
-          config.providers.custom_endpoint.activeModel || 'gpt-image-2'
-        );
+        const customModel = config.providers.custom_endpoint.activeModel || 'gpt-image-2';
+        const customProv = this.getProvider('custom_endpoint', customModel);
         const customRes = await customProv.generateBannerDraft({
           ...input,
-          modelId: config.providers.custom_endpoint.activeModel || 'gpt-image-2',
+          modelId: customModel,
         });
         if (customRes.status === 'success' && validateGeneratedImageBuffer(customRes.imageBuffer).isValid) {
-          return customRes;
+          return { ...customRes, failedCloudAttempts };
         }
+        failedCloudAttempts.push({
+          provider: 'custom_endpoint',
+          modelUsed: customModel,
+          errorCode: customRes.errorCode,
+          errorMessage: customRes.errorMessage,
+          durationMs: customRes.durationMs,
+        });
       }
 
-      // Step 2: Guaranteed instant Studio Engine composite fallback
-      const fallback = new LocalSandboxAiProvider(input.modelId || provider.getStatusInfo().activeModel);
+      // Step 2: Guaranteed instant Studio Engine composite fallback (NEVER impersonate Cloud AI model names)
+      const fallback = new LocalSandboxAiProvider('toantrung-studio-v3');
       const fallbackRes = await fallback.generateBannerDraft(input);
+      const reasonBrief = res.errorCode || res.errorMessage || 'Cloud AI tạm thời không phản hồi';
       return {
         ...fallbackRes,
-        provider: targetProviderId,
-        modelUsed: input.modelId || provider.getStatusInfo().activeModel,
-        fallbackNotice:
-          'Đã tự động kết xuất qua Toàn Trung Studio Engine.',
+        provider: 'local_sandbox',
+        modelUsed: 'toantrung-studio-v3',
+        isLocalFallback: true,
+        failedCloudAttempts,
+        fallbackNotice: `Cloud AI (${targetProviderId}: ${reasonBrief}) không thể sinh banner; đã dựng bản bố cục nội bộ (Studio Engine toantrung-studio-v3), không phải ảnh từ Cloud AI.`,
       };
     }
 

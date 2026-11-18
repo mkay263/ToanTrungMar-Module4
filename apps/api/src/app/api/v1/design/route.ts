@@ -19,6 +19,17 @@ export async function GET(req: Request) {
   const auth = await requireAuthenticatedSession(req);
   if (!auth.ok) return auth.response;
 
+  const canViewDesign =
+    hasBaPermission(auth.user.roleCode, 'AI_DESIGN') ||
+    hasBaPermission(auth.user.roleCode, 'ATTACHMENT_UPLOAD_VIEW');
+  if (!canViewDesign) {
+    return jsonError(
+      'FORBIDDEN_PERMISSION',
+      'Tài khoản không có quyền truy cập danh sách dự án thiết kế và bản vẽ.',
+      403
+    );
+  }
+
   try {
     const data = await listDesignRequestsForUser(auth.user);
     return jsonSuccess(data);

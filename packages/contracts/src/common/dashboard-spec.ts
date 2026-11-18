@@ -459,6 +459,14 @@ export interface M04ResultsReportDto {
     previousValidLeadCount?: number | null;
     previousWonLeadCount?: number | null;
   };
+  periodActivity?: {
+    receivedInPeriodCount: number;
+    quotedInPeriodCount: number;
+    wonInPeriodCount: number;
+    lostInPeriodCount: number;
+    fromPriorCohortCount: number;
+    definitionNote: string;
+  };
   charts: {
     leadFunnel: Array<{ stageKey: string; label: string; distinctLeadCount: number }>;
     progressChartMode?: 'CURRENT_STATUS_DISTRIBUTION' | 'CUMULATIVE_COHORT';
