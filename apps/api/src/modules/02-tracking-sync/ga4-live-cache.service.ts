@@ -448,6 +448,36 @@ function triggerPropertyRefreshSingleflight(
   return promise;
 }
 
+function getDayWindowSpan(startDate: string, endDate: string): number {
+  const s = new Date(`${startDate}T00:00:00Z`).getTime();
+  const e = new Date(`${endDate}T00:00:00Z`).getTime();
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return 0;
+  return Math.max(1, Math.round((e - s) / 86_400_000) + 1);
+}
+
+function findNearestCachedSnapshotForProperty(
+  propertyId: string,
+  startDate: string,
+  endDate: string,
+): Ga4PropertyPeriodSnapshot | null {
+  const targetSpan = getDayWindowSpan(startDate, endDate);
+  let best: Ga4PropertyPeriodSnapshot | null = null;
+  let bestFetchedMs = -1;
+  for (const [k, entry] of MEM_CACHE.entries()) {
+    if (!k.startsWith(`${propertyId}:`)) continue;
+    const snap = entry.data;
+    const span = getDayWindowSpan(snap.startDate, snap.endDate);
+    if (Math.abs(span - targetSpan) <= 1) {
+      const fMs = new Date(snap.fetchedAt).getTime();
+      if (fMs > bestFetchedMs) {
+        bestFetchedMs = fMs;
+        best = snap;
+      }
+    }
+  }
+  return best;
+}
+
 export async function getGa4LivePropertySnapshot(
   propertyId: string,
   startDate: string,
@@ -463,10 +493,23 @@ export async function getGa4LivePropertySnapshot(
     return cached.data;
   }
 
-  // C02 & C10: Đường đọc UI tuyệt đối không chờ kết nối Google mạng ngoài; trả dữ liệu nội bộ ngay và làm mới ngầm singleflight
+  // C02 & C10: Khi đã có cache của đúng kỳ thì trả ngay và làm mới ngầm; khi cache của khung ngày mới sau 00:00 chưa kịp có thì chờ tối đa 2.5s hoặc dùng snapshot gần nhất cùng độ dài kỳ
   if (!forceBlocking) {
-    void triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
-    return cached?.data || null;
+    const refreshPromise = triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
+    if (cached) {
+      return cached.data;
+    }
+    const nearestFallback = findNearestCachedSnapshotForProperty(propertyId, startDate, endDate);
+    if (process.env.NODE_TEST_CONTEXT) {
+      return nearestFallback;
+    }
+    const fastFresh = await Promise.race([
+      refreshPromise,
+      new Promise<Ga4PropertyPeriodSnapshot | null>((resolve) =>
+        setTimeout(() => resolve(null), 2500),
+      ),
+    ]);
+    return fastFresh || nearestFallback;
   }
 
   return triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);

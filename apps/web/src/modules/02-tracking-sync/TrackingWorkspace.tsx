@@ -96,23 +96,23 @@ export function TrackingWorkspace() {
             ctaText: 'Nhận báo giá ngay',
             baselineSnapshot: data
               ? {
-                  capturedAt: new Date().toISOString(),
-                  sourceModule: 'tracking',
-                  scopeLabel: `${c.campaignName} (${data.scope.startDate} → ${data.scope.endDate})`,
-                  dateFrom: data.scope.startDate,
-                  dateTo: data.scope.endDate,
-                  websiteId: scope.websiteId || 'all',
-                  websiteDomain: domain,
-                  campaignId: c.campaignId,
-                  campaignName: c.campaignName,
-                  metrics: {
-                    adCost: c.cost,
-                    receivedLeadCount: c.attributedLeadCount,
-                    validLeadCount: c.validAttributedLeadCount,
-                    costPerValidAdLead: c.costPerValidLead,
-                    wonLeadCount: c.wonAttributedLeadCount,
-                  },
-                }
+                capturedAt: new Date().toISOString(),
+                sourceModule: 'tracking',
+                scopeLabel: `${c.campaignName} (${data.scope.startDate} → ${data.scope.endDate})`,
+                dateFrom: data.scope.startDate,
+                dateTo: data.scope.endDate,
+                websiteId: scope.websiteId || 'all',
+                websiteDomain: domain,
+                campaignId: c.campaignId,
+                campaignName: c.campaignName,
+                metrics: {
+                  adCost: c.cost,
+                  receivedLeadCount: c.attributedLeadCount,
+                  validLeadCount: c.validAttributedLeadCount,
+                  costPerValidAdLead: c.costPerValidLead,
+                  wonLeadCount: c.wonAttributedLeadCount,
+                },
+              }
               : null,
           },
         },
@@ -176,6 +176,26 @@ export function TrackingWorkspace() {
         setData(res);
         if (res.coverage.availableWebsites?.length) {
           setKnownWebsites(res.coverage.availableWebsites);
+        }
+        // Tự động làm mới lại sau 2s nếu request đầu tiên rơi vào lúc cache GA4 đang warm sau 00:00
+        if (
+          !opts?.manual &&
+          (res.metrics.sessions ?? 0) > 0 &&
+          res.metrics.users === null &&
+          res.metrics.engagementRatePct === null
+        ) {
+          window.setTimeout(() => {
+            if (!opts?.signal?.aborted) {
+              void apiRequest<M02TrafficInteractionDto>(apiPath, {
+                skipCache: true,
+                signal: opts?.signal,
+              })
+                .then((freshRes) => {
+                  if (!opts?.signal?.aborted) setData(freshRes);
+                })
+                .catch(() => {});
+            }
+          }, 2000);
         }
       } catch (err) {
         if (opts?.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -298,11 +318,10 @@ export function TrackingWorkspace() {
         actions={
           <>
             <a
-              href={`/api/v1/tracking/export?websiteId=${encodeURIComponent(scope.websiteId)}&preset=${encodeURIComponent(scope.preset)}${
-                scope.preset === 'CUSTOM' && scope.from && scope.to
-                  ? `&from=${encodeURIComponent(scope.from)}&to=${encodeURIComponent(scope.to)}`
-                  : ''
-              }`}
+              href={`/api/v1/tracking/export?websiteId=${encodeURIComponent(scope.websiteId)}&preset=${encodeURIComponent(scope.preset)}${scope.preset === 'CUSTOM' && scope.from && scope.to
+                ? `&from=${encodeURIComponent(scope.from)}&to=${encodeURIComponent(scope.to)}`
+                : ''
+                }`}
               className="min-h-9 px-3 rounded-[10px] bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
             >
               <Download aria-hidden="true" className="w-3.5 h-3.5" />
@@ -432,11 +451,10 @@ export function TrackingWorkspace() {
             <span className="text-xs text-slate-500 mt-1">
               {scope.websiteId === 'all'
                 ? 'Không cộng gộp người dùng duy nhất giữa nhiều GA4 property'
-                : `Người dùng mới: ${
-                    m?.newUsers !== null && m?.newUsers !== undefined
-                      ? m.newUsers.toLocaleString('vi-VN')
-                      : UI_VOCABULARY.fallbacks.insufficientData
-                  }`}
+                : `Người dùng mới: ${m?.newUsers !== null && m?.newUsers !== undefined
+                  ? m.newUsers.toLocaleString('vi-VN')
+                  : UI_VOCABULARY.fallbacks.insufficientData
+                }`}
             </span>
           </div>
 
@@ -783,11 +801,10 @@ export function TrackingWorkspace() {
       >
         {ads && (
           <div
-            className={`rounded-[12px] border px-4 py-3 text-xs flex flex-wrap items-center justify-between gap-2 ${
-              ads.status === 'CONNECTED'
-                ? 'bg-blue-50/70 border-blue-200 text-slate-800'
-                : 'bg-amber-50/80 border-amber-200 text-amber-900'
-            }`}
+            className={`rounded-[12px] border px-4 py-3 text-xs flex flex-wrap items-center justify-between gap-2 ${ads.status === 'CONNECTED'
+              ? 'bg-blue-50/70 border-blue-200 text-slate-800'
+              : 'bg-amber-50/80 border-amber-200 text-amber-900'
+              }`}
           >
             <div className="flex items-start gap-2">
               <AlertCircle aria-hidden="true" className="w-4 h-4 shrink-0 mt-0.5" />
@@ -889,7 +906,7 @@ export function TrackingWorkspace() {
               CPL Lead CRM hợp lệ:{' '}
               <strong className="text-[#0F275C] tabular-nums">
                 {ads?.metrics.costPerValidLead !== null &&
-                ads?.metrics.costPerValidLead !== undefined
+                  ads?.metrics.costPerValidLead !== undefined
                   ? `${ads.metrics.costPerValidLead.toLocaleString('vi-VN')} ₫`
                   : UI_VOCABULARY.fallbacks.insufficientData}
               </strong>

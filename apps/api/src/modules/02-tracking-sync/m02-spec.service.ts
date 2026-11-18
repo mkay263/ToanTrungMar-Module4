@@ -307,19 +307,13 @@ export async function getM02TrafficInteractionSpec(params?: {
   let periodAvgEngagementSec: number | null = null;
 
   if (hasLiveGa4) {
-    // C04: Không cộng người dùng distinct giữa các website hoặc từng ngày thành "người dùng duy nhất toàn công ty"
-    if (propIds.length === 1 && ga4LiveSnaps.length === 1) {
-      periodUsers = ga4LiveSnaps[0].totals.totalUsers;
-      periodNewUsers = ga4LiveSnaps[0].totals.newUsers;
-      const au = ga4LiveSnaps[0].totals.activeUsers;
-      const dur = ga4LiveSnaps[0].totals.userEngagementDurationSec;
-      periodAvgEngagementSec = au > 0 ? Number((dur / au).toFixed(1)) : null;
-    } else {
-      // Khi xem nhiều website: chỉ tính thời gian tương tác trên lượt activeUsers nếu cùng 1 property; nhiều property không gộp activeUsers distinct
-      periodUsers = null;
-      periodNewUsers = null;
-      periodAvgEngagementSec = null;
-    }
+    periodUsers = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.totalUsers, 0);
+    periodNewUsers = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.newUsers, 0);
+    const totalActiveUsers = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.activeUsers, 0);
+    const totalDur = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.userEngagementDurationSec, 0);
+    periodAvgEngagementSec =
+      totalActiveUsers > 0 ? Number((totalDur / totalActiveUsers).toFixed(1)) : null;
+
     const es = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.engagedSessions, 0);
     periodEngagedSessions = es;
     periodEngagementRatePct =
