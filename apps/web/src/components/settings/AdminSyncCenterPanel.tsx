@@ -132,7 +132,7 @@ export function AdminSyncCenterPanel() {
         csrfToken: user?.csrfToken,
         body: { slot: 'MANUAL_RETRY' },
       });
-      setNotice('Đã đồng bộ dữ liệu GA4, Search Console và các chỉ số website mới nhất.');
+      setNotice('Đã đồng bộ dữ liệu GA4, Search Console và chiến dịch Google Ads mới nhất.');
       await loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Lỗi đồng bộ dữ liệu Google.');

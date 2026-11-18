@@ -101,6 +101,12 @@ export async function getM04ResultsReportSpec(
       select: {
         spendMicros: true,
         pageUrlRaw: true,
+        campaign: {
+          select: {
+            utmCampaignSlug: true,
+            campaignName: true,
+          },
+        },
       },
     }),
     prisma.platformSyncLog.findFirst({
@@ -230,9 +236,11 @@ export async function getM04ResultsReportSpec(
       attributedAdCost = Number((Number(totalMicros) / 1_000_000).toFixed(0));
       adReconciliationNote = 'Đã đối soát tổng chi phí quảng cáo cấp tài khoản với Lead quảng cáo hợp lệ.';
     } else {
-      const siteMatched = adsCampaignMetrics.filter(
-        (r) => r.pageUrlRaw && r.pageUrlRaw.toLowerCase().includes(scope.selectedWebsite!.domain.toLowerCase()),
-      );
+      const siteMatched = adsCampaignMetrics.filter((r) => {
+        const slug = r.campaign?.utmCampaignSlug || '';
+        const domainHint = (slug.startsWith('domain:') ? slug.slice(7) : r.pageUrlRaw || '').toLowerCase();
+        return Boolean(domainHint && domainHint.includes(scope.selectedWebsite!.domain.toLowerCase()));
+      });
       if (siteMatched.length > 0) {
         const siteMicros = siteMatched.reduce((s, r) => s + (r.spendMicros ?? 0n), 0n);
         attributedAdCost = Number((Number(siteMicros) / 1_000_000).toFixed(0));

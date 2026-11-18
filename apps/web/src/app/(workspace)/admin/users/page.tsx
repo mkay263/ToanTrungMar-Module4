@@ -33,7 +33,6 @@ import {
 } from '@toantrung/contracts';
 import { apiRequest, ApiClientError, peekApiCache } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
-import { resolveCoverBackgroundStyle } from '@/core/components/UserCoverStyle';
 
 const ROLE_BADGE_META: Record<
   RoleCode,
@@ -531,32 +530,26 @@ export default function AdminUsersPage() {
                           : 'hover:bg-blue-50/25'
                       }`}
                     >
-                      {/* Col 1: Avatar + Cover Background Preview + Full Name */}
+                      {/* Col 1: Circular Avatar + Status Dot + Full Name */}
                       <td className="py-3.5 px-5">
                         <div className="flex items-center gap-3">
                           <div className="relative shrink-0">
-                            <div
-                              style={item.coverUrl ? resolveCoverBackgroundStyle(item.coverUrl) : undefined}
-                              className={`w-14 h-10 rounded-xl p-0.5 flex items-center justify-center relative overflow-hidden shadow-2xs ${
-                                item.coverUrl ? '' : roleMeta.avatarClass
-                              }`}
-                              title={item.coverUrl ? 'Đã tùy chỉnh hình nền hồ sơ' : 'Hình nền mặc định'}
-                            >
-                              {item.avatarUrl ? (
-                                <img
-                                  src={item.avatarUrl}
-                                  alt={item.fullName}
-                                  className="w-8 h-8 rounded-full object-cover ring-2 ring-white shadow-xs"
-                                />
-                              ) : (
-                                <span className="w-8 h-8 rounded-full bg-white/90 text-slate-900 font-extrabold text-[11px] grid place-items-center shadow-xs">
-                                  {getInitials(item.fullName)}
-                                </span>
-                              )}
-                            </div>
+                            {item.avatarUrl ? (
+                              <img
+                                src={item.avatarUrl}
+                                alt={item.fullName}
+                                className="w-10 h-10 rounded-full object-cover ring-2 ring-slate-100 shadow-2xs"
+                              />
+                            ) : (
+                              <div
+                                className={`w-10 h-10 rounded-full font-bold text-xs grid place-items-center shadow-2xs ${roleMeta.avatarClass}`}
+                              >
+                                {getInitials(item.fullName)}
+                              </div>
+                            )}
                             <span
                               title={item.isActive ? 'Đang hoạt động' : 'Đang tạm khóa'}
-                              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-white ${
+                              className={`absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ring-2 ring-white ${
                                 item.isActive ? 'bg-emerald-500' : 'bg-amber-500'
                               }`}
                             />

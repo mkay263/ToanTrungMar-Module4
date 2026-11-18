@@ -544,9 +544,40 @@ export async function testGoogleConnection(): Promise<GoogleTestConnectionResult
         if (!conn.selectedGadsCustomerId) {
           conn.selectedGadsCustomerId = custId;
         }
+        let customerLabel = `Tài khoản Google Ads ${custId}`;
+        try {
+          const infoRes = await fetchGoogleAdsWithFallback(`customers/${custId}/googleAds:search`, {
+            method: 'POST',
+            headers: {
+              ...adsHeaders,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              query:
+                'SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.test_account FROM customer LIMIT 1',
+            }),
+          });
+          if (infoRes.ok) {
+            const infoJson = (await infoRes.json()) as {
+              results?: Array<{
+                customer?: { descriptiveName?: string; currencyCode?: string };
+              }>;
+            };
+            const cInfo = infoJson.results?.[0]?.customer;
+            const dName = (cInfo?.descriptiveName || '').trim();
+            const cCode = (cInfo?.currencyCode || '').trim();
+            if (dName) {
+              customerLabel = `${dName} (${custId}${cCode ? ` · ${cCode}` : ''})`;
+            } else if (cCode) {
+              customerLabel = `Tài khoản Google Ads ${custId} · ${cCode}`;
+            }
+          }
+        } catch {
+          // non-fatal fallback to default customer label
+        }
         accessibleResources.push({
           id: custId,
-          name: `Khách hàng Google Ads ${custId}`,
+          name: customerLabel,
           type: 'GOOGLE_ADS_CUSTOMER',
           permissionLevel: 'Viewer (Read-Only)',
           isAccessible: true,
@@ -585,7 +616,7 @@ export async function testGoogleConnection(): Promise<GoogleTestConnectionResult
     adsAccessibleCustomersCount: adsCustomersCount,
     accessibleResources: conn.accessibleResources || accessibleResources,
     message: isHealthy
-      ? `Kiểm tra kết nối thành công! Đã xác thực quyền xem (Viewer / Read-only) đối với ${ga4PropertiesCount} website GA4 và ${gscSitesCount} website Search Console.`
+      ? `Kiểm tra kết nối thành công! Đã xác thực quyền xem (Viewer / Read-only) đối với ${ga4PropertiesCount} website GA4, ${gscSitesCount} website Search Console${canAccessAds ? ` và ${adsCustomersCount} tài khoản Google Ads (${conn.selectedGadsCustomerId || conn.detectedGadsCustomerId})` : ''}.`
       : `Đã kết nối tài khoản nhưng một số dịch vụ cần kiểm tra quyền truy cập.`,
   };
 }
@@ -1877,19 +1908,31 @@ async function syncRealSearchConsole(
 }
 
 function inferDomainFromCampaignMetadata(campaignName: string, finalUrls?: string[]): string | null {
+  const hostCounts = new Map<string, number>();
   for (const rawUrl of finalUrls || []) {
     try {
       const host = new URL(rawUrl).hostname.replace(/^www\./i, '').toLowerCase();
-      if (host) return host;
+      if (host) {
+        hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
+      }
     } catch {
       // ignore invalid url
     }
+  }
+  if (hostCounts.size > 0) {
+    const sorted = Array.from(hostCounts.entries()).sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0]);
+    });
+    return sorted[0][0];
   }
   const lower = (campaignName || '').toLowerCase();
   if (lower.includes('bangdientu')) return 'bangdientu.com.vn';
   if (lower.includes('bangled')) return 'bangled.vn';
   if (lower.includes('manhinhled')) return 'manhinhled.net.vn';
-  if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt')) return 'toantrung.com.vn';
+  if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt') || lower.endsWith('_tt')) {
+    return 'toantrung.com.vn';
+  }
   return null;
 }
 
@@ -1981,7 +2024,7 @@ async function syncRealGoogleAds(
   // Step A: Sync campaign catalog + ad landing final_urls (captures PAUSED campaigns with 0 daily metrics)
   const finalUrlsByCampaign = new Map<string, string[]>();
   const urlsGaql =
-    `SELECT campaign.id, ad_group_ad.ad.final_urls FROM ad_group_ad WHERE campaign.status != 'REMOVED' LIMIT 200`;
+    `SELECT campaign.id, ad_group_ad.ad.final_urls FROM ad_group_ad WHERE campaign.status != 'REMOVED' AND ad_group_ad.status != 'REMOVED'`;
   const urlsRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
     method: 'POST',
     headers: baseHeaders,
@@ -2105,6 +2148,17 @@ async function syncRealGoogleAds(
     }>;
   };
 
+  // Remove legacy domain-suffixed fingerprints on campaign grain to enforce strict 1-to-1 idempotency per (campaign, date)
+  await prisma.platformDailyMetric.deleteMany({
+    where: {
+      platform: 'google_ads',
+      accountPropertyId: targetCustomerId,
+      grain: 'campaign',
+      metricDate: { gte: startStr, lte: endStr },
+      NOT: { pagePathNorm: '' },
+    },
+  });
+
   for (const row of data.results || []) {
     const extId = String(row.campaign?.id || '').trim();
     const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
@@ -2150,7 +2204,6 @@ async function syncRealGoogleAds(
       grain: 'campaign',
       campaignId: campRecord.id,
       campaignExternalId: extId,
-      pageUrlRaw: resolvedDomain ? `https://${resolvedDomain}` : undefined,
       impressions,
       clicks,
       spendMicros,

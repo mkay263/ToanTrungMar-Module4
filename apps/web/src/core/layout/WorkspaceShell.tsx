@@ -33,7 +33,6 @@ import {
 } from '@toantrung/contracts';
 import { apiRequest } from '../http/client';
 import { useSession } from '../session/SessionContext';
-import { resolveCoverBackgroundStyle } from '../components/UserCoverStyle';
 
 interface NavItem {
   href: string;
@@ -525,18 +524,12 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           <Link
             href="/profile"
             aria-current={pathname === '/profile' ? 'page' : undefined}
-            style={user.coverUrl ? resolveCoverBackgroundStyle(user.coverUrl) : undefined}
-            className={`relative overflow-hidden flex items-center gap-2.5 rounded-xl p-2 border transition-all ${
+            className={`relative overflow-hidden flex items-center gap-2.5 rounded-xl p-2 border transition-all bg-white/[0.05] hover:bg-white/[0.09] ${
               pathname === '/profile'
                 ? 'border-sky-300 ring-1 ring-sky-300/40'
                 : 'border-white/15 hover:border-sky-400/50'
-            } ${
-              user.coverUrl ? '' : 'bg-white/[0.05] hover:bg-white/[0.09]'
             } ${sidebarCollapsed ? 'lg:justify-center' : 'lg:justify-start'}`}
           >
-            {user.coverUrl && (
-              <span aria-hidden="true" className="absolute inset-0 bg-slate-950/45 backdrop-blur-[1px]" />
-            )}
             <div className="relative z-10 shrink-0">
               {user.avatarUrl ? (
                 <img

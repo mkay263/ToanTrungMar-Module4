@@ -29,7 +29,6 @@ import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { getInitials } from '@/core/layout/WorkspaceShell';
-import { resolveCoverBackgroundStyle } from '@/core/components/UserCoverStyle';
 
 function buildDashboardApiPath(scope: {
   preset: string;
@@ -837,24 +836,17 @@ export default function DashboardPage() {
                     className="rounded-xl border border-slate-200/80 p-2.5 flex items-center justify-between gap-3 hover:bg-slate-50/70 transition"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <div
-                        style={sp.coverUrl ? resolveCoverBackgroundStyle(sp.coverUrl) : undefined}
-                        className={`w-9 h-9 rounded-xl p-0.5 grid place-items-center shrink-0 ${
-                          sp.coverUrl ? '' : 'bg-blue-50'
-                        }`}
-                      >
-                        {sp.avatarUrl ? (
-                          <img
-                            src={sp.avatarUrl}
-                            alt={sp.salesFullName}
-                            className="w-7 h-7 rounded-full object-cover ring-1 ring-white"
-                          />
-                        ) : (
-                          <span className="w-7 h-7 rounded-full bg-white text-[#0F275C] font-bold text-[11px] grid place-items-center shadow-2xs">
-                            {getInitials(sp.salesFullName)}
-                          </span>
-                        )}
-                      </div>
+                      {sp.avatarUrl ? (
+                        <img
+                          src={sp.avatarUrl}
+                          alt={sp.salesFullName}
+                          className="w-8 h-8 rounded-full object-cover ring-1 ring-slate-200 shrink-0"
+                        />
+                      ) : (
+                        <span className="w-8 h-8 rounded-full bg-blue-50 text-[#0F275C] font-bold text-[11px] grid place-items-center shrink-0">
+                          {getInitials(sp.salesFullName)}
+                        </span>
+                      )}
                       <div className="min-w-0">
                         <p className="text-xs font-bold text-slate-900 truncate">
                           {sp.salesFullName}
