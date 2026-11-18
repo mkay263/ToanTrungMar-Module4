@@ -1539,7 +1539,7 @@ export function ReportsWorkspace() {
                   <strong>CPL quảng cáo hợp lệ:</strong> Chia chi phí quảng cáo thực tế cho riêng tập Lead quảng cáo hợp lệ (L2, có GCLID / UTM paid / Google Lead Form), không lấy toàn bộ Lead hợp lệ làm mẫu số và không chia đều chi phí chiến dịch đa website.
                 </div>
                 <div>
-                  <strong>Chú giải L1 / L2 / L3:</strong> {METRIC_DICTIONARY.validLead.formula} · {METRIC_DICTIONARY.effectiveLead.formula}
+                  <strong>Chú giải L1 / L2 / L3:</strong> {METRIC_DICTIONARY.validLeadCount?.formula || 'L2: is_spam = false'} · {METRIC_DICTIONARY.effectiveLeadCount?.formula || 'L3: L2 loại trừ Ads & Lead lặp'}
                 </div>
                 <div>
                   <strong>Bảo mật doanh thu (Q08):</strong> Báo cáo Hiệu quả Marketing giữ nguyên chính sách không hiển thị cột doanh thu/giá trị hợp đồng theo phân quyền BA.

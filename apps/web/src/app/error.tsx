@@ -11,6 +11,7 @@ export default function GlobalErrorBoundary({
   reset: () => void;
 }) {
   useEffect(() => {
+    console.error('Unhandled app error in GlobalErrorBoundary:', error);
     const msg = error?.message || '';
     if (
       msg.includes('ChunkLoadError') ||
