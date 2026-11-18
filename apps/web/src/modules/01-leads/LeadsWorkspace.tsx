@@ -2428,9 +2428,10 @@ export function LeadsWorkspace() {
         </button>
       </section>
 
-      {/* Toolbar gọn khít: Bộ lọc ở trên · Xuất/Nhập Excel & Tạo Lead ở chính giữa */}
-      <div className="rounded-[12px] bg-white text-slate-900 px-3.5 py-2.5 shadow-2xs border border-slate-200/90 space-y-2">
-        <div className="flex flex-wrap items-center justify-center gap-1.5">
+      {/* Toolbar 1 hàng trải sát 2 bên: Trái (Website · Thời gian · Chế độ xem) | Giữa (Xuất/Nhập Excel · Tạo Lead) | Phải (Tìm kiếm · Cần kiểm tra · Nhắc việc) */}
+      <div className="rounded-[12px] bg-white text-slate-900 px-2.5 py-2 shadow-2xs border border-slate-200/90 flex flex-wrap xl:flex-nowrap items-center justify-between gap-1.5">
+        {/* Cụm Trái: Bộ lọc phạm vi */}
+        <div className="flex flex-wrap xl:flex-nowrap items-center gap-1.5 shrink-0">
           <select
             aria-label="Lọc theo website nguồn"
             value={sourceWebsiteFilter}
@@ -2438,7 +2439,7 @@ export function LeadsWorkspace() {
               setSourceWebsiteFilter(e.target.value);
               setCurrentPage(1);
             }}
-            className="min-h-9 max-w-[205px] px-2.5 rounded-[10px] border border-slate-200 bg-white text-xs font-semibold text-slate-700 truncate focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+            className="min-h-8 max-w-[146px] 2xl:max-w-[185px] px-2 rounded-[10px] border border-slate-200 bg-white text-xs font-semibold text-slate-700 truncate focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
           >
             <option value="all">Tất cả website</option>
             <option value="toantrung.com.vn">Website Toàn Trung (toantrung.com.vn)</option>
@@ -2468,7 +2469,7 @@ export function LeadsWorkspace() {
           />
 
           {/* Danh sách / Kanban */}
-          <div className="inline-flex rounded-[10px] border border-slate-200 bg-slate-100 p-0.5">
+          <div className="inline-flex rounded-[10px] border border-slate-200 bg-slate-100 p-0.5 shrink-0">
             <button
               type="button"
               aria-pressed={viewMode === 'table' && reminderFilter === 'none'}
@@ -2476,7 +2477,7 @@ export function LeadsWorkspace() {
                 setViewMode('table');
                 setReminderFilter('none');
               }}
-              className={`min-h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+              className={`min-h-7 px-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition ${
                 viewMode === 'table' && reminderFilter === 'none'
                   ? 'bg-white text-[#0F275C] shadow-2xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -2492,7 +2493,7 @@ export function LeadsWorkspace() {
                 setViewMode('kanban');
                 setReminderFilter('none');
               }}
-              className={`min-h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+              className={`min-h-7 px-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition ${
                 viewMode === 'kanban'
                   ? 'bg-white text-[#0F275C] shadow-2xs'
                   : 'text-slate-600 hover:text-slate-900'
@@ -2502,9 +2503,76 @@ export function LeadsWorkspace() {
               <span>Kanban</span>
             </button>
           </div>
+        </div>
 
-          {/* Tìm kiếm tại chỗ */}
-          <div className="flex items-center gap-1.5 min-h-9 px-2.5 rounded-[10px] border border-slate-200 bg-slate-50 focus-within:bg-white focus-within:border-[#1E3A8A]">
+        {/* Cụm Giữa: Xuất/Nhập Excel + Tạo Lead */}
+        <div className="flex items-center justify-center gap-1.5 shrink-0">
+          {user?.roleCode === 'SALES' && (
+            <button
+              type="button"
+              onClick={() => void handleToggleReceivingStatus()}
+              className={`min-h-8 px-2 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                isReceivingLeads
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-slate-100 border-slate-200 text-slate-600'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isReceivingLeads ? 'bg-emerald-500' : 'bg-slate-400'
+                }`}
+              />
+              <span>{isReceivingLeads ? 'Đang nhận' : 'Tạm ngưng'}</span>
+            </button>
+          )}
+
+          {((user && hasBaPermission(user.roleCode, 'EXPORT_DATA')) || canCreate) && (
+            <div className="inline-flex min-h-8 items-center rounded-[10px] border border-slate-200 bg-white overflow-hidden">
+              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && (
+                <a
+                  href={exportHref}
+                  className="min-h-8 px-2.5 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap"
+                >
+                  <Download aria-hidden="true" className="w-3.5 h-3.5 text-slate-500" />
+                  <span>{UI_VOCABULARY.actions.exportExcel}</span>
+                </a>
+              )}
+              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && canCreate && (
+                <span className="h-4 w-px bg-slate-200" aria-hidden="true" />
+              )}
+              {canCreate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportPreviewRows([]);
+                    setImportFileName(null);
+                    setImportPastedText('');
+                    setShowImportModal(true);
+                  }}
+                  className="min-h-8 px-2.5 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap"
+                >
+                  <FolderUp aria-hidden="true" className="w-3.5 h-3.5 text-slate-500" />
+                  <span>{UI_VOCABULARY.actions.importExcel}</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {canCreate && (
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(true)}
+              className="min-h-8 px-2.5 rounded-[10px] bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center gap-1 shadow-2xs transition-colors whitespace-nowrap focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A8A]"
+            >
+              <Plus aria-hidden="true" className="w-3.5 h-3.5" />
+              <span>{UI_VOCABULARY.actions.createLead}</span>
+            </button>
+          )}
+        </div>
+
+        {/* Cụm Phải: Tìm kiếm + Cần kiểm tra + Nhắc việc */}
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div className="flex items-center gap-1.5 min-h-8 px-2 rounded-[10px] border border-slate-200 bg-slate-50 focus-within:bg-white focus-within:border-[#1E3A8A] min-w-0">
             <Search aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 shrink-0" />
             <label htmlFor="leads-toolbar-search" className="sr-only">
               Tìm kiếm Lead
@@ -2515,8 +2583,8 @@ export function LeadsWorkspace() {
               type="search"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Tìm SĐT, tên, mã Lead..."
-              className="w-36 sm:w-44 bg-transparent outline-none text-xs text-slate-800 placeholder:text-slate-400"
+              placeholder="Tìm SĐT, tên, mã..."
+              className="w-28 2xl:w-44 bg-transparent outline-none text-xs text-slate-800 placeholder:text-slate-400"
             />
             {searchQuery && (
               <button
@@ -2535,7 +2603,6 @@ export function LeadsWorkspace() {
             )}
           </div>
 
-          {/* Chip lọc Cần kiểm tra (C06: Cần kiểm tra là filter chip ở toolbar, không phải trạng thái thứ 6) */}
           <button
             type="button"
             aria-pressed={specialAlertFilter !== 'none'}
@@ -2546,7 +2613,7 @@ export function LeadsWorkspace() {
               setSpecialAlertFilter(specialAlertFilter === 'none' ? 'all_alerts' : 'none');
               setCurrentPage(1);
             }}
-            className={`min-h-9 px-3 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+            className={`min-h-8 px-2 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors ${
               specialAlertFilter !== 'none'
                 ? 'bg-amber-100 border-amber-400 text-amber-900'
                 : 'bg-white border-slate-200 text-slate-700 hover:bg-amber-50/50'
@@ -2559,7 +2626,6 @@ export function LeadsWorkspace() {
             </span>
           </button>
 
-          {/* Chip Nhắc việc */}
           <button
             type="button"
             aria-pressed={reminderFilter !== 'none'}
@@ -2570,7 +2636,7 @@ export function LeadsWorkspace() {
               setReminderFilter((prev) => (prev === 'none' ? 'all_reminders' : 'none'));
               setCurrentPage(1);
             }}
-            className={`min-h-9 px-3 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+            className={`min-h-8 px-2 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap shrink-0 transition-colors ${
               reminderFilter !== 'none'
                 ? 'bg-rose-50 border-rose-300 text-rose-800'
                 : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
@@ -2587,75 +2653,10 @@ export function LeadsWorkspace() {
             <button
               type="button"
               onClick={() => setMissingProductOnly(false)}
-              className="min-h-9 px-2.5 rounded-[10px] bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1"
+              className="min-h-8 px-2 rounded-[10px] bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1 whitespace-nowrap"
             >
-              <span>Chưa phân loại sản phẩm</span>
+              <span>Chưa gắn SP</span>
               <span>×</span>
-            </button>
-          )}
-        </div>
-
-        {/* Cụm hành động đưa ra chính giữa: Xuất/Nhập Excel + Tạo Lead */}
-        <div className="w-full pt-2 border-t border-slate-100 flex flex-wrap items-center justify-center gap-2.5">
-          {user?.roleCode === 'SALES' && (
-            <button
-              type="button"
-              onClick={() => void handleToggleReceivingStatus()}
-              className={`min-h-9 px-3 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
-                isReceivingLeads
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                  : 'bg-slate-100 border-slate-200 text-slate-600'
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  isReceivingLeads ? 'bg-emerald-500' : 'bg-slate-400'
-                }`}
-              />
-              <span>{isReceivingLeads ? 'Đang nhận Lead' : 'Tạm ngưng nhận'}</span>
-            </button>
-          )}
-
-          {((user && hasBaPermission(user.roleCode, 'EXPORT_DATA')) || canCreate) && (
-            <div className="inline-flex min-h-9 items-center rounded-[10px] border border-slate-200 bg-white overflow-hidden">
-              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && (
-                <a
-                  href={exportHref}
-                  className="min-h-9 px-3 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <Download aria-hidden="true" className="w-3.5 h-3.5 text-slate-500" />
-                  <span>{UI_VOCABULARY.actions.exportExcel}</span>
-                </a>
-              )}
-              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && canCreate && (
-                <span className="h-5 w-px bg-slate-200" aria-hidden="true" />
-              )}
-              {canCreate && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setImportPreviewRows([]);
-                    setImportFileName(null);
-                    setImportPastedText('');
-                    setShowImportModal(true);
-                  }}
-                  className="min-h-9 px-3 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <FolderUp aria-hidden="true" className="w-3.5 h-3.5 text-slate-500" />
-                  <span>{UI_VOCABULARY.actions.importExcel}</span>
-                </button>
-              )}
-            </div>
-          )}
-
-          {canCreate && (
-            <button
-              type="button"
-              onClick={() => setShowCreateModal(true)}
-              className="min-h-9 px-3.5 rounded-[10px] bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A8A]"
-            >
-              <Plus aria-hidden="true" className="w-4 h-4" />
-              <span>{UI_VOCABULARY.actions.createLead}</span>
             </button>
           )}
         </div>
@@ -3149,13 +3150,13 @@ export function LeadsWorkspace() {
               <table className="w-full min-w-[980px] xl:min-w-0 xl:table-fixed text-left border-collapse text-sm">
                 <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 text-xs font-semibold sticky top-0 z-10">
                   <tr>
-                    <th scope="col" className="py-2.5 px-3 w-[27%]">Khách hàng / dự án</th>
-                    <th scope="col" className="py-2.5 px-2.5 w-[18%]">Liên hệ &amp; nguồn</th>
-                    <th scope="col" className="py-2.5 px-2.5 w-[14%]">Sản phẩm</th>
-                    <th scope="col" className="py-2.5 px-2.5 w-[19%]">Trạng thái / lịch theo dõi</th>
-                    <th scope="col" className="py-2.5 px-2.5 w-[15%]">Sales phụ trách</th>
-                    <th scope="col" className="py-2.5 px-2 w-[104px]">Ngày nhận</th>
-                    <th scope="col" className="py-2.5 px-3 text-right w-[206px]">Thao tác</th>
+                    <th scope="col" className="py-2.5 px-3 w-[22%]">Khách hàng / dự án</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[15%]">Liên hệ &amp; nguồn</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[13%]">Sản phẩm</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[16%]">Trạng thái / lịch theo dõi</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[13%]">Sales phụ trách</th>
+                    <th scope="col" className="py-2.5 px-2 w-[92px]">Ngày nhận</th>
+                    <th scope="col" className="py-2.5 px-3 text-right w-[218px]">Thao tác</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">

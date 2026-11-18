@@ -305,10 +305,10 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       <div className="min-h-screen bg-slate-50 flex w-full">
         <div className="hidden lg:block w-[232px] bg-[#0B1426] shrink-0" />
         <div className="flex-1 flex flex-col">
-          <div className="h-[60px] bg-white border-b border-slate-200 px-6 flex items-center">
+          <div className="h-[58px] bg-white border-b border-slate-200 px-3 flex items-center">
             <div className="h-4 w-32 rounded bg-slate-200 animate-pulse" />
           </div>
-          <div className="p-6 space-y-4">
+          <div className="p-3 space-y-3">
             <div className="h-20 rounded-[12px] bg-white border border-slate-200 animate-pulse" />
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               {[1, 2, 3, 4].map((i) => (
@@ -538,7 +538,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       {/* Vùng nội dung chính bên phải (một vùng cuộn dọc chính duy nhất — C03) */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
         {/* Topbar 58px hiện đại: Điều hướng nhanh · Tìm kiếm thông minh · Thông báo · Hồ sơ */}
-        <header className="sticky top-0 z-30 h-[58px] shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 lg:px-5 flex items-center justify-between gap-3 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+        <header className="sticky top-0 z-30 h-[56px] shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-2.5 sm:px-3 lg:px-3 flex items-center justify-between gap-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
           <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
@@ -837,14 +837,14 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        {/* Padding desktop 24px (lg:p-6), tablet 16px (sm:p-4), mobile 12px (p-3) */}
+        {/* Khoảng trắng 2 bên tối thiểu (px-2 sm:px-2.5 lg:px-3) để tối đa diện tích bảng & biểu đồ */}
         <main
           id="main-workspace-content"
           tabIndex={-1}
           className={
             isFullBleed
-              ? 'flex-1 w-full h-[calc(100vh-60px)] overflow-y-auto flex flex-col p-0 pb-16 md:pb-0 bg-[#F8FAFC] focus:outline-none'
-              : 'flex-1 w-full p-3 sm:p-4 lg:px-5 lg:py-4 pb-20 md:pb-5 overflow-y-auto bg-[#F8FAFC] focus:outline-none'
+              ? 'flex-1 w-full h-[calc(100vh-56px)] overflow-y-auto flex flex-col p-0 pb-16 md:pb-0 bg-[#F8FAFC] focus:outline-none'
+              : 'flex-1 w-full px-2 sm:px-2.5 lg:px-3 py-3 pb-20 md:pb-4 overflow-y-auto bg-[#F8FAFC] focus:outline-none'
           }
         >
           {children}
