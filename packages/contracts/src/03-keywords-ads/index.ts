@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const TARGET_WEBSITES = [
   'toantrung.com.vn',
   'bangled.vn',
+  'manhinhled.net.vn',
 ] as const;
 
 export type TargetWebsite = (typeof TARGET_WEBSITES)[number];

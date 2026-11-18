@@ -60,9 +60,22 @@ export interface Ga4PropertyPeriodSnapshot {
 
 const MEM_CACHE = new Map<string, { expiresAt: number; data: Ga4PropertyPeriodSnapshot }>();
 const IN_FLIGHT = new Map<string, Promise<Ga4PropertyPeriodSnapshot | null>>();
+const BACKOFF_UNTIL = new Map<string, { untilMs: number; failures: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const DB_CACHE_KEY = 'ga4_live_snapshot_cache_v2';
+const DB_REALTIME_CACHE_KEY = 'ga4_realtime_snapshot_cache_v1';
 const GSC_INSPECT_CACHE_KEY = 'gsc_url_inspection_cache_v1';
+
+export interface Ga4RealtimePropSnapshot {
+  propertyId: string;
+  fetchedAt: string;
+  activeUsers30m: number | null;
+  minutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
+}
+
+const REALTIME_MEM = new Map<string, { expiresAt: number; data: Ga4RealtimePropSnapshot }>();
+const REALTIME_IN_FLIGHT = new Map<string, Promise<Ga4RealtimePropSnapshot | null>>();
+const REALTIME_TTL_MS = 90 * 1000;
 
 let dbCacheHydrated = false;
 let warmerStarted = false;
@@ -80,18 +93,39 @@ async function hydrateFromDbIfNeeded(): Promise<void> {
   if (dbCacheHydrated) return;
   dbCacheHydrated = true;
   try {
-    const row = await prisma.systemSetting.findUnique({ where: { key: DB_CACHE_KEY } });
-    if (!row?.value) return;
-    const parsed = JSON.parse(row.value) as Record<string, Ga4PropertyPeriodSnapshot>;
+    const [row, rtRow] = await Promise.all([
+      prisma.systemSetting.findUnique({ where: { key: DB_CACHE_KEY } }),
+      prisma.systemSetting.findUnique({ where: { key: DB_REALTIME_CACHE_KEY } }),
+    ]);
     const now = Date.now();
-    for (const [k, snap] of Object.entries(parsed)) {
-      if (snap && snap.fetchedAt) {
-        const age = now - new Date(snap.fetchedAt).getTime();
-        if (age < 30 * 60 * 1000) {
-          MEM_CACHE.set(k, {
-            expiresAt: Math.max(now + 60_000, new Date(snap.fetchedAt).getTime() + CACHE_TTL_MS),
-            data: snap,
-          });
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as Record<string, Ga4PropertyPeriodSnapshot>;
+      for (const [k, snap] of Object.entries(parsed)) {
+        if (snap && snap.fetchedAt) {
+          const fetchedMs = new Date(snap.fetchedAt).getTime();
+          const age = now - fetchedMs;
+          // Giữ snapshot tối đa 24h khi server khởi động lại để không bao giờ chặn UI; nếu >5 phút thì đánh dấu hết hạn mềm để làm mới ngầm
+          if (age < 24 * 60 * 60 * 1000) {
+            MEM_CACHE.set(k, {
+              expiresAt: age < CACHE_TTL_MS ? fetchedMs + CACHE_TTL_MS : now - 1,
+              data: snap,
+            });
+          }
+        }
+      }
+    }
+    if (rtRow?.value) {
+      const parsedRt = JSON.parse(rtRow.value) as Record<string, Ga4RealtimePropSnapshot>;
+      for (const [propId, snap] of Object.entries(parsedRt)) {
+        if (snap && snap.fetchedAt) {
+          const fetchedMs = new Date(snap.fetchedAt).getTime();
+          const age = now - fetchedMs;
+          if (age < 30 * 60 * 1000) {
+            REALTIME_MEM.set(propId, {
+              expiresAt: age < REALTIME_TTL_MS ? fetchedMs + REALTIME_TTL_MS : now - 1,
+              data: snap,
+            });
+          }
         }
       }
     }
@@ -110,6 +144,22 @@ async function persistMemCacheToDb(): Promise<void> {
       where: { key: DB_CACHE_KEY },
       update: { value: JSON.stringify(out) },
       create: { key: DB_CACHE_KEY, value: JSON.stringify(out) },
+    });
+  } catch {
+    // ignore
+  }
+}
+
+async function persistRealtimeCacheToDb(): Promise<void> {
+  try {
+    const out: Record<string, Ga4RealtimePropSnapshot> = {};
+    for (const [k, entry] of REALTIME_MEM.entries()) {
+      out[k] = entry.data;
+    }
+    await prisma.systemSetting.upsert({
+      where: { key: DB_REALTIME_CACHE_KEY },
+      update: { value: JSON.stringify(out) },
+      create: { key: DB_REALTIME_CACHE_KEY, value: JSON.stringify(out) },
     });
   } catch {
     // ignore
@@ -360,35 +410,35 @@ async function fetchPropertyPeriodFromGa4(
   }
 }
 
-export async function getGa4LivePropertySnapshot(
+function triggerPropertyRefreshSingleflight(
   propertyId: string,
   startDate: string,
   endDate: string,
-  forceRefresh = false,
 ): Promise<Ga4PropertyPeriodSnapshot | null> {
-  await hydrateFromDbIfNeeded();
   const key = `${propertyId}:${startDate}:${endDate}`;
-  const now = Date.now();
-  const cached = MEM_CACHE.get(key);
-  if (!forceRefresh && cached && cached.expiresAt > now) {
-    return cached.data;
-  }
-
   const existingFlight = IN_FLIGHT.get(key);
-  if (existingFlight) {
-    return existingFlight;
+  if (existingFlight) return existingFlight;
+
+  const backoff = BACKOFF_UNTIL.get(key);
+  if (backoff && backoff.untilMs > Date.now()) {
+    return Promise.resolve(MEM_CACHE.get(key)?.data || null);
   }
 
   const promise = (async () => {
     try {
       const token = await getValidAccessToken();
-      if (!token) return cached?.data || null;
+      if (!token) return MEM_CACHE.get(key)?.data || null;
       const fresh = await fetchPropertyPeriodFromGa4(propertyId, startDate, endDate, token);
       if (fresh) {
+        BACKOFF_UNTIL.delete(key);
         MEM_CACHE.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, data: fresh });
+        void persistMemCacheToDb();
         return fresh;
       }
-      return cached?.data || null;
+      const prevFails = (BACKOFF_UNTIL.get(key)?.failures || 0) + 1;
+      const delayMs = Math.min(5 * 60 * 1000, 30_000 * Math.pow(2, prevFails - 1));
+      BACKOFF_UNTIL.set(key, { untilMs: Date.now() + delayMs, failures: prevFails });
+      return MEM_CACHE.get(key)?.data || null;
     } finally {
       IN_FLIGHT.delete(key);
     }
@@ -398,16 +448,188 @@ export async function getGa4LivePropertySnapshot(
   return promise;
 }
 
+export async function getGa4LivePropertySnapshot(
+  propertyId: string,
+  startDate: string,
+  endDate: string,
+  forceBlocking = false,
+): Promise<Ga4PropertyPeriodSnapshot | null> {
+  ensureM02M04BackgroundWarmerStarted();
+  await hydrateFromDbIfNeeded();
+  const key = `${propertyId}:${startDate}:${endDate}`;
+  const now = Date.now();
+  const cached = MEM_CACHE.get(key);
+  if (!forceBlocking && cached && cached.expiresAt > now) {
+    return cached.data;
+  }
+
+  // C02 & C10: Đường đọc UI tuyệt đối không chờ kết nối Google mạng ngoài; trả dữ liệu nội bộ ngay và làm mới ngầm singleflight
+  if (!forceBlocking) {
+    void triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
+    return cached?.data || null;
+  }
+
+  return triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
+}
+
 export async function getGa4LiveSnapshotsForProperties(
   propertyIds: string[],
   startDate: string,
   endDate: string,
+  forceBlocking = false,
 ): Promise<Ga4PropertyPeriodSnapshot[]> {
   if (propertyIds.length === 0) return [];
   const results = await Promise.all(
-    propertyIds.map((pid) => getGa4LivePropertySnapshot(pid, startDate, endDate)),
+    propertyIds.map((pid) => getGa4LivePropertySnapshot(pid, startDate, endDate, forceBlocking)),
   );
   return results.filter((r): r is Ga4PropertyPeriodSnapshot => r !== null);
+}
+
+async function fetchRealtimePropFromGa4(
+  propId: string,
+  token: string,
+): Promise<Ga4RealtimePropSnapshot | null> {
+  try {
+    const [respTotal, respMin] = await Promise.all([
+      fetch(
+        `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ metrics: [{ name: 'activeUsers' }] }),
+        },
+      ),
+      fetch(
+        `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            dimensions: [{ name: 'minutesAgo' }],
+            metrics: [{ name: 'activeUsers' }],
+          }),
+        },
+      ),
+    ]);
+
+    let activeUsers30m: number | null = null;
+    const minutesSeries: Array<{ minutesAgo: number; activeUsers: number }> = [];
+
+    if (respTotal.ok) {
+      const j = (await respTotal.json()) as {
+        rows?: Array<{ metricValues?: Array<{ value?: string }> }>;
+      };
+      const val = Number(j.rows?.[0]?.metricValues?.[0]?.value || 0);
+      if (Number.isFinite(val)) activeUsers30m = val;
+    }
+
+    if (respMin.ok) {
+      const jm = (await respMin.json()) as {
+        rows?: Array<{
+          dimensionValues?: Array<{ value?: string }>;
+          metricValues?: Array<{ value?: string }>;
+        }>;
+      };
+      for (const r of jm.rows || []) {
+        const minAgo = Number(r.dimensionValues?.[0]?.value);
+        const cnt = Number(r.metricValues?.[0]?.value || 0);
+        if (Number.isFinite(minAgo) && minAgo >= 0 && minAgo <= 29) {
+          minutesSeries.push({ minutesAgo: minAgo, activeUsers: cnt });
+        }
+      }
+    }
+
+    if (activeUsers30m === null && minutesSeries.length === 0) {
+      return null;
+    }
+
+    return {
+      propertyId: propId,
+      fetchedAt: new Date().toISOString(),
+      activeUsers30m: activeUsers30m ?? 0,
+      minutesSeries,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function triggerRealtimePropRefreshSingleflight(propId: string): Promise<Ga4RealtimePropSnapshot | null> {
+  const existing = REALTIME_IN_FLIGHT.get(propId);
+  if (existing) return existing;
+
+  const p = (async () => {
+    try {
+      const token = await getValidAccessToken();
+      if (!token) return REALTIME_MEM.get(propId)?.data || null;
+      const snap = await fetchRealtimePropFromGa4(propId, token);
+      if (snap) {
+        REALTIME_MEM.set(propId, { expiresAt: Date.now() + REALTIME_TTL_MS, data: snap });
+        void persistRealtimeCacheToDb();
+        return snap;
+      }
+      return REALTIME_MEM.get(propId)?.data || null;
+    } finally {
+      REALTIME_IN_FLIGHT.delete(propId);
+    }
+  })();
+
+  REALTIME_IN_FLIGHT.set(propId, p);
+  return p;
+}
+
+export async function getGa4RealtimeSnapshotNonBlocking(propertyIds: string[]): Promise<{
+  activeUsers30m: number | null;
+  minutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
+  checkedAt: string | null;
+}> {
+  if (propertyIds.length === 0) {
+    return { activeUsers30m: null, minutesSeries: [], checkedAt: null };
+  }
+  ensureM02M04BackgroundWarmerStarted();
+  await hydrateFromDbIfNeeded();
+
+  const now = Date.now();
+  let total30m = 0;
+  let anyHit = false;
+  let latestCheckedAt: string | null = null;
+  const minuteMap = new Map<number, number>();
+
+  for (const propId of propertyIds.slice(0, 6)) {
+    const entry = REALTIME_MEM.get(propId);
+    if (!entry || entry.expiresAt <= now) {
+      void triggerRealtimePropRefreshSingleflight(propId);
+    }
+    if (entry?.data) {
+      if (entry.data.activeUsers30m !== null) {
+        total30m += entry.data.activeUsers30m;
+        anyHit = true;
+      }
+      if (!latestCheckedAt || entry.data.fetchedAt > latestCheckedAt) {
+        latestCheckedAt = entry.data.fetchedAt;
+      }
+      for (const m of entry.data.minutesSeries) {
+        minuteMap.set(m.minutesAgo, (minuteMap.get(m.minutesAgo) || 0) + m.activeUsers);
+      }
+    }
+  }
+
+  return {
+    activeUsers30m: anyHit ? total30m : null,
+    minutesSeries: anyHit
+      ? Array.from({ length: 30 }, (_, idx) => {
+          const minutesAgo = 29 - idx;
+          return { minutesAgo, activeUsers: minuteMap.get(minutesAgo) || 0 };
+        })
+      : [],
+    checkedAt: latestCheckedAt,
+  };
 }
 
 // ============================================================================
@@ -593,9 +815,21 @@ export async function warmAllDashboardDataInBackground(): Promise<void> {
         }
       }
     }
+    for (const pid of propIds) {
+      const rtCached = REALTIME_MEM.get(pid);
+      if (!rtCached || rtCached.expiresAt <= Date.now()) {
+        tasks.push(
+          fetchRealtimePropFromGa4(pid, token).then((rtSnap) => {
+            if (rtSnap) {
+              REALTIME_MEM.set(pid, { expiresAt: Date.now() + REALTIME_TTL_MS, data: rtSnap });
+            }
+          }),
+        );
+      }
+    }
     await Promise.all(tasks);
 
-    await persistMemCacheToDb();
+    await Promise.all([persistMemCacheToDb(), persistRealtimeCacheToDb()]);
     await warmGscInspectionInBackground(baseScope.availableWebsites, token);
   } catch {
     // non-fatal background warm

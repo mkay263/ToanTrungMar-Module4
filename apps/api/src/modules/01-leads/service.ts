@@ -8,7 +8,11 @@ import {
 import {
   containsMonetaryAmountText,
   hasBaPermission,
+  hasPlaceholderMacro,
   inferAreaTypeFromProvince,
+  normalizeMarketingChannelDisplay,
+  sanitizeProjectOrSubjectText,
+  sanitizeWebsiteSourceDisplay,
   type ContactChannel,
   type CreateManualLeadDto,
   type CreatePrivateQuoteVersionDto,
@@ -573,19 +577,35 @@ export async function listLeadsForUser(
       createdAt: act.createdAt.toISOString(),
     }));
 
+    const rawCleanedProject = r.projectName
+      ? r.projectName.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '')
+      : null;
+    const hasPlaceholderSubj = hasPlaceholderMacro(rawCleanedProject);
+    const sanitizedProject = sanitizeProjectOrSubjectText(rawCleanedProject);
+    const parsedWebsite = sanitizeWebsiteSourceDisplay(r.sourceWebsite);
+    const parsedSelfReported = sanitizeWebsiteSourceDisplay(r.selfReportedSource);
+
     return {
       id: r.id,
       leadCode: r.leadCode,
       version: r.version,
       contactName: isAnonymized ? 'Khách hàng ẩn danh (UC01)' : r.contactName,
       companyName: r.companyName ? r.companyName.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '') : null,
-      projectName: r.projectName ? r.projectName.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '') : null,
+      projectName: sanitizedProject,
+      rawProjectName: isAnonymized ? null : rawCleanedProject,
+      hasMissingSubjectContent: hasPlaceholderSubj,
+      technicalSourceMethod:
+        parsedSelfReported.technicalMethod ||
+        parsedWebsite.technicalMethod ||
+        r.tracking?.sourceResolutionMethod ||
+        null,
+      needsManagerAttention: r.needsManagerAttention || hasPlaceholderSubj,
       phone: isAnonymized ? maskPhone(r.phone) : r.phone,
       email: isAnonymized ? maskEmail(r.email) : r.email,
       isPhoneNormalized: !r.isPhoneUnstandardized,
       contactChannel: (r.contactChannel as ContactChannel) || 'hotline',
-      sourceWebsite: r.sourceWebsite || null,
-      selfReportedSource: r.selfReportedSource,
+      sourceWebsite: parsedWebsite.cleanLabel || null,
+      selfReportedSource: parsedSelfReported.cleanLabel,
       areaType: r.areaType === 'tphcm' ? 'hcm' : r.areaType === 'other_province' ? 'other_province' : null,
       hcmDistrict: r.district,
       province: r.province,
@@ -638,7 +658,13 @@ export async function listLeadsForUser(
       })),
       tracking: r.tracking
         ? {
-          marketingSource: r.tracking.marketingSource || 'Chưa xác định',
+          marketingSource: normalizeMarketingChannelDisplay({
+            marketingSource: r.tracking.marketingSource,
+            utmSource: r.tracking.utmSource,
+            utmMedium: r.tracking.utmMedium,
+            gclid: r.tracking.gclid,
+            contactChannel: r.contactChannel,
+          }),
           attributionMethod: r.tracking.sourceResolutionMethod,
           intakeProvider: r.tracking.intakeSourceProvider || null,
           intakeAccountKey: r.tracking.intakeSourceAccountKey || null,

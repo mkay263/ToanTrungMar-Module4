@@ -3,7 +3,6 @@ import { hasBaPermission } from '@toantrung/contracts';
 import { jsonError } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import { readPrivateBusinessFile } from '../../../../../../core/storage/private-files.service';
-import { renderSyntheticLedPngBuffer } from '../../../../../../modules/05-ai-design/providers';
 import {
   assertCanAccessDesignProject,
   ForbiddenDesignProjectAccessError,
@@ -24,7 +23,7 @@ export async function GET(
   if (!canDownload) {
     return jsonError(
       'FORBIDDEN_PERMISSION',
-      'Tài khoản không có quyền tải xuống tài sản thiết kế độ phân giải cao (AI_DESIGN hoặc ATTACHMENT_UPLOAD_VIEW).',
+      'Tài khoản không có quyền tải xuống tài sản thiết kế độ phân giải cao.',
       403
     );
   }
@@ -53,21 +52,12 @@ export async function GET(
   }
 
   const fileData = readPrivateBusinessFile(versionRow.storageObjectKey);
-  if (!fileData || fileData.buffer.length <= 200) {
-    const mode = versionRow.designRequest?.requestType === 'banner' ? 'banner' : 'perspective_3d';
-    const syntheticBuffer = renderSyntheticLedPngBuffer({
-      mode,
-      prompt: versionRow.promptUsed || `Phiên bản thiết kế v${versionRow.versionNumber}`,
-      seedKey: `ver-${versionRow.id}-v${versionRow.versionNumber}`,
-    });
-    return new Response(new Uint8Array(syntheticBuffer), {
-      status: 200,
-      headers: {
-        'Content-Type': 'image/png',
-        'Content-Disposition': `inline; filename="design-req-${versionRow.designRequestId}-v${versionRow.versionNumber}.png"`,
-        'Cache-Control': 'private, no-store',
-      },
-    });
+  if (!fileData || fileData.buffer.length === 0) {
+    return jsonError(
+      'ASSET_FILE_MISSING',
+      'Tệp đầu ra của phiên bản này chưa tồn tại trên kho lưu trữ bảo mật.',
+      404
+    );
   }
 
   return new Response(new Uint8Array(fileData.buffer), {
@@ -79,4 +69,3 @@ export async function GET(
     },
   });
 }
-

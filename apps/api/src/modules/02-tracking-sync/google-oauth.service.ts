@@ -45,8 +45,22 @@ interface StoredClientConfig {
   clientSecret: string;
 }
 
+export interface StoredGoogleAdsApiConfig {
+  developerToken: string;
+  customerId: string | null;
+  loginCustomerId: string | null;
+}
+
+export interface GoogleAdsApiConfigDto {
+  hasDeveloperToken: boolean;
+  developerTokenMasked: string | null;
+  customerId: string | null;
+  loginCustomerId: string | null;
+}
+
 const SETTING_KEY_CONNECTION = 'google_oauth_connection';
 const SETTING_KEY_CLIENT_CONFIG = 'google_oauth_client_config';
+const SETTING_KEY_ADS_CONFIG = 'google_ads_api_config_v1';
 
 function getRealtimeConfigPath(): string {
   const dir = path.join(process.cwd(), 'config');
@@ -192,6 +206,99 @@ export async function getGoogleClientConfigDto(): Promise<GoogleOAuthClientConfi
     hasClientId: true,
     clientIdMasked: maskSecret(cfg.clientId),
     hasClientSecret: Boolean(cfg.clientSecret),
+  };
+}
+
+function normalizeDigitsId(raw?: string | null): string | null {
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '').trim();
+  return digits.length > 0 ? digits : null;
+}
+
+export async function getGoogleAdsApiConfig(): Promise<StoredGoogleAdsApiConfig | null> {
+  // 1. Check encrypted DB setting first (so UI-saved config takes effect immediately without restart)
+  try {
+    const row = await prisma.systemSetting.findUnique({
+      where: { key: SETTING_KEY_ADS_CONFIG },
+    });
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as {
+        developerToken?: string;
+        customerId?: string | null;
+        loginCustomerId?: string | null;
+      };
+      const plainToken = parsed.developerToken ? decryptSecret(parsed.developerToken).trim() : '';
+      if (plainToken) {
+        return {
+          developerToken: plainToken,
+          customerId: normalizeDigitsId(parsed.customerId) || normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID),
+          loginCustomerId:
+            normalizeDigitsId(parsed.loginCustomerId) || normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2. Fallback to environment variables
+  const envToken = (process.env.GOOGLE_ADS_DEVELOPER_TOKEN || '').trim().replace(/^["']+|["']+$/g, '');
+  if (envToken) {
+    return {
+      developerToken: envToken,
+      customerId: normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID),
+      loginCustomerId: normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+    };
+  }
+
+  return null;
+}
+
+export async function saveGoogleAdsApiConfig(input: {
+  developerToken: string;
+  customerId?: string | null;
+  loginCustomerId?: string | null;
+}): Promise<void> {
+  const cleanToken = input.developerToken.trim();
+  const cleanCust = normalizeDigitsId(input.customerId);
+  const cleanMcc = normalizeDigitsId(input.loginCustomerId);
+
+  const payload = JSON.stringify({
+    developerToken: encryptSecret(cleanToken),
+    customerId: cleanCust,
+    loginCustomerId: cleanMcc,
+  });
+
+  await prisma.systemSetting.upsert({
+    where: { key: SETTING_KEY_ADS_CONFIG },
+    update: { value: payload },
+    create: { key: SETTING_KEY_ADS_CONFIG, value: payload },
+  });
+
+  if (cleanCust) {
+    const conn = await getGoogleConnection();
+    if (conn) {
+      conn.selectedGadsCustomerId = cleanCust;
+      await saveGoogleConnection(conn);
+    }
+  }
+}
+
+export async function getGoogleAdsApiConfigDto(): Promise<GoogleAdsApiConfigDto> {
+  const cfg = await getGoogleAdsApiConfig();
+  if (!cfg || !cfg.developerToken) {
+    return {
+      hasDeveloperToken: false,
+      developerTokenMasked: null,
+      customerId: normalizeDigitsId(process.env.GOOGLE_ADS_CUSTOMER_ID),
+      loginCustomerId: normalizeDigitsId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID),
+    };
+  }
+  return {
+    hasDeveloperToken: true,
+    developerTokenMasked: maskSecret(cfg.developerToken),
+    customerId: cfg.customerId,
+    loginCustomerId: cfg.loginCustomerId,
   };
 }
 
@@ -393,28 +500,43 @@ export async function testGoogleConnection(): Promise<GoogleTestConnectionResult
     // non-fatal
   }
 
-  // 3. Probe Google Ads Accessible Customers
+  // 3. Probe Google Ads Accessible Customers (requires developer-token header)
   try {
-    const resAds = await fetch('https://googleads.googleapis.com/v17/customers:listAccessibleCustomers', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (resAds.ok) {
-      canAccessAds = true;
-      const adsData = (await resAds.json()) as { resourceNames?: string[] };
-      for (const resName of adsData.resourceNames || []) {
-        const custId = resName.replace('customers/', '');
-        adsCustomersCount++;
-        accessibleResources.push({
-          id: custId,
-          name: `Khách hàng Google Ads ${custId}`,
-          type: 'GOOGLE_ADS_CUSTOMER',
-          permissionLevel: 'Viewer (Read-Only)',
-          isAccessible: true,
+    const adsCfg = await getGoogleAdsApiConfig();
+    if (adsCfg?.developerToken) {
+      const adsHeaders: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        'developer-token': adsCfg.developerToken,
+      };
+      if (adsCfg.loginCustomerId) {
+        adsHeaders['login-customer-id'] = adsCfg.loginCustomerId;
+      }
+      let resAds = await fetch('https://googleads.googleapis.com/v19/customers:listAccessibleCustomers', {
+        headers: adsHeaders,
+      });
+      if (resAds.status === 404) {
+        resAds = await fetch('https://googleads.googleapis.com/v18/customers:listAccessibleCustomers', {
+          headers: adsHeaders,
         });
       }
-    } else {
-      // User is Viewer / Read-Only without active developer token
-      canAccessAds = false;
+      if (resAds.ok) {
+        canAccessAds = true;
+        const adsData = (await resAds.json()) as { resourceNames?: string[] };
+        for (const resName of adsData.resourceNames || []) {
+          const custId = resName.replace('customers/', '');
+          adsCustomersCount++;
+          if (!conn.detectedGadsCustomerId) {
+            conn.detectedGadsCustomerId = custId;
+          }
+          accessibleResources.push({
+            id: custId,
+            name: `Khách hàng Google Ads ${custId}`,
+            type: 'GOOGLE_ADS_CUSTOMER',
+            permissionLevel: 'Viewer (Read-Only)',
+            isAccessible: true,
+          });
+        }
+      }
     }
   } catch {
     // non-fatal
@@ -775,6 +897,7 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
   let syncedRecords = 0;
   let realGa4Count = 0;
   let realScCount = 0;
+  let realAdsCount = 0;
 
   let ga4Outcome: { success: boolean; synced: number; isPartial?: boolean; isEmpty?: boolean; error?: string } = {
     success: false,
@@ -786,6 +909,7 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
     synced: 0,
     error: 'Chưa cấu hình hoặc thiếu token',
   };
+  let adsOutcome: { success: boolean; synced: number; error?: string } | null = null;
 
   // Attempt verified Google APIs sync if live token is available
   if (token && !conn?.isSandboxDemo && token !== 'DEMO_SANDBOX_TOKEN') {
@@ -813,6 +937,43 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
         error: err instanceof Error ? err.message : 'Lỗi đồng bộ Search Console',
       };
       console.warn('Real Search Console sync error:', err);
+    }
+
+    const adsCfg = await getGoogleAdsApiConfig();
+    if (adsCfg?.developerToken) {
+      try {
+        adsOutcome = await syncRealGoogleAds(token, conn, adsCfg, Math.max(windowDays, 30));
+        realAdsCount = adsOutcome.synced;
+        syncedRecords += realAdsCount;
+      } catch (err) {
+        adsOutcome = {
+          success: false,
+          synced: 0,
+          error: err instanceof Error ? err.message : 'Lỗi đồng bộ Google Ads API',
+        };
+      }
+
+      const lastAdsLog = await prisma.platformSyncLog.findFirst({
+        where: { platform: 'google_ads' },
+        orderBy: { startedAt: 'desc' },
+      });
+      const adsConsecutive = adsOutcome.success ? 0 : ((lastAdsLog?.consecutiveFailures ?? 0) + 1);
+      await prisma.platformSyncLog.create({
+        data: {
+          platform: 'google_ads',
+          accountPropertyId:
+            adsCfg.customerId || conn?.selectedGadsCustomerId || conn?.detectedGadsCustomerId || 'GADS_ACCOUNT',
+          runType: slot === 'FULL_0200' ? 'full' : 'light',
+          windowStartDate: startStr,
+          windowEndDate: todayStr,
+          recordsSynced: realAdsCount,
+          status: adsOutcome.success ? 'success' : 'failed',
+          errorMessage: adsOutcome.success ? null : (adsOutcome.error?.slice(0, 500) || 'Lỗi Google Ads API'),
+          consecutiveFailures: adsConsecutive,
+          startedAt: new Date(),
+          completedAt: new Date(),
+        },
+      });
     }
 
     // Accumulate consecutive failures correctly from previous logs
@@ -1697,4 +1858,158 @@ async function syncRealSearchConsole(
   }
 
   return { success: true, synced, isEmpty: synced === 0 };
+}
+
+async function syncRealGoogleAds(
+  token: string,
+  conn: StoredGoogleConnection | null,
+  adsCfg: StoredGoogleAdsApiConfig,
+  windowDays = 30,
+): Promise<{ success: boolean; synced: number; error?: string }> {
+  const dateRange = getCanonicalDateRange(windowDays);
+  const startStr = dateRange.startDateStr;
+  const endStr = dateRange.endDateStr;
+
+  const baseHeaders: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    'developer-token': adsCfg.developerToken,
+    'Content-Type': 'application/json',
+  };
+  if (adsCfg.loginCustomerId) {
+    baseHeaders['login-customer-id'] = adsCfg.loginCustomerId;
+  }
+
+  let targetCustomerId =
+    adsCfg.customerId ||
+    normalizeDigitsId(conn?.selectedGadsCustomerId) ||
+    normalizeDigitsId(conn?.detectedGadsCustomerId);
+
+  if (!targetCustomerId) {
+    let listRes = await fetch('https://googleads.googleapis.com/v19/customers:listAccessibleCustomers', {
+      headers: baseHeaders,
+    });
+    if (listRes.status === 404) {
+      listRes = await fetch('https://googleads.googleapis.com/v18/customers:listAccessibleCustomers', {
+        headers: baseHeaders,
+      });
+    }
+    if (!listRes.ok) {
+      const errTxt = await listRes.text();
+      return {
+        success: false,
+        synced: 0,
+        error: `Google Ads listAccessibleCustomers (${listRes.status}): ${errTxt.slice(0, 200)}`,
+      };
+    }
+    const listJson = (await listRes.json()) as { resourceNames?: string[] };
+    const first = listJson.resourceNames?.[0]?.replace('customers/', '').replace(/\D/g, '');
+    if (!first) {
+      return {
+        success: false,
+        synced: 0,
+        error: 'Tài khoản Google này chưa có quyền truy cập vào tài khoản Google Ads nào.',
+      };
+    }
+    targetCustomerId = first;
+    if (conn) {
+      conn.detectedGadsCustomerId = first;
+    }
+  }
+
+  const gaql = `SELECT campaign.id, campaign.name, campaign.status, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startStr}' AND '${endStr}'`;
+
+  let searchRes = await fetch(
+    `https://googleads.googleapis.com/v19/customers/${targetCustomerId}/googleAds:search`,
+    {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({ query: gaql }),
+    },
+  );
+  if (searchRes.status === 404) {
+    searchRes = await fetch(
+      `https://googleads.googleapis.com/v18/customers/${targetCustomerId}/googleAds:search`,
+      {
+        method: 'POST',
+        headers: baseHeaders,
+        body: JSON.stringify({ query: gaql }),
+      },
+    );
+  }
+
+  if (!searchRes.ok) {
+    const errTxt = await searchRes.text();
+    return {
+      success: false,
+      synced: 0,
+      error: `Google Ads API (${searchRes.status}) cho Customer ${targetCustomerId}: ${errTxt.slice(0, 220)}`,
+    };
+  }
+
+  const data = (await searchRes.json()) as {
+    results?: Array<{
+      campaign?: { id?: string; name?: string; status?: string };
+      segments?: { date?: string };
+      metrics?: {
+        impressions?: string | number;
+        clicks?: string | number;
+        costMicros?: string | number;
+        conversions?: number;
+      };
+    }>;
+  };
+
+  let synced = 0;
+  for (const row of data.results || []) {
+    const extId = String(row.campaign?.id || '').trim();
+    const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
+    const metricDate = String(row.segments?.date || '').trim();
+    if (!extId || !metricDate) continue;
+
+    const campCode = `GADS_${extId}`;
+    const isActive = row.campaign?.status === 'ENABLED';
+    const campRecord = await prisma.campaign.upsert({
+      where: {
+        uq_campaign_platform_account_code: {
+          platform: 'google_ads',
+          accountExternalId: targetCustomerId,
+          campaignCode: campCode,
+        },
+      },
+      update: {
+        campaignName: campName,
+        isActive,
+      },
+      create: {
+        campaignCode: campCode,
+        campaignName: campName,
+        platform: 'google_ads',
+        accountExternalId: targetCustomerId,
+        isActive,
+      },
+    });
+
+    const impressions = Number(row.metrics?.impressions || 0);
+    const clicks = Number(row.metrics?.clicks || 0);
+    const spendMicros = BigInt(String(row.metrics?.costMicros || '0'));
+    const conversionsVal = Number(row.metrics?.conversions || 0);
+    const conversionsMicros = BigInt(Math.round(conversionsVal * 1_000_000));
+
+    await upsertPlatformMetricIdempotent(prisma, {
+      platform: 'google_ads',
+      accountPropertyId: targetCustomerId,
+      metricDate,
+      grain: 'campaign',
+      campaignId: campRecord.id,
+      campaignExternalId: extId,
+      impressions,
+      clicks,
+      spendMicros,
+      conversionsMicros,
+      isFinalized: false,
+    });
+    synced += 1;
+  }
+
+  return { success: true, synced };
 }

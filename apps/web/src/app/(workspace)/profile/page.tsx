@@ -8,10 +8,12 @@ import {
   Check,
   CheckCircle2,
   Fingerprint,
+  ImagePlus,
   KeyRound,
   Laptop,
   Lock,
   MapPin,
+  Palette,
   Phone,
   RotateCcw,
   Shield,
@@ -20,6 +22,7 @@ import {
   Trash2,
   User,
   UserCheck,
+  Users,
   X,
 } from 'lucide-react';
 import {
@@ -27,11 +30,16 @@ import {
   DEPARTMENT_LABELS,
   hasBaPermission,
   type BaPermissionKey,
+  type TeamDirectoryMemberDto,
 } from '@toantrung/contracts';
-import { apiRequest, ApiClientError } from '@/core/http/client';
+import { apiRequest, ApiClientError, clearAllApiCache } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { getInitials } from '@/core/layout/WorkspaceShell';
 import { ChangePasswordDialog } from '@/core/components/ChangePasswordDialog';
+import {
+  COVER_PRESET_OPTIONS,
+  resolveCoverBackgroundStyle,
+} from '@/core/components/UserCoverStyle';
 
 const PERMISSION_LABELS: Record<BaPermissionKey, string> = {
   LEAD_CREATE: 'Tiếp nhận Lead thủ công (Hotline/Zalo)',
@@ -68,6 +76,13 @@ export default function ProfilePage() {
   const [pendingAvatarPreview, setPendingAvatarPreview] = useState<string | null>(null);
   const [removeAvatarFlag, setRemoveAvatarFlag] = useState(false);
 
+  const [pendingCoverFile, setPendingCoverFile] = useState<File | null>(null);
+  const [pendingCoverPreview, setPendingCoverPreview] = useState<string | null>(null);
+  const [selectedCoverPreset, setSelectedCoverPreset] = useState<string | null>(null);
+  const [removeCoverFlag, setRemoveCoverFlag] = useState(false);
+  const [showCoverPicker, setShowCoverPicker] = useState(false);
+  const [teamMembers, setTeamMembers] = useState<TeamDirectoryMemberDto[]>([]);
+
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileMsg, setProfileMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -76,6 +91,19 @@ export default function ProfilePage() {
   const [toastNotice, setToastNotice] = useState<string | null>(null);
 
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
+
+  const loadTeamDirectory = async (force = false) => {
+    try {
+      const res = await apiRequest<{ members: TeamDirectoryMemberDto[] }>(
+        '/api/v1/users?scope=directory',
+        { skipCache: force },
+      );
+      setTeamMembers(res.members || []);
+    } catch {
+      // ignore
+    }
+  };
 
   useEffect(() => {
     if (user) {
@@ -84,6 +112,11 @@ export default function ProfilePage() {
       setPendingAvatarFile(null);
       setPendingAvatarPreview(null);
       setRemoveAvatarFlag(false);
+      setPendingCoverFile(null);
+      setPendingCoverPreview(null);
+      setSelectedCoverPreset(null);
+      setRemoveCoverFlag(false);
+      void loadTeamDirectory(false);
     }
   }, [user]);
 
@@ -99,11 +132,18 @@ export default function ProfilePage() {
     ? null
     : pendingAvatarPreview || user.avatarUrl || null;
 
+  const displayedCoverUrl = removeCoverFlag
+    ? null
+    : pendingCoverPreview || selectedCoverPreset || user.coverUrl || null;
+
   const hasProfileDraftChanges =
     fullName.trim() !== user.fullName ||
     phone.trim() !== (user.phone || '') ||
     pendingAvatarFile !== null ||
-    removeAvatarFlag;
+    removeAvatarFlag ||
+    pendingCoverFile !== null ||
+    selectedCoverPreset !== null ||
+    removeCoverFlag;
 
   const handleSelectAvatar = (file: File | undefined) => {
     if (!file) return;
@@ -112,6 +152,48 @@ export default function ProfilePage() {
     setPendingAvatarFile(file);
     setPendingAvatarPreview(previewUrl);
     setRemoveAvatarFlag(false);
+  };
+
+  const handleSelectCoverFile = (file: File | undefined) => {
+    if (!file) return;
+    setProfileMsg(null);
+    const previewUrl = URL.createObjectURL(file);
+    setPendingCoverFile(file);
+    setPendingCoverPreview(previewUrl);
+    setSelectedCoverPreset(null);
+    setRemoveCoverFlag(false);
+  };
+
+  const handleQuickApplyCoverPreset = async (presetId: string | null) => {
+    setSavingProfile(true);
+    setProfileMsg(null);
+    try {
+      await apiRequest('/api/v1/profile', {
+        method: 'PATCH',
+        csrfToken: user.csrfToken,
+        body: {
+          fullName: fullName.trim() || user.fullName,
+          phone: phone.trim(),
+          ...(presetId ? { coverPreset: presetId } : { removeCover: true }),
+        },
+      });
+      clearAllApiCache();
+      await refreshSession();
+      await loadTeamDirectory(true);
+      setShowCoverPicker(false);
+      setToastNotice(
+        presetId
+          ? 'Đã cập nhật hình nền hồ sơ — các thành viên khác đã thấy ngay hình nền mới của bạn.'
+          : 'Đã đặt lại hình nền mặc định.',
+      );
+    } catch (err) {
+      setProfileMsg({
+        type: 'err',
+        text: err instanceof ApiClientError ? err.message : 'Không thể đổi hình nền lúc này.',
+      });
+    } finally {
+      setSavingProfile(false);
+    }
   };
 
   const handleMarkRemoveAvatar = () => {
@@ -130,9 +212,16 @@ export default function ProfilePage() {
     setPendingAvatarFile(null);
     setPendingAvatarPreview(null);
     setRemoveAvatarFlag(false);
+    setPendingCoverFile(null);
+    setPendingCoverPreview(null);
+    setSelectedCoverPreset(null);
+    setRemoveCoverFlag(false);
     setProfileMsg(null);
     if (avatarInputRef.current) {
       avatarInputRef.current.value = '';
+    }
+    if (coverInputRef.current) {
+      coverInputRef.current.value = '';
     }
   };
 
@@ -141,12 +230,21 @@ export default function ProfilePage() {
     setProfileMsg(null);
     setSavingProfile(true);
     try {
-      if (pendingAvatarFile) {
+      if (pendingAvatarFile || pendingCoverFile) {
         const formData = new FormData();
         formData.append('fullName', fullName.trim());
         formData.append('phone', phone.trim());
-        formData.append('removeAvatar', 'false');
-        formData.append('avatar', pendingAvatarFile);
+        formData.append('removeAvatar', removeAvatarFlag ? 'true' : 'false');
+        formData.append('removeCover', removeCoverFlag ? 'true' : 'false');
+        if (selectedCoverPreset) {
+          formData.append('coverPreset', selectedCoverPreset);
+        }
+        if (pendingAvatarFile) {
+          formData.append('avatar', pendingAvatarFile);
+        }
+        if (pendingCoverFile) {
+          formData.append('cover', pendingCoverFile);
+        }
 
         await apiRequest('/api/v1/profile', {
           method: 'PATCH',
@@ -162,19 +260,28 @@ export default function ProfilePage() {
             fullName: fullName.trim(),
             phone: phone.trim(),
             ...(removeAvatarFlag ? { removeAvatar: true } : {}),
+            ...(removeCoverFlag ? { removeCover: true } : {}),
+            ...(selectedCoverPreset ? { coverPreset: selectedCoverPreset } : {}),
           },
         });
       }
 
+      clearAllApiCache();
       await refreshSession();
+      await loadTeamDirectory(true);
       setPendingAvatarFile(null);
       setPendingAvatarPreview(null);
       setRemoveAvatarFlag(false);
+      setPendingCoverFile(null);
+      setPendingCoverPreview(null);
+      setSelectedCoverPreset(null);
+      setRemoveCoverFlag(false);
+      setShowCoverPicker(false);
       setProfileMsg({
         type: 'ok',
-        text: 'Đã lưu thay đổi hồ sơ tài khoản thành công.',
+        text: 'Đã lưu hồ sơ, ảnh đại diện & hình nền (đồng bộ hiển thị tới toàn bộ thành viên).',
       });
-      setToastNotice('Đã cập nhật thông tin hồ sơ cá nhân thành công.');
+      setToastNotice('Đã cập nhật hồ sơ & đồng bộ hình nền cho toàn bộ đồng nghiệp.');
     } catch (err) {
       setProfileMsg({
         type: 'err',
@@ -218,13 +325,88 @@ export default function ProfilePage() {
           EXECUTIVE HEADER CARD (Fix 5)
       ========================================================================= */}
       <section className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-        {/* Top Banner: Elegant gradient cover */}
-        <div className="h-36 bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-800 relative">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.22),transparent_60%)]" />
-          <div className="absolute top-4 right-5 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md border border-white/25 text-white text-xs font-semibold">
+        {/* Top Banner: Hình nền hồ sơ cá nhân đồng bộ tới mọi thành viên */}
+        <div
+          style={resolveCoverBackgroundStyle(displayedCoverUrl)}
+          className="h-44 relative transition-all duration-300"
+        >
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.18),transparent_60%)]" />
+          <div className="absolute top-4 left-5 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-950/35 backdrop-blur-md border border-white/20 text-white text-xs font-semibold">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Đang hoạt động</span>
+            <span>Đang hoạt động · Hiển thị công khai nội bộ</span>
           </div>
+
+          {/* Cụm nút Đổi hình nền bìa */}
+          <div className="absolute top-4 right-5 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => coverInputRef.current?.click()}
+              className="min-h-8 px-3 rounded-xl bg-slate-950/45 hover:bg-slate-950/70 backdrop-blur-md border border-white/25 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition"
+            >
+              <ImagePlus className="w-3.5 h-3.5" />
+              <span>Tải ảnh nền lên</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowCoverPicker((prev) => !prev)}
+              className="min-h-8 px-3 rounded-xl bg-white/20 hover:bg-white/30 backdrop-blur-md border border-white/30 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition"
+            >
+              <Palette className="w-3.5 h-3.5" />
+              <span>Mẫu hình nền</span>
+            </button>
+            <input
+              ref={coverInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              onChange={(e) => handleSelectCoverFile(e.target.files?.[0])}
+              className="hidden"
+            />
+          </div>
+
+          {/* Bảng chọn nhanh mẫu nền đồng bộ tức thì */}
+          {showCoverPicker && (
+            <div className="absolute right-5 top-14 z-30 w-80 rounded-2xl bg-white/95 backdrop-blur-md border border-slate-200 shadow-2xl p-3.5 space-y-2.5">
+              <div className="flex items-center justify-between text-xs font-bold text-slate-900">
+                <span>Chọn hình nền hiển thị với đồng nghiệp</span>
+                <button
+                  type="button"
+                  onClick={() => setShowCoverPicker(false)}
+                  className="text-slate-400 hover:text-slate-700"
+                >
+                  ✕
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                {COVER_PRESET_OPTIONS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    disabled={savingProfile}
+                    onClick={() => void handleQuickApplyCoverPreset(preset.id)}
+                    className="group rounded-xl border border-slate-200 hover:border-blue-600 p-1 text-left transition"
+                  >
+                    <div
+                      style={{ backgroundImage: preset.cssBackground }}
+                      className="h-10 rounded-lg w-full"
+                    />
+                    <span className="block text-[11px] font-semibold text-slate-700 mt-1 px-1 truncate">
+                      {preset.label}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {user.coverUrl && (
+                <button
+                  type="button"
+                  disabled={savingProfile}
+                  onClick={() => void handleQuickApplyCoverPreset(null)}
+                  className="w-full py-1.5 rounded-lg bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-700 text-[11px] font-semibold transition"
+                >
+                  Khôi phục nền mặc định
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Profile Info Row placed neatly next to the Avatar */}
@@ -289,10 +471,21 @@ export default function ProfilePage() {
                   </span>
                 </p>
 
-                {pendingAvatarFile && (
-                  <p className="text-xs font-semibold text-blue-600">
-                    Ảnh đại diện mới đã chọn ({pendingAvatarFile.name}) — Nhấn &ldquo;Lưu thông tin&rdquo; ở thẻ bên dưới để áp dụng.
-                  </p>
+                {(pendingAvatarFile || pendingCoverFile) && (
+                  <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold text-blue-700">
+                      Đã chọn {pendingCoverFile ? `hình nền mới (${pendingCoverFile.name})` : `ảnh đại diện mới (${pendingAvatarFile?.name})`} — bấm Lưu ngay để đồng bộ tới mọi thành viên:
+                    </span>
+                    <button
+                      type="button"
+                      disabled={savingProfile}
+                      onClick={(e) => void handleSaveProfile(e as unknown as React.FormEvent)}
+                      className="h-7 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1 shadow-2xs"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>{savingProfile ? 'Đang lưu...' : 'Áp dụng ngay'}</span>
+                    </button>
+                  </div>
                 )}
               </div>
             </div>
@@ -322,6 +515,71 @@ export default function ProfilePage() {
           </div>
         </div>
       </section>
+
+      {/* KHÔNG GIAN THÀNH VIÊN TOÀN TRUNG: Mọi thành viên đều thấy trực tiếp hình nền & ảnh đại diện của nhau */}
+      {teamMembers.length > 0 && (
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-4 sm:p-5 space-y-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-700 grid place-items-center shrink-0">
+                <Users className="w-4 h-4" />
+              </div>
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">
+                  Không gian Đồng nghiệp Toàn Trung ({teamMembers.length} thành viên)
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Khi bất kỳ thành viên nào đổi hình nền hoặc ảnh đại diện, các tài khoản còn lại đều thấy trực tiếp tại đây
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            {teamMembers.map((m) => {
+              const isMe = m.id === user.id;
+              const liveCover = isMe ? displayedCoverUrl : m.coverUrl;
+              const liveAvatar = isMe ? displayedAvatarUrl : m.avatarUrl;
+              return (
+                <div
+                  key={m.id}
+                  className="rounded-xl border border-slate-200/90 overflow-hidden bg-white shadow-2xs hover:shadow-sm transition"
+                >
+                  <div
+                    style={resolveCoverBackgroundStyle(liveCover)}
+                    className="h-14 relative"
+                  >
+                    {isMe && (
+                      <span className="absolute top-1.5 right-1.5 px-2 py-0.5 rounded-full bg-white/90 text-[#0F275C] text-[10px] font-bold">
+                        Bạn
+                      </span>
+                    )}
+                  </div>
+                  <div className="px-3 pb-3 flex items-end gap-2 -mt-4 relative">
+                    <div className="w-9 h-9 rounded-full ring-2 ring-white bg-blue-100 text-blue-800 font-bold text-[11px] flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
+                      {liveAvatar ? (
+                        <img
+                          src={liveAvatar}
+                          alt={m.fullName}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <span>{getInitials(m.fullName)}</span>
+                      )}
+                    </div>
+                    <div className="min-w-0 pt-4">
+                      <p className="text-xs font-bold text-slate-900 truncate">{m.fullName}</p>
+                      <p className="text-[10.5px] text-slate-500 truncate">
+                        {m.roleName}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* =========================================================================
           BODY CONTENT: 2-COLUMN BALANCED GRID BELOW THE HEADER (Fix 5)

@@ -39,6 +39,8 @@ export async function GET(req: Request) {
     const pageSize = Number(url.searchParams.get('pageSize') || 20);
 
     if (view === 'spec') {
+      const adsPage = Number(url.searchParams.get('adsPage') || 1);
+      const adsPageSize = Number(url.searchParams.get('adsPageSize') || 20);
       const m02 = await getM02TrafficInteractionSpec({
         websiteId,
         preset,
@@ -46,6 +48,8 @@ export async function GET(req: Request) {
         to,
         page,
         pageSize,
+        adsPage,
+        adsPageSize,
       });
       return jsonSuccess(m02);
     }

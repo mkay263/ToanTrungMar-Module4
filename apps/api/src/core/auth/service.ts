@@ -8,6 +8,7 @@ import type {
   DepartmentCode,
   RoleCode,
   SessionUserDto,
+  TeamDirectoryMemberDto,
   UpdateProfileDto,
   UpdateUserDto,
 } from '@toantrung/contracts';
@@ -44,6 +45,36 @@ function getAvatarDir(): string {
   const dir = path.join(APP_CONFIG.getStorageRoot(), 'avatars');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+const SETTING_KEY_USER_COVERS = 'user_profile_covers_v1';
+
+export async function getUserCoverMap(): Promise<Record<string, string>> {
+  try {
+    const row = await prisma.systemSetting.findUnique({
+      where: { key: SETTING_KEY_USER_COVERS },
+    });
+    if (!row?.value) return {};
+    const parsed = JSON.parse(row.value) as Record<string, string>;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function setUserCoverUrl(userId: number, coverUrl: string | null): Promise<void> {
+  const map = await getUserCoverMap();
+  if (!coverUrl) {
+    delete map[String(userId)];
+  } else {
+    map[String(userId)] = coverUrl;
+  }
+  const value = JSON.stringify(map);
+  await prisma.systemSetting.upsert({
+    where: { key: SETTING_KEY_USER_COVERS },
+    update: { value },
+    create: { key: SETTING_KEY_USER_COVERS, value },
+  });
 }
 
 export async function authenticateUser(input: {
@@ -103,6 +134,8 @@ export async function authenticateUser(input: {
     ipAddress: input.ipAddress,
   });
 
+  const coverMap = await getUserCoverMap();
+
   return {
     user: {
       id: user.id,
@@ -110,6 +143,7 @@ export async function authenticateUser(input: {
       email: user.email,
       phone: user.phone,
       avatarUrl: user.avatarUrl,
+      coverUrl: coverMap[String(user.id)] || null,
       roleCode: user.role.roleCode as RoleCode,
       roleName: user.role.roleName,
       department: user.department as DepartmentCode,
@@ -135,6 +169,7 @@ export async function resolveSessionFromToken(rawToken: string | undefined | nul
   if (!session.user.isActive || session.user.deletedAt) {
     return null;
   }
+  const coverMap = await getUserCoverMap();
   return {
     sessionId: session.id,
     user: {
@@ -143,6 +178,7 @@ export async function resolveSessionFromToken(rawToken: string | undefined | nul
       email: session.user.email,
       phone: session.user.phone,
       avatarUrl: session.user.avatarUrl,
+      coverUrl: coverMap[String(session.user.id)] || null,
       roleCode: session.user.role.roleCode as RoleCode,
       roleName: session.user.role.roleName,
       department: session.user.department as DepartmentCode,
@@ -183,6 +219,12 @@ export async function updateOwnProfile(
     include: { role: true },
   });
 
+  if (input.removeCover) {
+    await setUserCoverUrl(userId, null);
+  } else if (input.coverPreset && input.coverPreset.startsWith('preset:')) {
+    await setUserCoverUrl(userId, input.coverPreset);
+  }
+
   await recordAuditLog({
     actorUserId: userId,
     action: 'PROFILE_UPDATED',
@@ -192,11 +234,50 @@ export async function updateOwnProfile(
       fullName: updated.fullName,
       phone: updated.phone,
       removeAvatar: Boolean(input.removeAvatar),
+      removeCover: Boolean(input.removeCover),
+      coverPreset: input.coverPreset || null,
     },
     ipAddress,
   });
 
   return updated;
+}
+
+export async function uploadOwnCover(input: {
+  userId: number;
+  fileBuffer: Buffer;
+  declaredMimeType: string;
+  ipAddress?: string;
+}): Promise<string> {
+  const validated = validateAndSanitizeImageBuffer(
+    input.fileBuffer,
+    input.declaredMimeType,
+    APP_CONFIG.maxHeroSizeBytes || 5 * 1024 * 1024,
+  );
+
+  const randomId = crypto.randomUUID();
+  const objectKey = `cover-${input.userId}-${randomId}-${validated.sha256.slice(0, 12)}.${validated.extension}`;
+  const fullPath = path.join(getAvatarDir(), objectKey);
+
+  fs.writeFileSync(fullPath, validated.sanitizedBuffer, { flag: 'wx' });
+
+  const coverUrl = `/api/v1/settings/branding/asset/${encodeURIComponent(objectKey)}`;
+  await setUserCoverUrl(input.userId, coverUrl);
+
+  await recordAuditLog({
+    actorUserId: input.userId,
+    action: 'PROFILE_COVER_UPDATED',
+    targetType: 'user',
+    targetId: String(input.userId),
+    details: {
+      objectKey,
+      mimeType: validated.mimeType,
+      bytes: validated.sanitizedBuffer.length,
+    },
+    ipAddress: input.ipAddress,
+  });
+
+  return coverUrl;
 }
 
 export async function uploadOwnAvatar(input: {
@@ -274,13 +355,14 @@ export async function changeOwnPassword(
 }
 
 export async function listAdminUsers(): Promise<AdminUserDto[]> {
-  const rows = await listAllUsersWithRoles();
+  const [rows, coverMap] = await Promise.all([listAllUsersWithRoles(), getUserCoverMap()]);
   return rows.map((u) => ({
     id: u.id,
     fullName: u.fullName,
     email: u.email,
     phone: u.phone,
     avatarUrl: u.avatarUrl,
+    coverUrl: coverMap[String(u.id)] || null,
     roleId: u.roleId,
     roleCode: u.role.roleCode as RoleCode,
     roleName: u.role.roleName,
@@ -289,6 +371,22 @@ export async function listAdminUsers(): Promise<AdminUserDto[]> {
     createdAt: u.createdAt.toISOString(),
     updatedAt: u.updatedAt.toISOString(),
   }));
+}
+
+export async function listTeamDirectoryMembers(): Promise<TeamDirectoryMemberDto[]> {
+  const [rows, coverMap] = await Promise.all([listAllUsersWithRoles(), getUserCoverMap()]);
+  return rows
+    .filter((u) => u.isActive)
+    .map((u) => ({
+      id: u.id,
+      fullName: u.fullName,
+      roleCode: u.role.roleCode as RoleCode,
+      roleName: u.role.roleName,
+      department: u.department as DepartmentCode,
+      avatarUrl: u.avatarUrl,
+      coverUrl: coverMap[String(u.id)] || null,
+      isActive: u.isActive,
+    }));
 }
 
 export async function createAdminUser(

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MonetaryAmountDto } from '../common';
+import type { MonetaryAmountDto, WebsiteConfigItemDto } from '../common';
 
 export const REPORT_PRESETS = ['7d', '30d', 'all', 'custom'] as const;
 export type ReportPreset = (typeof REPORT_PRESETS)[number];
@@ -7,6 +7,8 @@ export type ReportPreset = (typeof REPORT_PRESETS)[number];
 export interface SalesPerformanceRowDto {
   salesUserId: number;
   salesFullName: string;
+  avatarUrl?: string | null;
+  coverUrl?: string | null;
   isOnline: boolean;
   isReceivingLeads: boolean;
   totalLeads: number;
@@ -60,6 +62,7 @@ export interface ActionableTaskItemDto {
   id:
     | 'unaccepted_leads'
     | 'overdue_quotes'
+    | 'leads_need_review'
     | 'pending_designs'
     | 'seo_approvals'
     | 'publication_failures'
@@ -92,12 +95,46 @@ export interface LeadTrendPointDto {
   wonCount: number;
 }
 
+export interface WebsiteOverviewItemDto {
+  websiteId: string;
+  shortName: string;
+  domain: string;
+  isDirectOrUnmapped?: boolean;
+  pageViews: number | null;
+  gscClicks: number | null;
+  gscImpressions: number | null;
+  totalLeadsL1: number;
+  validLeadsL2: number;
+  unreceivedCount: number;
+  quotingAndSentCount: number;
+  wonCount: number;
+  sharePct: number;
+}
+
 export interface ReportsDashboardDto {
   scopeRole: string;
   scopeDescription: string;
   preset: ReportPreset;
   fromDate: string;
   toDate: string;
+  websiteId?: string;
+  websiteLabel?: string;
+  availableWebsites?: WebsiteConfigItemDto[];
+  websiteSummaries?: WebsiteOverviewItemDto[];
+  trendGranularity?: 'day' | 'week';
+  previousOverview?: {
+    totalLeadsL1: number;
+    validLeadsL2: number;
+    unreceivedLeadsCount: number;
+    quoteSentCount: number;
+    wonCount: number;
+  } | null;
+  dataQualitySummary?: {
+    missingWebsiteCount: number;
+    missingProductCount: number;
+    needsAttentionCount: number;
+    failingConnectionsCount: number;
+  };
   generatedAt: string;
   isSmallSample: boolean;
   smallSampleNotice: string | null;

@@ -26,11 +26,13 @@ export async function GET(request: Request) {
       return jsonSuccess(m04);
     }
     const preset = url.searchParams.get('preset') ?? '30d';
-    const fromDate = url.searchParams.get('fromDate') ?? undefined;
-    const toDate = url.searchParams.get('toDate') ?? undefined;
+    const websiteId = url.searchParams.get('websiteId') ?? 'all';
+    const fromDate = url.searchParams.get('from') ?? url.searchParams.get('fromDate') ?? undefined;
+    const toDate = url.searchParams.get('to') ?? url.searchParams.get('toDate') ?? undefined;
 
     const [data, dispatchedReports] = await Promise.all([
       getScopedReportsDashboard(auth.user, {
+        websiteId,
         preset,
         fromDate,
         toDate,

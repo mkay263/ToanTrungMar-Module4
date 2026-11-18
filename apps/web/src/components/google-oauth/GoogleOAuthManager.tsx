@@ -46,14 +46,36 @@ export function GoogleOAuthManager({
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
+  // Google Ads API Config state
+  const [adsConfig, setAdsConfig] = useState<{
+    hasDeveloperToken: boolean;
+    developerTokenMasked: string | null;
+    customerId: string | null;
+    loginCustomerId: string | null;
+  } | null>(null);
+  const [devTokenInput, setDevTokenInput] = useState('');
+  const [adsCustomerIdInput, setAdsCustomerIdInput] = useState('');
+  const [adsMccIdInput, setAdsMccIdInput] = useState('');
+
   const fetchStatus = useCallback(async () => {
     try {
       const res = await apiRequest<{
         status: GoogleOAuthStatusDto;
         clientConfig: GoogleOAuthClientConfigDto;
+        adsConfig?: {
+          hasDeveloperToken: boolean;
+          developerTokenMasked: string | null;
+          customerId: string | null;
+          loginCustomerId: string | null;
+        };
       }>('/api/v1/auth/google/status');
       setStatus(res.status);
       setClientConfig(res.clientConfig);
+      if (res.adsConfig) {
+        setAdsConfig(res.adsConfig);
+        setAdsCustomerIdInput((prev) => prev || res.adsConfig?.customerId || '');
+        setAdsMccIdInput((prev) => prev || res.adsConfig?.loginCustomerId || '');
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Lỗi lấy trạng thái kết nối Google.');
     } finally {
@@ -187,6 +209,46 @@ export function GoogleOAuthManager({
       setFeedbackMsg(res.message);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Lỗi ngắt kết nối Google.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSaveAdsConfig = async () => {
+    if (!devTokenInput.trim()) {
+      setErrorMsg('Vui lòng dán Developer Token (22 ký tự từ Google Ads API Center).');
+      return;
+    }
+    setBusy(true);
+    setErrorMsg(null);
+    setFeedbackMsg(null);
+    try {
+      const res = await apiRequest<{
+        message: string;
+        status: GoogleOAuthStatusDto;
+        adsConfig: {
+          hasDeveloperToken: boolean;
+          developerTokenMasked: string | null;
+          customerId: string | null;
+          loginCustomerId: string | null;
+        };
+      }>('/api/v1/auth/google/status', {
+        method: 'POST',
+        csrfToken: user?.csrfToken,
+        body: {
+          action: 'save_ads_config',
+          developerToken: devTokenInput.trim(),
+          customerId: adsCustomerIdInput.trim(),
+          loginCustomerId: adsMccIdInput.trim(),
+        },
+      });
+      setStatus(res.status);
+      setAdsConfig(res.adsConfig);
+      setDevTokenInput('');
+      setFeedbackMsg(res.message);
+      if (onSyncCompleted) onSyncCompleted();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Lỗi lưu cấu hình Google Ads API.');
     } finally {
       setBusy(false);
     }
@@ -547,6 +609,97 @@ export function GoogleOAuthManager({
               Cấu hình Google Client ID riêng →
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Khối Cấu hình trực tiếp Google Ads API (Developer Token & Customer ID) */}
+      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <Zap className="w-4 h-4 text-amber-600" />
+              <span>Kết nối Google Ads API (Chi phí, Click &amp; Chuyển đổi Chiến dịch)</span>
+              {adsConfig?.hasDeveloperToken ? (
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold inline-flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Đã cấu hình ({adsConfig.developerTokenMasked})
+                </span>
+              ) : (
+                <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold">
+                  Cần nhập Developer Token
+                </span>
+              )}
+            </h3>
+            <p className="text-xs text-slate-600 mt-1">
+              Tài khoản Google OAuth đã có quyền đọc quảng cáo (<code>adwords</code>). Dán thêm <strong>Developer Token</strong> từ tài khoản MCC Google Ads (Công cụ → Trung tâm API / API Center) và <strong>Mã tài khoản 10 số</strong> để tự động kéo chi phí &amp; lượt nhấp thực tế.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Developer Token (bắt buộc)
+            </label>
+            <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={devTokenInput}
+              onChange={(e) => setDevTokenInput(e.target.value)}
+              placeholder={
+                adsConfig?.hasDeveloperToken
+                  ? `Đang lưu: ${adsConfig.developerTokenMasked} (dán mới để đổi)`
+                  : 'Dán mã 22 ký tự từ Google Ads API Center...'
+              }
+              className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Customer ID chạy quảng cáo (10 số)
+            </label>
+            <input
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={adsCustomerIdInput}
+              onChange={(e) => setAdsCustomerIdInput(e.target.value)}
+              placeholder="VD: 123-456-7890 (để trống = tự dò)"
+              className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              MCC Login Customer ID (nếu dùng MCC)
+            </label>
+            <input
+              type="text"
+              autoComplete="off"
+              spellCheck={false}
+              value={adsMccIdInput}
+              onChange={(e) => setAdsMccIdInput(e.target.value)}
+              placeholder="VD: 987-654-3210 (tùy chọn)"
+              className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+          <span className="text-xs text-slate-500">
+            Mã được mã hóa AES-256-GCM trong cơ sở dữ liệu nội bộ, áp dụng ngay không cần khởi động lại server.
+          </span>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleSaveAdsConfig()}
+            className="min-h-9 px-4 rounded-xl bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+            <span>Lưu &amp; Đồng bộ Google Ads ngay</span>
+          </button>
         </div>
       </div>
 

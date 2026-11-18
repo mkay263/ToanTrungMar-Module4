@@ -558,10 +558,10 @@ export async function GET(request: Request) {
               : l.companyName || l.contactName || 'Chưa cập nhật',
             projectName: l.projectName || '—',
             source:
+              l.sourceWebsite ||
               l.tracking?.marketingSource ||
               l.selfReportedSource ||
-              (CONTACT_CHANNEL_LABELS as Record<string, string>)[l.contactChannel] ||
-              l.contactChannel,
+              'Chưa xác định',
             contactAndPhone: isAnonymized
               ? l.phone
               : `${l.contactName || 'Khách hàng'} - ${l.phone}`,
@@ -569,9 +569,9 @@ export async function GET(request: Request) {
             region:
               l.areaType === 'hcm'
                 ? `TP.HCM - ${l.hcmDistrict || ''}`
-                : l.province || 'Chưa chọn tỉnh',
+                : l.province || 'Chưa xác định',
             address: isAnonymized ? 'Ẩn địa chỉ' : l.installationAddress || '—',
-            products: l.products.map((p) => p.productName).join(', ') || 'Chưa chọn',
+            products: l.products.map((p) => p.productName).join(', ') || 'Chưa phân loại',
             productTags: tags || 'Indoor',
             status:
               l.spamStatus !== 'NONE'

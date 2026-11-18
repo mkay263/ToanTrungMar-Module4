@@ -3,1083 +3,878 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
+  UI_VOCABULARY,
+  formatSafePeriodComparison,
   hasBaPermission,
-  type ReportPreset,
   type ReportsDashboardDto,
+  type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
 import {
-  Activity,
-  AlertCircle,
   AlertTriangle,
   ArrowRight,
   BarChart3,
-  CalendarClock,
   CheckCircle2,
-  Clock,
-  Download,
-  FileSpreadsheet,
-  Layers,
+  ClipboardCheck,
+  Globe,
   Megaphone,
-  PhoneCall,
   RefreshCw,
-  ShieldCheck,
+  ShieldAlert,
   Sparkles,
-  Target,
   TrendingUp,
   Users,
 } from 'lucide-react';
 import { useSession } from '@/core/session/SessionContext';
 import { apiRequest, peekApiCache } from '@/core/http/client';
-import { formatMoney, formatMoneyCompact } from '@/core/format/money';
+import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
+import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
+import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
+import { getInitials } from '@/core/layout/WorkspaceShell';
+import { resolveCoverBackgroundStyle } from '@/core/components/UserCoverStyle';
 
-const PERIODS: Array<{ label: string; value: ReportPreset }> = [
-  { label: '7 ngày qua', value: '7d' },
-  { label: '30 ngày qua', value: '30d' },
-  { label: 'Toàn thời gian', value: 'all' },
-];
-
-type WorkspaceTab = 'leads' | 'sales' | 'campaigns' | 'products';
+function buildDashboardApiPath(scope: {
+  preset: string;
+  from: string;
+  to: string;
+}): string {
+  // Trang Tổng quan LUÔN bao quát toàn bộ hệ thống (không chia lẻ tab từng website)
+  const qs = new URLSearchParams({
+    websiteId: 'all',
+    preset: scope.preset || '7D',
+  });
+  if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+    qs.set('from', scope.from);
+    qs.set('to', scope.to);
+  }
+  return `/api/v1/reports?${qs.toString()}`;
+}
 
 export default function DashboardPage() {
   const { user } = useSession();
-  const [preset, setPreset] = useState<ReportPreset>('all');
-  const [activeTab, setActiveTab] = useState<WorkspaceTab>('leads');
+  const { scope, hydrated, updateScope } = useDashboardScope();
+  const apiPath = useMemo(() => buildDashboardApiPath(scope), [scope]);
+
   const [report, setReport] = useState<ReportsDashboardDto | null>(() =>
-    peekApiCache<ReportsDashboardDto>('/api/v1/reports?preset=all')
+    peekApiCache<ReportsDashboardDto>(apiPath),
+  );
+  const [knownWebsites, setKnownWebsites] = useState<WebsiteConfigItemDto[]>(
+    () => peekApiCache<ReportsDashboardDto>(apiPath)?.availableWebsites || [],
   );
   const [isLoading, setIsLoading] = useState<boolean>(
-    () => !peekApiCache<ReportsDashboardDto>('/api/v1/reports?preset=all')
+    () => !peekApiCache<ReportsDashboardDto>(apiPath),
   );
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [lastFetchedAt, setLastFetchedAt] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState('');
 
-  const loadDashboard = useCallback(
-    async (selectedPreset: ReportPreset, manual = false) => {
-      const url = `/api/v1/reports?preset=${selectedPreset}`;
-      const cached = !manual ? peekApiCache<ReportsDashboardDto>(url) : null;
-      if (manual) {
-        setIsRefreshing(true);
-      } else if (cached) {
-        setReport(cached);
-        setIsLoading(false);
-      } else {
-        setIsLoading(true);
+  useEffect(() => {
+    const cached = peekApiCache<ReportsDashboardDto>(apiPath);
+    if (cached) {
+      setReport(cached);
+      if (cached.availableWebsites?.length) {
+        setKnownWebsites(cached.availableWebsites);
       }
-      setFetchError(null);
+      setIsLoading(false);
+    } else {
+      setReport(null);
+      setIsLoading(true);
+    }
+  }, [apiPath]);
 
+  const fetchDashboard = useCallback(
+    async (opts?: { manual?: boolean; signal?: AbortSignal }) => {
+      if (opts?.manual) setIsRefreshing(true);
+      setFetchError(null);
       try {
-        const data = await apiRequest<ReportsDashboardDto>(url, {
-          skipCache: manual,
+        const res = await apiRequest<ReportsDashboardDto>(apiPath, {
+          signal: opts?.signal,
+          skipCache: Boolean(opts?.manual),
         });
-        setReport(data);
-        setLastFetchedAt(new Date().toISOString());
+        if (opts?.signal?.aborted) return;
+        setReport(res);
+        if (res.availableWebsites?.length) {
+          setKnownWebsites(res.availableWebsites);
+        }
       } catch (err) {
+        if (opts?.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+          return;
+        }
         setFetchError(
-          err instanceof Error
-            ? err.message
-            : 'Mất kết nối tới máy chủ. Vui lòng thử lại.'
+          err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError,
         );
       } finally {
-        setIsLoading(false);
-        setIsRefreshing(false);
+        if (!opts?.signal?.aborted) {
+          setIsLoading(false);
+          setIsRefreshing(false);
+        }
       }
     },
-    []
+    [apiPath],
   );
 
   useEffect(() => {
-    void loadDashboard(preset, false);
-  }, [preset, loadDashboard]);
+    if (!hydrated || !user) return;
+    if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
 
-  const overview = report?.overview ?? {
-    totalLeadsL1: 0,
-    validLeadsL2: 0,
-    effectiveLeadsL3: 0,
-    activeLeadsCount: 0,
-    unreceivedLeadsCount: 0,
-    newLeadCount: 0,
-    quotingCount: 0,
-    quoteSentCount: 0,
-    wonCount: 0,
-    lostCount: 0,
-    unansweredQuoteCount: 0,
-    overdue7DaysQuoteCount: 0,
-    winRateText: '0.0%',
-  };
+    const controller = new AbortController();
+    void fetchDashboard({ signal: controller.signal });
 
-  const marketing = report?.marketingSummary;
-  const design = report?.designSummary;
-  const trackingOps = report?.trackingOperationalSummary;
-  const actionableTasks = report?.actionableTasks ?? [];
-  const leadTrend = report?.leadTrend ?? [];
-  const unansweredQuotes = report?.unansweredQuotes ?? [];
-  const salesPerformance = report?.salesPerformance ?? [];
-  const productInsights = report?.productInsights ?? [];
-  const byChannel = report?.byChannel ?? [];
-  const detailedLeads = report?.detailedLeads ?? [];
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void fetchDashboard();
+      }
+    }, 60_000);
 
-  const b2bFollowUpHorizonStats = useMemo(() => {
-    const activeUnder7d = unansweredQuotes.filter((q) => q.daysWaiting < 7).length;
-    const followUp7to30d = unansweredQuotes.filter(
-      (q) => q.daysWaiting >= 7 && q.daysWaiting <= 30
-    ).length;
-    const periodic1to2m = unansweredQuotes.filter(
-      (q) => q.daysWaiting > 30 && q.daysWaiting <= 60
-    ).length;
-    const longTermOver60d = unansweredQuotes.filter((q) => q.daysWaiting > 60).length;
-    return {
-      activeUnder7d,
-      followUp7to30d,
-      periodic1to2m,
-      longTermOver60d,
+    return () => {
+      controller.abort();
+      window.clearInterval(interval);
     };
-  }, [unansweredQuotes]);
+  }, [hydrated, user, scope.preset, scope.from, scope.to, fetchDashboard]);
 
-  const canViewSalesTeam = Boolean(
-    user && ['ADMIN', 'BOD', 'SALES_LEAD', 'SALES'].includes(user.roleCode)
-  );
-  const canViewMarketingSummary = Boolean(
-    user && hasBaPermission(user.roleCode, 'TRACKING_ADS_OPTIMIZE')
-  );
-  const canViewSeoAds = Boolean(
-    user && hasBaPermission(user.roleCode, 'AI_MARKETING_SEO')
-  );
-  const canViewDesignStudio = Boolean(
-    user && hasBaPermission(user.roleCode, 'AI_DESIGN')
-  );
-  const card4Href = canViewSeoAds
-    ? '/ads'
-    : canViewMarketingSummary
-      ? '/tracking'
-      : canViewDesignStudio
-        ? '/design'
-        : '/reports';
+  useEffect(() => {
+    const handleGlobalSearch = (ev: Event) => {
+      const detail = (ev as CustomEvent<string>).detail;
+      setSearchTerm(typeof detail === 'string' ? detail.trim().toLowerCase() : '');
+    };
+    window.addEventListener('tt-global-search', handleGlobalSearch as EventListener);
+    return () =>
+      window.removeEventListener('tt-global-search', handleGlobalSearch as EventListener);
+  }, []);
 
-  const cleanScopeDescription = (report?.scopeDescription || '')
-    .replace(/\s*\(theo[^)]*\)/gi, '')
-    .replace(/\s*theo UC\d+[^)]*/gi, '');
+  const scopeQueryForLinks = useMemo(() => {
+    const qs = new URLSearchParams();
+    qs.set('preset', scope.preset);
+    if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+      qs.set('from', scope.from);
+      qs.set('to', scope.to);
+    }
+    return qs.toString();
+  }, [scope.preset, scope.from, scope.to]);
 
-  const cleanRatePct =
-    overview.totalLeadsL1 > 0
-      ? Math.round((overview.effectiveLeadsL3 / overview.totalLeadsL1) * 100)
-      : 100;
+  const periodComp = useMemo(() => {
+    if (!report || !report.previousOverview) return null;
+    return formatSafePeriodComparison(
+      report.overview.totalLeadsL1,
+      report.previousOverview.totalLeadsL1,
+    );
+  }, [report]);
+
+  const freshnessText = useMemo(() => {
+    if (isRefreshing) return UI_VOCABULARY.freshness.updating;
+    if (fetchError && !report) return UI_VOCABULARY.fallbacks.loadError;
+    if (!report) return UI_VOCABULARY.freshness.updating;
+    const base = report.lastSyncedAt
+      ? `${UI_VOCABULARY.freshness.updatedAtPrefix} ${new Date(report.lastSyncedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })}`
+      : `${UI_VOCABULARY.freshness.dataThroughPrefix} ${report.toDate}`;
+    return report.todayPreliminaryNotice ? `${base} · ${report.todayPreliminaryNotice}` : base;
+  }, [fetchError, isRefreshing, report]);
+
+  const actionableTasks = useMemo(() => {
+    const list = report?.actionableTasks || [];
+    if (!searchTerm) return list;
+    return list.filter(
+      (t) =>
+        t.title.toLowerCase().includes(searchTerm) ||
+        t.moduleLabel.toLowerCase().includes(searchTerm) ||
+        t.description.toLowerCase().includes(searchTerm),
+    );
+  }, [report?.actionableTasks, searchTerm]);
+
+  const websiteRows = useMemo(() => {
+    const list = report?.websiteSummaries || [];
+    if (!searchTerm) return list;
+    return list.filter(
+      (w) =>
+        w.shortName.toLowerCase().includes(searchTerm) ||
+        w.domain.toLowerCase().includes(searchTerm),
+    );
+  }, [report?.websiteSummaries, searchTerm]);
+
+  const salesRows = useMemo(() => {
+    const list = report?.salesPerformance || [];
+    if (!searchTerm) return list;
+    return list.filter((s) => s.salesFullName.toLowerCase().includes(searchTerm));
+  }, [report?.salesPerformance, searchTerm]);
+
+  const totalSystemPageViews = useMemo(() => {
+    const rows = report?.websiteSummaries || [];
+    let hasAny = false;
+    let sum = 0;
+    for (const r of rows) {
+      if (r.pageViews !== null) {
+        hasAny = true;
+        sum += r.pageViews;
+      }
+    }
+    return hasAny ? sum : null;
+  }, [report?.websiteSummaries]);
+
+  const totalSystemGscClicks = useMemo(() => {
+    const rows = report?.websiteSummaries || [];
+    let hasAny = false;
+    let sum = 0;
+    for (const r of rows) {
+      if (r.gscClicks !== null) {
+        hasAny = true;
+        sum += r.gscClicks;
+      }
+    }
+    return hasAny ? sum : null;
+  }, [report?.websiteSummaries]);
+
+  const chartPoints = report?.leadTrend || [];
+  const sparklineGeometry = useMemo(() => {
+    if (chartPoints.length === 0) return null;
+    const W = 520;
+    const H = 128;
+    const padX = 16;
+    const padY = 18;
+    const innerW = W - padX * 2;
+    const innerH = H - padY * 2;
+    const maxV = Math.max(4, ...chartPoints.map((p) => p.totalL1));
+
+    const pts = chartPoints.map((p, i) => {
+      const x =
+        chartPoints.length === 1
+          ? W / 2
+          : padX + (i / (chartPoints.length - 1)) * innerW;
+      const y = padY + innerH - (p.totalL1 / maxV) * innerH;
+      return { ...p, x, y };
+    });
+
+    const linePath = pts
+      .map((pt, idx) => `${idx === 0 ? 'M' : 'L'} ${pt.x.toFixed(1)} ${pt.y.toFixed(1)}`)
+      .join(' ');
+    const areaPath = `${linePath} L ${pts[pts.length - 1].x.toFixed(1)} ${(padY + innerH).toFixed(1)} L ${pts[0].x.toFixed(1)} ${(padY + innerH).toFixed(1)} Z`;
+
+    return { W, H, maxV, pts, linePath, areaPath, baselineY: padY + innerH };
+  }, [chartPoints]);
+
+  const dq = report?.dataQualitySummary;
+  const canViewLeads = user ? hasBaPermission(user.roleCode, 'LEAD_VIEW_OWN') : false;
 
   return (
-    <div className="space-y-4 text-sm">
-      {/* 1. HEADER ĐIỀU HÀNH GỌN SẠCH */}
-      <header className="rounded-2xl bg-white border border-slate-200/90 px-5 py-4 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-3.5">
-        <div className="space-y-1 min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-blue-50 border border-blue-200/80 text-[#1E3A8A] text-xs font-semibold">
-              <Activity className="w-3.5 h-3.5 text-blue-600" />
-              <span>Bảng Điều Hành Toàn Trung</span>
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-700 text-xs font-medium">
-              <ShieldCheck className="w-3.5 h-3.5 text-slate-500" />
-              <span>{user?.roleName || 'Nhân sự'}</span>
-            </span>
-            {lastFetchedAt && (
-              <span className="text-xs text-slate-400">
-                Cập nhật lúc{' '}
-                {new Date(lastFetchedAt).toLocaleTimeString('vi-VN', {
-                  hour: '2-digit',
-                  minute: '2-digit',
-                })}
-              </span>
-            )}
-          </div>
-          <h1 className="font-display text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
-            Tổng quan
-          </h1>
-          <p className="text-xs text-slate-500 truncate">
-            {cleanScopeDescription ||
-              `Số liệu tổng hợp theo phân quyền của ${user?.fullName || ''}.`}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          <div
-            role="group"
-            aria-label="Chọn kỳ báo cáo"
-            className="inline-flex p-1 rounded-xl bg-slate-100 border border-slate-200/80"
-          >
-            {PERIODS.map((item) => (
-              <button
-                key={item.value}
-                type="button"
-                onClick={() => setPreset(item.value)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
-                  preset === item.value
-                    ? 'bg-white text-[#1E3A8A] shadow-2xs font-bold'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-
+    <div className="space-y-4">
+      {/* 1. Thanh điều hành bao quát toàn hệ thống (không bắt bấm chọn từng tab website) */}
+      <WebsiteDashboardHeader
+        title="Tổng quan điều hành"
+        subtitle={
+          report
+            ? `Bức tranh bao quát toàn hệ thống (${report.fromDate} → ${report.toDate})`
+            : 'Bức tranh bao quát toàn hệ thống'
+        }
+        scope={{ ...scope, websiteId: 'all' }}
+        availableWebsites={report?.availableWebsites || knownWebsites}
+        hideWebsiteTabs={true}
+        comparisonLabel={periodComp ? periodComp.label : null}
+        freshnessMessage={freshnessText}
+        freshnessTone={
+          fetchError
+            ? 'error'
+            : isRefreshing
+              ? 'updating'
+              : report?.todayPreliminaryNotice
+                ? 'warning'
+                : 'ok'
+        }
+        onChangeScope={updateScope}
+        actions={
           <button
             type="button"
-            onClick={() => void loadDashboard(preset, true)}
-            disabled={isLoading || isRefreshing}
-            className="h-9 px-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition disabled:opacity-60"
+            onClick={() => void fetchDashboard({ manual: true })}
+            disabled={isRefreshing}
+            className="inline-flex items-center gap-1.5 min-h-9 px-3.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] disabled:opacity-60"
           >
             <RefreshCw
-              className={`w-3.5 h-3.5 ${isRefreshing || isLoading ? 'animate-spin' : ''}`}
+              aria-hidden="true"
+              className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-[#1E3A8A]' : ''}`}
             />
-            <span>Làm mới</span>
+            <span>{UI_VOCABULARY.actions.refresh}</span>
           </button>
-
-          <a
-            href={`/api/v1/reports/export?preset=${preset}&format=xlsx`}
-            target="_blank"
-            rel="noreferrer"
-            className="h-9 px-3 rounded-xl bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition"
-          >
-            <Download className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Xuất Excel</span>
-          </a>
-
-          <Link
-            href="/leads"
-            className="h-9 px-3.5 rounded-xl bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition"
-          >
-            <span>Quản lý Lead</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
-        </div>
-      </header>
+        }
+      />
 
       {fetchError && (
         <div
           role="alert"
-          className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 flex flex-wrap items-center justify-between gap-3"
+          className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800 flex items-center justify-between gap-3"
         >
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-            <span>
-              <strong>Lỗi tải dữ liệu:</strong> {fetchError}
-            </span>
-          </div>
+          <span>{fetchError}</span>
           <button
             type="button"
-            onClick={() => void loadDashboard(preset, true)}
-            className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold"
+            onClick={() => void fetchDashboard({ manual: true })}
+            className="font-semibold underline shrink-0"
           >
-            Thử lại
+            Thử tải lại
           </button>
         </div>
       )}
 
-      {/* 2. TẦNG 1: 4 THẺ CHỈ SỐ CỐT LÕI (RÕ RÀNG, THOÁNG MẮT, KHÔNG LẶP SỐ LIỆU) */}
-      <section aria-label="4 Chỉ số trọng tâm">
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
-          {/* Card 1: Tiếp nhận & Sàng lọc Lead */}
-          <Link
-            href="/leads"
-            className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs hover:border-blue-300 transition flex flex-col justify-between"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <span className="text-xs font-semibold text-slate-500">
-                  1. Tổng Hồ Sơ Lead Tiếp Nhận
-                </span>
-                <div className="mt-1.5 flex items-baseline gap-2">
-                  <strong className="font-display text-3xl font-bold text-slate-900 tabular-nums">
-                    {isLoading && !report ? '—' : overview.totalLeadsL1}
-                  </strong>
-                  <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200/80 text-[#1E3A8A] text-xs font-semibold">
-                    {cleanRatePct}% Lead sạch
-                  </span>
-                </div>
-              </div>
-              <div className="w-10 h-10 rounded-xl bg-blue-50 text-[#1E3A8A] border border-blue-100 grid place-items-center shrink-0">
-                <Users className="w-5 h-5" />
-              </div>
-            </div>
-
-            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-              <span>
-                Hiệu quả (L3): <strong className="text-slate-900">{overview.effectiveLeadsL3}</strong>
-              </span>
-              <span>
-                Đang tư vấn: <strong className="text-[#1E3A8A]">{overview.activeLeadsCount}</strong>
-              </span>
-            </div>
-          </Link>
-
-          {/* Card 2: Báo giá & Lộ trình theo dõi */}
-          <Link
-            href="/leads?status=quote_sent"
-            className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs hover:border-amber-300 transition flex flex-col justify-between"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <span className="text-xs font-semibold text-slate-500">
-                  2. Báo Giá Đang Theo Dõi
-                </span>
-                <div className="mt-1.5 flex items-baseline gap-2">
-                  <strong className="font-display text-3xl font-bold text-slate-900 tabular-nums">
-                    {isLoading && !report ? '—' : overview.quoteSentCount}
-                  </strong>
-                  <span
-                    className={`px-2 py-0.5 rounded-full border text-xs font-semibold ${
-                      overview.overdue7DaysQuoteCount > 0
-                        ? 'bg-amber-50 border-amber-200 text-amber-800'
-                        : 'bg-slate-100 border-slate-200 text-slate-600'
-                    }`}
-                  >
-                    {overview.overdue7DaysQuoteCount > 0
-                      ? `${overview.overdue7DaysQuoteCount} cần liên hệ lại`
-                      : 'Đúng tiến độ'}
-                  </span>
-                </div>
-              </div>
-              <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 border border-amber-200/70 grid place-items-center shrink-0">
-                <Clock className="w-5 h-5" />
-              </div>
-            </div>
-
-            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-              <span>
-                Chờ phản hồi: <strong className="text-slate-900">{overview.unansweredQuoteCount}</strong>
-              </span>
-              <span>
-                Đang soạn BG: <strong className="text-blue-700">{overview.quotingCount}</strong>
-              </span>
-            </div>
-          </Link>
-
-          {/* Card 3: Dự án Chốt thành công */}
-          <Link
-            href="/leads?status=won"
-            className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs hover:border-emerald-300 transition flex flex-col justify-between"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <span className="text-xs font-semibold text-slate-500">
-                  3. Dự Án Chốt Thành Công
-                </span>
-                <div className="mt-1.5 flex items-baseline gap-2">
-                  <strong className="font-display text-3xl font-bold text-slate-900 tabular-nums">
-                    {isLoading && !report ? '—' : overview.wonCount}
-                  </strong>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-bold tabular-nums">
-                    Tỷ lệ chốt {overview.winRateText}
-                  </span>
-                </div>
-              </div>
-              <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 border border-emerald-200/70 grid place-items-center shrink-0">
-                <CheckCircle2 className="w-5 h-5" />
-              </div>
-            </div>
-
-            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-              <span>
-                Thất bại / Dừng: <strong className="text-slate-900">{overview.lostCount}</strong>
-              </span>
-              <span>
-                Chờ tiếp nhận: <strong className="text-amber-700">{overview.unreceivedLeadsCount}</strong>
-              </span>
-            </div>
-          </Link>
-
-          {/* Card 4: Quảng cáo, SEO & Kỹ thuật 3D */}
-          <Link
-            href={card4Href}
-            className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs hover:border-violet-300 transition flex flex-col justify-between"
-          >
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <span className="text-xs font-semibold text-slate-500">
-                  4. Quảng Cáo, SEO &amp; Phối Cảnh 3D
-                </span>
-                <div className="mt-1.5 flex items-baseline gap-2">
-                  <strong className="font-display text-2xl font-bold text-slate-900 tabular-nums truncate">
-                    {marketing?.totalAdsSpend
-                      ? formatMoneyCompact(marketing.totalAdsSpend)
-                      : `${design?.totalRequests ?? 0} bản vẽ`}
-                  </strong>
-                  {marketing?.cplEffective ? (
-                    <span className="px-2 py-0.5 rounded-full bg-violet-50 border border-violet-200 text-violet-700 text-xs font-semibold whitespace-nowrap">
-                      CPL: {formatMoneyCompact(marketing.cplEffective)}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-              <div className="w-10 h-10 rounded-xl bg-violet-50 text-violet-700 border border-violet-200/70 grid place-items-center shrink-0">
-                <Target className="w-5 h-5" />
-              </div>
-            </div>
-
-            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
-              <span>
-                Bài SEO: <strong className="text-slate-900">{marketing?.publishedSeoArticles ?? 0} bài</strong>
-              </span>
-              <span>
-                Phối cảnh 3D: <strong className="text-teal-700">{design?.completed3dCount ?? 0} hoàn tất</strong>
-              </span>
-            </div>
-          </Link>
-        </div>
-      </section>
-
-      {/* 3. TẦNG 2: XU HƯỚNG TIẾP NHẬN & SẢN PHẨM NỔI BẬT (8 CỘT) + VIỆC CẦN ƯU TIÊN HÔM NAY (4 CỘT) */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-        {/* Cột Trái (8 cột): Xu hướng theo ngày + Top Sản phẩm quan tâm */}
-        <div className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-5">
-          {/* Phần A: Biểu đồ Nhịp độ Tiếp nhận & Chốt đơn theo ngày */}
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h2 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
-                  <TrendingUp className="w-4 h-4 text-[#1E3A8A]" />
-                  <span>Xu Hướng Tiếp Nhận Lead &amp; Chốt Đơn Theo Ngày</span>
+      {/* ===================================================================== */}
+      {/* KHỐI 1 (ĐƯA LÊN ĐẦU TIÊN): BẢNG CÔNG VIỆC ƯU TIÊN CẦN LÀM TRƯỚC        */}
+      {/* ===================================================================== */}
+      <section
+        aria-labelledby="dashboard-priority-tasks-heading"
+        className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs space-y-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200/80 text-amber-700 grid place-items-center shrink-0">
+              <ClipboardCheck aria-hidden="true" className="w-4 h-4" />
+            </span>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 id="dashboard-priority-tasks-heading" className="text-sm sm:text-base font-bold text-slate-900">
+                  Công việc ưu tiên cần xử lý trước
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Biến động số lượng hồ sơ tiếp nhận mới và số dự án chốt thành công theo ngày
-                </p>
-              </div>
-              <div className="flex items-center gap-3 text-xs font-medium">
-                <span className="inline-flex items-center gap-1.5 text-slate-600">
-                  <span className="w-2.5 h-2.5 rounded-xs bg-[#1E3A8A]" /> Lead tiếp nhận
-                </span>
-                <span className="inline-flex items-center gap-1.5 text-emerald-700">
-                  <span className="w-2.5 h-2.5 rounded-xs bg-emerald-500" /> Chốt thành công
-                </span>
-              </div>
-            </div>
-
-            {leadTrend.length === 0 ? (
-              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-500 text-center">
-                Chưa có phát sinh Lead trong khoảng thời gian đã chọn.
-              </div>
-            ) : (
-              <div className="grid grid-cols-7 sm:grid-cols-14 gap-1.5 items-end pt-2">
-                {(() => {
-                  const maxDay = Math.max(...leadTrend.map((d) => d.totalL1), 1);
-                  return leadTrend.map((pt) => {
-                    const heightPct = Math.max(16, Math.round((pt.totalL1 / maxDay) * 100));
-                    return (
-                      <div
-                        key={pt.date}
-                        className="flex flex-col items-center gap-1"
-                        title={`Ngày ${pt.date}: Tổng ${pt.totalL1} Lead (Hợp lệ: ${pt.validL2}, Chốt: ${pt.wonCount})`}
-                      >
-                        <span className="text-[11px] font-semibold text-slate-700 tabular-nums">
-                          {pt.totalL1}
-                        </span>
-                        <div className="w-full h-20 bg-slate-100 rounded-lg flex items-end p-1 gap-0.5">
-                          <div
-                            className="flex-1 rounded bg-[#1E3A8A]/85 transition-all"
-                            style={{ height: `${heightPct}%` }}
-                          />
-                          {pt.wonCount > 0 && (
-                            <div
-                              className="w-1.5 rounded bg-emerald-500"
-                              style={{
-                                height: `${Math.max(25, Math.round((pt.wonCount / maxDay) * 100))}%`,
-                              }}
-                            />
-                          )}
-                        </div>
-                        <span className="text-[10px] font-medium text-slate-500 tabular-nums">
-                          {pt.label}
-                        </span>
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
-            )}
-          </div>
-
-          {/* Phần B: Top Dòng Sản phẩm LED & Bảng điện tử được hỏi nhiều nhất */}
-          <div className="pt-4 border-t border-slate-100 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                <BarChart3 className="w-4 h-4 text-[#1E3A8A]" />
-                <span>Dòng Sản Phẩm Màn Hình LED &amp; Bảng Điện Tử Nổi Bật</span>
-              </span>
-              <button
-                type="button"
-                onClick={() => setActiveTab('products')}
-                className="text-xs font-semibold text-[#1E3A8A] hover:underline"
-              >
-                Xem chi tiết sản phẩm →
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              {productInsights.slice(0, 4).map((pi) => {
-                const maxInq = Math.max(...productInsights.map((p) => p.inquiryCount), 1);
-                const pct = Math.max(12, Math.round((pi.inquiryCount / maxInq) * 100));
-                const isLed = pi.category === 'MAN_HINH_LED';
-                return (
-                  <div
-                    key={pi.productId}
-                    className="p-3 rounded-xl bg-slate-50/70 border border-slate-200/80 space-y-1.5"
-                  >
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <strong className="text-slate-900 font-semibold truncate">
-                        {pi.productName}
-                      </strong>
-                      <div className="flex items-center gap-1.5 shrink-0 tabular-nums">
-                        <span className="text-slate-600 font-medium">{pi.inquiryCount} hồ sơ</span>
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold text-[11px]">
-                          {pi.wonCount} chốt
-                        </span>
-                      </div>
-                    </div>
-                    <div className="w-full h-1.5 rounded-full bg-slate-200/80 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${isLed ? 'bg-[#1E3A8A]' : 'bg-violet-600'}`}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* Cột Phải (4 cột): Trung Tâm Việc Cần Ưu Tiên Hôm Nay */}
-        <div className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-4">
-          <div className="space-y-3.5">
-            <div className="flex items-center justify-between gap-2">
-              <div>
-                <h2 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-amber-600" />
-                  <span>Ưu Tiên Xử Lý Hôm Nay</span>
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Các đầu việc cần phản hồi sớm theo phân quyền
-                </p>
-              </div>
-              <span className="px-2.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold shrink-0">
-                {actionableTasks.filter((t) => t.count > 0).length} đầu việc
-              </span>
-            </div>
-
-            <div className="space-y-2">
-              {actionableTasks.map((task) => {
-                const hasWork = task.count > 0;
-                return (
-                  <Link
-                    key={task.id}
-                    href={task.href}
-                    className={`p-3 rounded-xl border transition flex items-center justify-between gap-3 ${
-                      hasWork
-                        ? 'bg-amber-50/40 border-amber-200/90 hover:bg-amber-50/80'
-                        : 'bg-slate-50/60 border-slate-200/80 hover:bg-slate-100/70'
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <h3 className="text-xs font-bold text-slate-900 truncate">
-                        {task.title}
-                      </h3>
-                      <p className="text-[11px] text-slate-500 truncate mt-0.5">
-                        {task.description}
-                      </p>
-                    </div>
-                    <span
-                      className={`px-2.5 py-1 rounded-lg text-xs font-bold whitespace-nowrap shrink-0 ${
-                        hasWork
-                          ? 'bg-white border border-amber-300 text-amber-800 shadow-2xs'
-                          : 'bg-emerald-50 border border-emerald-200 text-emerald-700'
-                      }`}
-                    >
-                      {hasWork ? `${task.count} hồ sơ` : 'Hoàn tất'}
-                    </span>
-                  </Link>
-                );
-              })}
-            </div>
-
-            {/* Danh sách Báo giá cần gọi lại ngay */}
-            {canViewSalesTeam && (
-              <div className="pt-3 border-t border-slate-100 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Báo giá chờ phản hồi ({unansweredQuotes.length})</span>
-                  </span>
-                  <Link
-                    href="/leads?status=quote_sent"
-                    className="text-xs font-semibold text-[#1E3A8A] hover:underline"
-                  >
-                    Tất cả →
-                  </Link>
-                </div>
-
-                {unansweredQuotes.length === 0 ? (
-                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 text-xs text-slate-500 text-center">
-                    Không có báo giá nào đang tồn đọng.
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {unansweredQuotes.slice(0, 3).map((q) => (
-                      <div
-                        key={q.leadId}
-                        className="p-2.5 rounded-xl bg-slate-50/80 border border-slate-200/90 flex items-center justify-between gap-2"
-                      >
-                        <div className="min-w-0">
-                          <strong className="text-xs font-bold text-slate-900 block truncate">
-                            {q.companyOrContact}
-                          </strong>
-                          <span className="text-[11px] text-slate-500 block truncate">
-                            {q.assignedSalesName} · Chờ {q.daysWaiting} ngày
-                          </span>
-                        </div>
-                        <Link
-                          href={`/leads?highlight=${q.leadId}`}
-                          className="h-7 px-2.5 rounded-lg bg-white hover:bg-blue-50 border border-slate-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center shrink-0"
-                        >
-                          Chi tiết
-                        </Link>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
-            <span>Thông báo &amp; Báo cáo phòng ban</span>
-            <Link
-              href="/notifications"
-              className="font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
-            >
-              <span>Mở Hộp thư &amp; Soạn báo cáo</span>
-              <ArrowRight className="w-3 h-3" />
-            </Link>
-          </div>
-        </div>
-      </section>
-
-      {/* 4. TẦNG 3: BẢNG ĐIỀU PHỐI ĐA CHIỀU GỌN GÀNG THEO TAB (KHÔNG XẾP CHỒNG DÀI LÊ THÊ) */}
-      <section className="bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
-        {/* Thanh Tab Chuyển Đổi 4 Góc Nhìn */}
-        <div className="px-5 pt-3.5 border-b border-slate-200 bg-slate-50/60 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1 overflow-x-auto">
-            {[
-              {
-                id: 'leads' as const,
-                label: 'Hồ sơ Lead mới nhất',
-                count: detailedLeads.length,
-                icon: FileSpreadsheet,
-              },
-              ...(canViewSalesTeam
-                ? [
-                    {
-                      id: 'sales' as const,
-                      label: 'Hiệu suất Đội ngũ Sales',
-                      count: salesPerformance.length,
-                      icon: Users,
-                    },
-                  ]
-                : []),
-              ...(canViewMarketingSummary
-                ? [
-                    {
-                      id: 'campaigns' as const,
-                      label: 'Chiến dịch Quảng cáo & Nguồn',
-                      count: marketing?.bySourceCampaign.length ?? 0,
-                      icon: Megaphone,
-                    },
-                  ]
-                : []),
-              {
-                id: 'products' as const,
-                label: 'Nhu cầu Sản phẩm LED & Kênh',
-                count: productInsights.length,
-                icon: BarChart3,
-              },
-            ].map((tab) => {
-              const active = activeTab === tab.id;
-              const Icon = tab.icon;
-              return (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`relative inline-flex items-center gap-2 px-3.5 py-2.5 text-xs sm:text-sm font-semibold whitespace-nowrap transition ${
-                    active ? 'text-[#1E3A8A]' : 'text-slate-600 hover:text-slate-900'
+                <span
+                  className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                    actionableTasks.length > 0
+                      ? 'bg-amber-100 text-amber-900 border border-amber-300/80'
+                      : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                   }`}
                 >
-                  <Icon className="w-4 h-4" />
-                  <span>{tab.label}</span>
-                  <span
-                    className={`px-1.5 py-0.2 rounded-full text-[11px] font-semibold ${
-                      active
-                        ? 'bg-blue-100 text-[#1E3A8A]'
-                        : 'bg-slate-200/70 text-slate-600'
-                    }`}
-                  >
-                    {tab.count}
-                  </span>
-                  {active && (
-                    <span className="absolute left-2 right-2 -bottom-px h-0.5 rounded-full bg-[#1E3A8A]" />
-                  )}
-                </button>
+                  {actionableTasks.length > 0
+                    ? `${actionableTasks.length} hạng mục tồn đọng`
+                    : 'Không có tồn đọng'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500">
+                Tổng hợp đầu việc phát sinh thật từ Kinh doanh, SEO, Thiết kế AI và Kết nối dữ liệu để xử lý ngay trong ca
+              </p>
+            </div>
+          </div>
+
+          {/* Chip kiểm soát chất lượng dữ liệu đặt gọn ngay trên thanh tiêu đề */}
+          {dq && (
+            <div className="flex flex-wrap items-center gap-1.5 text-xs">
+              <span className="text-slate-400 font-medium inline-flex items-center gap-1 mr-0.5">
+                <ShieldAlert aria-hidden="true" className="w-3.5 h-3.5 text-slate-400" />
+                Rà soát nhanh:
+              </span>
+              <Link
+                href={canViewLeads ? `/leads?missingProduct=1&${scopeQueryForLinks}` : '/reports'}
+                className="px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-medium transition"
+              >
+                Chưa gắn sản phẩm: <strong className="tabular-nums">{dq.missingProductCount}</strong>
+              </Link>
+              <Link
+                href={canViewLeads ? `/leads?missingWebsite=1&${scopeQueryForLinks}` : '/reports'}
+                className="px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-medium transition"
+              >
+                Chưa rõ website: <strong className="tabular-nums">{dq.missingWebsiteCount}</strong>
+              </Link>
+              <Link
+                href="/settings?tab=sync"
+                className={`px-2.5 py-1 rounded-lg border font-semibold transition ${
+                  dq.failingConnectionsCount > 0
+                    ? 'bg-rose-50 border-rose-200 text-rose-700'
+                    : 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                }`}
+              >
+                {dq.failingConnectionsCount > 0
+                  ? `${dq.failingConnectionsCount} kết nối lỗi`
+                  : 'Đồng bộ ổn định'}
+              </Link>
+            </div>
+          )}
+        </div>
+
+        {isLoading && !report ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+            {[1, 2, 3, 4].map((k) => (
+              <div key={k} className="h-28 rounded-xl bg-slate-50 border border-slate-100 animate-pulse" />
+            ))}
+          </div>
+        ) : actionableTasks.length === 0 ? (
+          <div className="rounded-xl bg-emerald-50/60 border border-emerald-200/80 px-4 py-3.5 flex items-center gap-2.5 text-xs text-emerald-900 font-medium">
+            <CheckCircle2 aria-hidden="true" className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>Toàn bộ đầu việc ưu tiên trong kỳ đang chọn đều đã được xử lý gọn gàng.</span>
+          </div>
+        ) : (
+          <div
+            className={`grid grid-cols-1 md:grid-cols-2 ${
+              actionableTasks.length >= 4
+                ? 'xl:grid-cols-4'
+                : actionableTasks.length === 3
+                  ? 'xl:grid-cols-3'
+                  : 'xl:grid-cols-2'
+            } gap-3`}
+          >
+            {actionableTasks.map((task) => {
+              const isCrit = task.severity === 'critical';
+              return (
+                <Link
+                  key={task.id}
+                  href={task.href}
+                  className={`group rounded-xl border p-3.5 flex flex-col justify-between gap-2.5 transition-all hover:shadow-sm focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
+                    isCrit
+                      ? 'bg-gradient-to-br from-rose-50/70 via-white to-white border-rose-200/90 hover:border-rose-400'
+                      : 'bg-gradient-to-br from-amber-50/55 via-white to-white border-amber-200/90 hover:border-[#1E3A8A]/60'
+                  }`}
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-bold ${
+                          isCrit
+                            ? 'bg-rose-100 text-rose-800'
+                            : 'bg-amber-100 text-amber-900'
+                        }`}
+                      >
+                        <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
+                        <span>{isCrit ? 'Ưu tiên xử lý ngay' : 'Cần kiểm tra'}</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-semibold">
+                        {task.moduleLabel}
+                      </span>
+                    </div>
+
+                    <div className="mt-2.5 flex items-baseline justify-between gap-2">
+                      <h3 className="text-xs sm:text-sm font-bold text-slate-900 group-hover:text-[#0F275C]">
+                        {task.title}
+                      </h3>
+                      <span
+                        className={`text-xl font-extrabold tabular-nums shrink-0 ${
+                          isCrit ? 'text-rose-700' : 'text-[#0F275C]'
+                        }`}
+                      >
+                        {task.count}
+                      </span>
+                    </div>
+
+                    <p className="text-xs text-slate-600 mt-1 line-clamp-2">{task.description}</p>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-[#1E3A8A]">
+                    <span>Đi tới xử lý ngay</span>
+                    <ArrowRight
+                      aria-hidden="true"
+                      className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5"
+                    />
+                  </div>
+                </Link>
               );
             })}
           </div>
-
-          <div className="pb-2">
-            {activeTab === 'leads' && (
-              <Link
-                href="/leads"
-                className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
-              >
-                <span>Xem tất cả hồ sơ Lead</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
-            )}
-            {activeTab === 'sales' && (
-              <Link
-                href="/reports"
-                className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
-              >
-                <span>Mở Báo cáo chi tiết</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
-            )}
-            {activeTab === 'campaigns' && (
-              <Link
-                href={canViewSeoAds ? '/ads' : '/tracking'}
-                className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
-              >
-                <span>{canViewSeoAds ? 'Mở Quản lý Quảng cáo & SEO' : 'Mở Chiến dịch Marketing'}</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
-            )}
-          </div>
-        </div>
-
-        {/* TAB 1: DANH SÁCH HỒ SƠ LEAD MỚI NHẤT */}
-        {activeTab === 'leads' && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs sm:text-sm">
-              <thead>
-                <tr className="bg-slate-50/80 text-slate-600 border-b border-slate-200/80 text-[11px] font-bold uppercase tracking-wider">
-                  <th className="py-2.5 px-4 whitespace-nowrap">Mã Lead</th>
-                  <th className="py-2.5 px-4 min-w-[200px]">Khách hàng / Đơn vị</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Số điện thoại</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Kênh &amp; Nguồn</th>
-                  <th className="py-2.5 px-3.5 min-w-[180px]">Sản phẩm quan tâm</th>
-                  <th className="py-2.5 px-3 whitespace-nowrap">Sales phụ trách</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Trạng thái</th>
-                  <th className="py-2.5 px-4 text-right whitespace-nowrap">Thao tác</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {detailedLeads.slice(0, 8).map((row) => {
-                  const statusText = row.pipelineStatusLabel || '';
-                  const isSpam = statusText.toLowerCase().includes('spam');
-                  const isWon = statusText.includes('Chốt thành công');
-                  const isLost = statusText.includes('Thất bại');
-                  const isQuoteSent = statusText.includes('Đã gửi báo giá');
-                  const isQuoting = statusText.includes('Đang soạn báo giá');
-
-                  const statusPill = isSpam
-                    ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                    : isWon
-                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                      : isLost
-                        ? 'bg-slate-100 text-slate-600 border border-slate-200'
-                        : isQuoteSent
-                          ? 'bg-amber-50 text-amber-800 border border-amber-200'
-                          : isQuoting
-                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                            : 'bg-violet-50 text-violet-700 border border-violet-200';
-
-                  return (
-                    <tr
-                      key={row.leadCode}
-                      className="hover:bg-slate-50/80 transition-colors"
-                    >
-                      <td className="py-2.5 px-4 tabular-nums font-bold text-[#1E3A8A] whitespace-nowrap">
-                        {row.leadCode}
-                      </td>
-                      <td className="py-2.5 px-4 font-semibold text-slate-900">
-                        {row.companyOrCustomer.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '')}
-                      </td>
-                      <td className="py-2.5 px-3 tabular-nums font-medium text-slate-700 whitespace-nowrap">
-                        {row.phone}
-                      </td>
-                      <td className="py-2.5 px-3 whitespace-nowrap">
-                        <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-xs font-medium">
-                          {row.contactChannel}
-                        </span>
-                        <span className="ml-1 px-2 py-0.5 rounded bg-blue-50/80 text-[#1E3A8A] text-xs font-medium">
-                          {row.marketingSource}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-3.5">
-                        <div className="flex flex-wrap gap-1">
-                          {row.productsText
-                            .split(',')
-                            .map((s) => s.trim())
-                            .filter(Boolean)
-                            .map((p, i) => (
-                              <span
-                                key={i}
-                                className="px-2 py-0.5 rounded bg-slate-100 border border-slate-200/80 text-slate-700 text-[11px] font-medium whitespace-nowrap"
-                              >
-                                {p}
-                              </span>
-                            ))}
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 font-medium text-slate-700 whitespace-nowrap">
-                        {row.assignedSalesName}
-                      </td>
-                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                        <span
-                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap ${statusPill}`}
-                        >
-                          {row.pipelineStatusLabel}
-                        </span>
-                      </td>
-                      <td className="py-2.5 px-4 text-right whitespace-nowrap">
-                        <Link
-                          href={`/leads?search=${encodeURIComponent(row.leadCode)}`}
-                          className="h-7 px-3 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center shadow-2xs transition"
-                        >
-                          Chi tiết
-                        </Link>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
         )}
+      </section>
 
-        {/* TAB 2: HIỆU SUẤT ĐỘI NGŨ KINH DOANH */}
-        {activeTab === 'sales' && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs sm:text-sm">
-              <thead>
-                <tr className="bg-slate-50/80 text-slate-600 border-b border-slate-200/80 text-[11px] uppercase tracking-wider font-bold">
-                  <th className="py-2.5 px-4 whitespace-nowrap">Nhân sự Kinh doanh</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Trạng thái</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Tổng hồ sơ</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Vừa nhận</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Đang soạn BG</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Đã gửi BG</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Cần liên hệ (&ge;7d)</th>
-                  <th className="py-2.5 px-3 text-center whitespace-nowrap">Chốt Won</th>
-                  <th className="py-2.5 px-4 text-right whitespace-nowrap">Tỷ lệ chốt</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {salesPerformance.map((sp) => (
-                  <tr key={sp.salesUserId} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-2.5 px-4 font-semibold text-slate-900 whitespace-nowrap">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`w-2 h-2 rounded-full shrink-0 ${
-                            sp.isOnline ? 'bg-emerald-500' : 'bg-slate-300'
-                          }`}
-                        />
-                        <span>{sp.salesFullName}</span>
-                      </div>
-                    </td>
-                    <td className="py-2.5 px-3 text-center whitespace-nowrap">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                          sp.isReceivingLeads
-                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                            : 'bg-slate-100 text-slate-600'
-                        }`}
-                      >
-                        {sp.isReceivingLeads ? 'Đang nhận Lead' : 'Tạm ngưng'}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-3 text-center tabular-nums font-bold text-slate-900">
-                      {sp.totalLeads}
-                    </td>
-                    <td className="py-2.5 px-3 text-center tabular-nums text-slate-700">
-                      {sp.newLeads}
-                    </td>
-                    <td className="py-2.5 px-3 text-center tabular-nums text-blue-700 font-medium">
-                      {sp.quotingLeads}
-                    </td>
-                    <td className="py-2.5 px-3 text-center tabular-nums text-amber-700 font-medium">
-                      {sp.quoteSentLeads}
-                    </td>
-                    <td className="py-2.5 px-3 text-center tabular-nums">
-                      {sp.unansweredOverdue7d > 0 ? (
-                        <span className="px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 text-[11px] font-bold">
-                          {sp.unansweredOverdue7d}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">0</span>
-                      )}
-                    </td>
-                    <td className="py-2.5 px-3 text-center tabular-nums font-bold text-emerald-700">
-                      {sp.wonLeads}
-                    </td>
-                    <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
-                      <span className="px-2.5 py-0.5 rounded-md bg-slate-100 text-slate-800 font-bold text-xs">
-                        {sp.winRateText}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* ===================================================================== */}
+      {/* KHỐI 2: BỨC TRANH BAO QUÁT 4 MẢNG NGHIỆP VỤ TOÀN CÔNG TY              */}
+      {/* ===================================================================== */}
+      <section aria-label="Bức tranh bao quát 4 mảng nghiệp vụ" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
+        {/* Mảng 1: Kinh doanh & Phễu chốt đơn */}
+        <Link
+          href={canViewLeads ? `/leads?${scopeQueryForLinks}` : `/reports?${scopeQueryForLinks}`}
+          className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <BarChart3 aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
+              Phễu Kinh doanh
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-[11px] font-semibold">
+              Chốt: {report?.overview.winRateText || '—'}
+            </span>
           </div>
-        )}
-
-        {/* TAB 3: CHIẾN DỊCH QUẢNG CÁO & NGUỒN LEAD */}
-        {activeTab === 'campaigns' && canViewMarketingSummary && marketing && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-xs sm:text-sm">
-              <thead>
-                <tr className="bg-slate-50/80 border-b border-slate-200/80 text-[11px] font-bold text-slate-600 uppercase tracking-wider">
-                  <th className="py-2.5 px-4 whitespace-nowrap">Nguồn tiếp thị</th>
-                  <th className="py-2.5 px-4">Chiến dịch Quảng cáo / Nguồn thu hút</th>
-                  <th className="py-2.5 px-3.5 text-right whitespace-nowrap">Chi phí Ads</th>
-                  <th className="py-2.5 px-3.5 text-center whitespace-nowrap">Chuyển đổi Ads</th>
-                  <th className="py-2.5 px-3.5 text-center whitespace-nowrap">Lead (L1)</th>
-                  <th className="py-2.5 px-3.5 text-center whitespace-nowrap">Hợp lệ (L2)</th>
-                  <th className="py-2.5 px-3.5 text-center whitespace-nowrap">Hiệu quả (L3)</th>
-                  <th className="py-2.5 px-4 text-right whitespace-nowrap">Đã chốt (Won)</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {marketing.bySourceCampaign.map((row) => (
-                  <tr key={row.key} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-2.5 px-4 whitespace-nowrap">
-                      <span
-                        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                          row.sourceName === 'Google Ads'
-                            ? 'bg-blue-50 text-blue-700 border border-blue-200'
-                            : row.sourceName === 'Facebook Ads'
-                              ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
-                              : 'bg-slate-100 text-slate-700 border border-slate-200'
-                        }`}
-                      >
-                        {row.sourceName}
-                      </span>
-                    </td>
-                    <td className="py-2.5 px-4 font-semibold text-slate-900">
-                      {row.campaignName}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-right font-semibold text-slate-900 tabular-nums whitespace-nowrap">
-                      {formatMoney(row.spend)}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-center tabular-nums text-slate-600">
-                      {row.platformConversions > 0 ? row.platformConversions : '—'}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-center font-bold text-slate-900 tabular-nums">
-                      {row.crmLeadsL1}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-center font-medium text-blue-700 tabular-nums">
-                      {row.crmValidL2}
-                    </td>
-                    <td className="py-2.5 px-3.5 text-center font-bold text-[#1E3A8A] tabular-nums">
-                      {row.crmEffectiveL3}
-                    </td>
-                    <td className="py-2.5 px-4 text-right tabular-nums whitespace-nowrap">
-                      <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold text-xs">
-                        {row.wonCount} Won
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="text-2xl font-extrabold text-slate-900 tabular-nums">
+              <AnimatedMetricNumber value={report?.overview.totalLeadsL1 ?? null} />
+            </span>
+            <span className="text-xs text-slate-500">
+              cơ hội (Hợp lệ: <strong className="text-slate-800">{report?.overview.validLeadsL2 ?? 0}</strong>)
+            </span>
           </div>
-        )}
+          <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <span>
+              Đang báo giá: <strong className="text-slate-900">{(report?.overview.quotingCount ?? 0) + (report?.overview.quoteSentCount ?? 0)}</strong> · Thành công:{' '}
+              <strong className="text-emerald-700">{report?.overview.wonCount ?? 0}</strong>
+            </span>
+            <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform" />
+          </div>
+        </Link>
 
-        {/* TAB 4: NHU CẦU SẢN PHẨM LED & KÊNH LIÊN HỆ */}
-        {activeTab === 'products' && (
-          <div className="p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
-            <div className="lg:col-span-7 space-y-2.5">
-              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
-                Top Dòng Sản Phẩm Khách Hàng Quan Tâm Báo Giá
-              </span>
-              <div className="space-y-2">
-                {productInsights.map((pi) => {
-                  const maxInq = Math.max(...productInsights.map((p) => p.inquiryCount), 1);
-                  const pct = Math.max(12, Math.round((pi.inquiryCount / maxInq) * 100));
-                  const isLed = pi.category === 'MAN_HINH_LED';
-                  return (
-                    <div
-                      key={pi.productId}
-                      className="p-3 rounded-xl bg-slate-50/70 border border-slate-200/80 space-y-1.5"
-                    >
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-semibold shrink-0 ${
-                              isLed
-                                ? 'bg-blue-50 text-[#1E3A8A] border border-blue-200/70'
-                                : 'bg-violet-50 text-violet-800 border border-violet-200/70'
-                            }`}
-                          >
-                            {isLed ? 'Màn hình LED' : 'Bảng điện tử'}
-                          </span>
-                          <strong className="text-slate-900 font-semibold truncate">
-                            {pi.productName}
-                          </strong>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0 tabular-nums">
-                          <span className="text-slate-700 font-semibold">
-                            {pi.inquiryCount} hồ sơ
-                          </span>
-                          <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-700 font-semibold text-[11px]">
-                            {pi.wonCount} chốt
-                          </span>
-                        </div>
-                      </div>
-                      <div className="w-full h-1.5 rounded-full bg-slate-200/80 overflow-hidden">
-                        <div
-                          className={`h-full rounded-full ${
-                            isLed ? 'bg-[#1E3A8A]' : 'bg-violet-600'
-                          }`}
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
+        {/* Mảng 2: Lưu lượng & Tìm kiếm tự nhiên toàn hệ thống */}
+        <Link
+          href={`/ads?${scopeQueryForLinks}`}
+          className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <Globe aria-hidden="true" className="w-4 h-4 text-emerald-600" />
+              Lưu lượng &amp; SEO Toàn hệ thống
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-blue-50 text-[#1E3A8A] text-[11px] font-semibold">
+              {report?.availableWebsites?.length || 4} website
+            </span>
+          </div>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="text-2xl font-extrabold text-slate-900 tabular-nums">
+              <AnimatedMetricNumber value={totalSystemPageViews} />
+            </span>
+            <span className="text-xs text-slate-500">
+              lượt xem trang · <strong className="text-emerald-700 tabular-nums">{totalSystemGscClicks?.toLocaleString('vi-VN') ?? '—'}</strong> click Google
+            </span>
+          </div>
+          <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <span>
+              Bài SEO đã đăng: <strong className="text-slate-900">{report?.marketingSummary.publishedSeoArticles ?? 0}</strong> · Bản nháp:{' '}
+              <strong className="text-amber-700">{report?.marketingSummary.draftSeoArticles ?? 0}</strong>
+            </span>
+            <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform" />
+          </div>
+        </Link>
+
+        {/* Mảng 3: Chiến dịch & Hiệu suất Kênh thu hút */}
+        <Link
+          href={`/tracking?${scopeQueryForLinks}`}
+          className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <Megaphone aria-hidden="true" className="w-4 h-4 text-indigo-600" />
+              Chiến dịch &amp; Kênh thu hút
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-semibold">
+              {report?.byChannel?.filter((c) => c.count > 0).length || 0} kênh phát sinh
+            </span>
+          </div>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="text-2xl font-extrabold text-slate-900 tabular-nums">
+              {report?.marketingSummary.totalAdsSpend
+                ? `${Math.round(Number(report.marketingSummary.totalAdsSpend.formattedDecimal || 0)).toLocaleString('vi-VN')} ₫`
+                : `${report?.marketingSummary.effectiveLeadsFromAds ?? 0} Lead Ads`}
+            </span>
+            <span className="text-xs text-slate-500 truncate">
+              {report?.marketingSummary.totalAdsSpend ? 'chi tiêu Ads' : 'ghi nhận từ GCLID / UTM'}
+            </span>
+          </div>
+          <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <span className="truncate">
+              {(report?.byChannel || [])
+                .filter((c) => c.count > 0)
+                .slice(0, 2)
+                .map((c) => `${c.label}: ${c.count}`)
+                .join(' · ') || 'Xem phân tích đa kênh'}
+            </span>
+            <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform shrink-0" />
+          </div>
+        </Link>
+
+        {/* Mảng 4: Thiết kế AI & Phối cảnh 3D */}
+        <Link
+          href="/design"
+          className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
+              <Sparkles aria-hidden="true" className="w-4 h-4 text-violet-600" />
+              Thiết kế AI &amp; Phối cảnh
+            </span>
+            <span className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[11px] font-semibold">
+              TB: {report?.designSummary.avgProcessingSecText || '—'}
+            </span>
+          </div>
+          <div className="flex items-baseline gap-2 mt-0.5">
+            <span className="text-2xl font-extrabold text-slate-900 tabular-nums">
+              <AnimatedMetricNumber value={report?.designSummary.totalRequests ?? 0} />
+            </span>
+            <span className="text-xs text-slate-500">
+              yêu cầu (Đang chờ: <strong className="text-amber-700">{report?.designSummary.pendingCount ?? 0}</strong>)
+            </span>
+          </div>
+          <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
+            <span>
+              Hoàn tất: <strong className="text-slate-900">{(report?.designSummary.completed3dCount ?? 0) + (report?.designSummary.completedBannerCount ?? 0)}</strong> bản vẽ 3D / Banner
+            </span>
+            <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform" />
+          </div>
+        </Link>
+      </section>
+
+      {/* ===================================================================== */}
+      {/* KHỐI 3: SO SÁNH ĐỒNG THỜI TOÀN BỘ WEBSITE (7/12) + NHỊP ĐỘ & SALES (5/12) */}
+      {/* ===================================================================== */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch">
+        {/* 7/12: Bức tranh song song tất cả Website (nhìn 1 lần thấy toàn bộ, không phải bấm từng tab) */}
+        <section
+          aria-labelledby="dashboard-websites-matrix-heading"
+          className="xl:col-span-7 rounded-2xl bg-white border border-slate-200/90 shadow-2xs overflow-hidden flex flex-col justify-between"
+        >
+          <div>
+            <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50">
+              <div className="flex items-center gap-2">
+                <Globe aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
+                <h2 id="dashboard-websites-matrix-heading" className="text-sm font-bold text-slate-900">
+                  Hiệu suất đồng thời toàn bộ hệ thống Website
+                </h2>
               </div>
+              <Link
+                href={`/reports?${scopeQueryForLinks}`}
+                className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
+              >
+                <span>Báo cáo đối soát chi tiết</span>
+                <ArrowRight aria-hidden="true" className="w-3.5 h-3.5" />
+              </Link>
             </div>
 
-            <div className="lg:col-span-5 space-y-2.5">
-              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider block">
-                Tỷ Trọng Theo Kênh Khách Hàng Liên Hệ
-              </span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                {byChannel.map((ch) => (
+            <div className="divide-y divide-slate-100">
+              {websiteRows.map((ws) => {
+                const showDomain =
+                  ws.domain &&
+                  ws.shortName.toLowerCase().trim() !== ws.domain.toLowerCase().trim();
+                return (
                   <div
-                    key={ch.channel}
-                    className="p-3.5 rounded-xl bg-slate-50/70 border border-slate-200/90 flex items-center justify-between gap-2"
+                    key={ws.websiteId}
+                    className="px-4 py-3 hover:bg-slate-50/70 transition-colors flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                   >
-                    <div className="flex items-center gap-2">
-                      <PhoneCall className="w-4 h-4 text-[#1E3A8A]" />
-                      <span className="text-xs font-semibold text-slate-700">{ch.label}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-slate-900 text-xs sm:text-sm">
+                          {ws.shortName}
+                        </span>
+                        {showDomain && (
+                          <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 font-mono text-[11px]">
+                            {ws.domain}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <div className="w-36 h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                          {ws.sharePct > 0 && (
+                            <div
+                              style={{ width: `${Math.min(100, ws.sharePct)}%` }}
+                              className="h-full rounded-full bg-gradient-to-r from-[#1E3A8A] to-sky-500"
+                            />
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-500 tabular-nums">
+                          Tỷ trọng nhu cầu: <strong className="text-slate-700">{ws.sharePct}%</strong>
+                        </span>
+                      </div>
                     </div>
-                    <strong className="font-display text-lg font-bold text-slate-900 tabular-nums">
-                      {ch.count}
-                    </strong>
+
+                    <div className="flex flex-wrap items-center gap-3 sm:gap-4 text-xs shrink-0">
+                      <div className="text-right min-w-[68px]">
+                        <div className="text-[11px] text-slate-400">Xem trang</div>
+                        <div className="font-bold text-slate-800 tabular-nums">
+                          {ws.pageViews !== null ? ws.pageViews.toLocaleString('vi-VN') : '—'}
+                        </div>
+                      </div>
+                      <div className="text-right min-w-[64px]">
+                        <div className="text-[11px] text-slate-400">Click SEO</div>
+                        <div className="font-bold text-emerald-700 tabular-nums">
+                          {ws.gscClicks !== null ? ws.gscClicks.toLocaleString('vi-VN') : '—'}
+                        </div>
+                      </div>
+                      <div className="text-right min-w-[60px]">
+                        <div className="text-[11px] text-slate-400">Cơ hội</div>
+                        <div className="font-extrabold text-[#0F275C] tabular-nums">
+                          {ws.totalLeadsL1}
+                        </div>
+                      </div>
+
+                      {!ws.isDirectOrUnmapped ? (
+                        <div className="inline-flex items-center gap-1 pl-2 border-l border-slate-200">
+                          <Link
+                            href={`/tracking?websiteId=${encodeURIComponent(ws.websiteId)}&${scopeQueryForLinks}`}
+                            className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-[#1E3A8A] text-[11px] font-semibold transition"
+                          >
+                            Lưu lượng
+                          </Link>
+                          <Link
+                            href={`/ads?websiteId=${encodeURIComponent(ws.websiteId)}&${scopeQueryForLinks}`}
+                            className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 text-[11px] font-semibold transition"
+                          >
+                            SEO
+                          </Link>
+                        </div>
+                      ) : (
+                        <div className="inline-flex items-center pl-2 border-l border-slate-200">
+                          <Link
+                            href={canViewLeads ? `/leads?missingWebsite=1&${scopeQueryForLinks}` : '/reports'}
+                            className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-semibold transition"
+                          >
+                            Phân bổ web
+                          </Link>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Chân thẻ tổng cộng */}
+          <div className="px-4 py-2.5 bg-slate-50/80 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
+            <span>
+              Tổng lượt xem toàn hệ thống:{' '}
+              <strong className="text-slate-900 tabular-nums">
+                {totalSystemPageViews !== null ? totalSystemPageViews.toLocaleString('vi-VN') : '—'}
+              </strong>
+            </span>
+            <span>
+              Tổng Click tự nhiên Google:{' '}
+              <strong className="text-emerald-700 tabular-nums">
+                {totalSystemGscClicks !== null ? totalSystemGscClicks.toLocaleString('vi-VN') : '—'}
+              </strong>
+            </span>
+          </div>
+        </section>
+
+        {/* 5/12: Nhịp độ xu hướng trong kỳ + Đội ngũ phụ trách */}
+        <div className="xl:col-span-5 flex flex-col gap-4 justify-between">
+          {/* Biểu đồ xu hướng mượt gọn */}
+          <section
+            aria-labelledby="dashboard-pulse-heading"
+            className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs"
+          >
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <div className="flex items-center gap-2">
+                <TrendingUp aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
+                <h2 id="dashboard-pulse-heading" className="text-sm font-bold text-slate-900">
+                  Nhịp độ nhu cầu khách hàng theo ngày
+                </h2>
+              </div>
+              <span className="text-[11px] text-slate-500">
+                Đỉnh kỳ: <strong className="text-slate-800 tabular-nums">{Math.max(0, ...chartPoints.map((p) => p.totalL1))}</strong>/ngày
+              </span>
+            </div>
+
+            {sparklineGeometry ? (
+              <div>
+                <svg
+                  viewBox={`0 0 ${sparklineGeometry.W} ${sparklineGeometry.H}`}
+                  className="w-full h-[126px] overflow-visible"
+                  role="img"
+                  aria-label="Biểu đồ nhịp độ nhu cầu theo ngày"
+                >
+                  <defs>
+                    <linearGradient id="dashPulseGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#2563EB" stopOpacity="0.28" />
+                      <stop offset="100%" stopColor="#2563EB" stopOpacity="0.01" />
+                    </linearGradient>
+                  </defs>
+                  <line
+                    x1="16"
+                    y1={sparklineGeometry.baselineY}
+                    x2={sparklineGeometry.W - 16}
+                    y2={sparklineGeometry.baselineY}
+                    stroke="#E2E8F0"
+                    strokeWidth="1"
+                  />
+                  <path d={sparklineGeometry.areaPath} fill="url(#dashPulseGrad)" />
+                  <path
+                    d={sparklineGeometry.linePath}
+                    fill="none"
+                    stroke="#1E3A8A"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  {sparklineGeometry.pts.map((pt) =>
+                    pt.totalL1 > 0 ? (
+                      <g key={pt.date}>
+                        <circle
+                          cx={pt.x}
+                          cy={pt.y}
+                          r="4"
+                          fill="#FFFFFF"
+                          stroke="#1E3A8A"
+                          strokeWidth="2.2"
+                        />
+                        <text
+                          x={pt.x}
+                          y={pt.y - 8}
+                          textAnchor="middle"
+                          className="fill-slate-700 text-[10px] font-bold"
+                        >
+                          {pt.totalL1}
+                        </text>
+                      </g>
+                    ) : null,
+                  )}
+                </svg>
+                <div className="flex items-center justify-between text-[11px] text-slate-400 px-2 tabular-nums">
+                  <span>{chartPoints[0]?.label}</span>
+                  <span>{chartPoints[Math.floor(chartPoints.length / 2)]?.label}</span>
+                  <span>{chartPoints[chartPoints.length - 1]?.label}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="h-[120px] grid place-items-center text-xs text-slate-400">
+                Chưa có dữ liệu trong khoảng ngày đang chọn.
+              </div>
+            )}
+          </section>
+
+          {/* Tiến độ đội ngũ Kinh doanh (đồng bộ ảnh đại diện & hình nền thành viên) */}
+          <section
+            aria-labelledby="dashboard-team-heading"
+            className="flex-1 rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs flex flex-col justify-between"
+          >
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <div className="flex items-center gap-2">
+                  <Users aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
+                  <h2 id="dashboard-team-heading" className="text-sm font-bold text-slate-900">
+                    Phân bổ khối lượng đội ngũ phụ trách
+                  </h2>
+                </div>
+                <Link href="/profile" className="text-xs font-semibold text-[#1E3A8A] hover:underline">
+                  Đồng nghiệp →
+                </Link>
+              </div>
+
+              <div className="space-y-2 max-h-[220px] overflow-y-auto [scrollbar-gutter:stable] overscroll-contain pr-1">
+                {salesRows.slice(0, 6).map((sp) => (
+                  <div
+                    key={sp.salesUserId}
+                    className="rounded-xl border border-slate-200/80 p-2.5 flex items-center justify-between gap-3 hover:bg-slate-50/70 transition"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div
+                        style={sp.coverUrl ? resolveCoverBackgroundStyle(sp.coverUrl) : undefined}
+                        className={`w-9 h-9 rounded-xl p-0.5 grid place-items-center shrink-0 ${
+                          sp.coverUrl ? '' : 'bg-blue-50'
+                        }`}
+                      >
+                        {sp.avatarUrl ? (
+                          <img
+                            src={sp.avatarUrl}
+                            alt={sp.salesFullName}
+                            className="w-7 h-7 rounded-full object-cover ring-1 ring-white"
+                          />
+                        ) : (
+                          <span className="w-7 h-7 rounded-full bg-white text-[#0F275C] font-bold text-[11px] grid place-items-center shadow-2xs">
+                            {getInitials(sp.salesFullName)}
+                          </span>
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-900 truncate">
+                          {sp.salesFullName}
+                        </p>
+                        <p className="text-[11px] text-slate-500">
+                          Đang báo giá: <strong className="text-slate-700">{sp.quotingLeads + sp.quoteSentLeads}</strong> · Chốt:{' '}
+                          <strong className="text-emerald-700">{sp.wonLeads}</strong>
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-900 text-xs font-extrabold tabular-nums">
+                        {sp.totalLeads} hồ sơ
+                      </span>
+                    </div>
                   </div>
                 ))}
               </div>
             </div>
-          </div>
-        )}
-      </section>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }

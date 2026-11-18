@@ -147,7 +147,17 @@ export async function listUserNotifications(
     take: 60,
   });
 
-  const filteredItems = rows
+  // C10: Gộp các thông báo chưa đọc bị trùng khóa (category + title) khi hiển thị, nhưng không tự xóa bản ghi chưa đọc trong CSDL
+  const seenUnreadKeys = new Set<string>();
+  const dedupedRows = rows.filter((r) => {
+    if (r.isRead) return true;
+    const key = `${r.category.trim().toLowerCase()}::${r.title.trim().toLowerCase()}`;
+    if (seenUnreadKeys.has(key)) return false;
+    seenUnreadKeys.add(key);
+    return true;
+  });
+
+  const filteredItems = dedupedRows
     .map((r) => {
       const { cleanTitle, cleanSummary, cleanCategory } = sanitizeNotificationCopy(
         r.title,
@@ -457,3 +467,58 @@ export async function listDispatchedExecutiveReports(
     };
   });
 }
+
+/**
+ * C10 — Gộp thông báo cùng sự kiện/thực thể theo khóa (userId + category + title);
+ * cập nhật thông báo chưa đọc hiện có thay vì tạo mới mỗi vòng poll / nhắc việc.
+ */
+export async function upsertActionableNotification(input: {
+  userId: number;
+  title: string;
+  summary: string;
+  category: string;
+  actionLabel?: string | null;
+  actionUrl?: string | null;
+  requiredPermission?: string | null;
+}): Promise<void> {
+  const cleanTitle = input.title.trim().slice(0, 200);
+  const cleanCategory = input.category.trim().slice(0, 80);
+  const cleanSummary = input.summary.trim().slice(0, 500);
+
+  const existingUnread = await prisma.notification.findFirst({
+    where: {
+      userId: input.userId,
+      isRead: false,
+      category: cleanCategory,
+      title: cleanTitle,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (existingUnread) {
+    await prisma.notification.update({
+      where: { id: existingUnread.id },
+      data: {
+        summary: cleanSummary,
+        actionLabel: input.actionLabel ?? existingUnread.actionLabel,
+        actionUrl: input.actionUrl ?? existingUnread.actionUrl,
+        requiredPermission: input.requiredPermission ?? existingUnread.requiredPermission,
+      },
+    });
+    return;
+  }
+
+  await prisma.notification.create({
+    data: {
+      userId: input.userId,
+      title: cleanTitle,
+      summary: cleanSummary,
+      category: cleanCategory,
+      isRead: false,
+      actionLabel: input.actionLabel ?? null,
+      actionUrl: input.actionUrl ?? null,
+      requiredPermission: input.requiredPermission ?? null,
+    },
+  });
+}
+

@@ -39,6 +39,16 @@ export async function POST(req: Request) {
     const raw = (await req.json()) as Record<string, unknown>;
 
     if (raw.action === 'test_ai_connection') {
+      if (
+        !hasBaPermission(auth.user.roleCode, 'AI_DESIGN') &&
+        !hasBaPermission(auth.user.roleCode, 'SYSTEM_USER_ADMIN')
+      ) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Tài khoản không có quyền kiểm tra kết nối nhà cung cấp AI.',
+          403
+        );
+      }
       const testRes = await AiDesignProviderFactory.testProviderConnection({
         providerId: (raw.providerId as AiProviderId) || 'google_imagen',
         apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : null,
@@ -49,6 +59,16 @@ export async function POST(req: Request) {
     }
 
     if (raw.action === 'configure_ai_providers') {
+      if (
+        !hasBaPermission(auth.user.roleCode, 'AI_DESIGN') &&
+        !hasBaPermission(auth.user.roleCode, 'SYSTEM_USER_ADMIN')
+      ) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Quản trị viên hoặc Designer mới có quyền cấu hình nhà cung cấp AI.',
+          403
+        );
+      }
       const parsedCfg = ConfigureAiProvidersSchema.safeParse(raw);
       if (!parsedCfg.success) {
         return jsonError(

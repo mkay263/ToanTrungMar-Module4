@@ -59,7 +59,36 @@ export function normalizeDomainKey(raw: string | null | undefined): string {
     .split('/')[0];
 }
 
+const FRIENDLY_DOMAIN_NAMES: Record<string, string> = {
+  'toantrung.com.vn': 'Website Toàn Trung',
+  'bangled.vn': 'Chuyên trang Bảng LED',
+  'manhinhled.net.vn': 'Chuyên trang Màn hình LED',
+  'ledtoantrung.vn': 'LED Toàn Trung',
+};
+
+function resolveFriendlyWebsiteName(domain: string, fallbackName?: string | null): string {
+  const norm = normalizeDomainKey(domain);
+  if (FRIENDLY_DOMAIN_NAMES[norm]) {
+    return FRIENDLY_DOMAIN_NAMES[norm];
+  }
+  const clean = (fallbackName || '').trim();
+  if (clean && normalizeDomainKey(clean) !== norm && !/^ga4[-\s]/i.test(clean)) {
+    return clean;
+  }
+  return domain;
+}
+
+let websitesMemCache: { expiresAt: number; items: WebsiteConfigItemDto[] } | null = null;
+
+export function invalidateConfiguredWebsitesCache(): void {
+  websitesMemCache = null;
+}
+
 export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
+  if (websitesMemCache && websitesMemCache.expiresAt > Date.now()) {
+    return websitesMemCache.items;
+  }
+
   const byDomain = new Map<string, WebsiteConfigItemDto>();
 
   try {
@@ -77,11 +106,12 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
           const cleanName = (r.name || r.id).replace(/\s*\(\d+\)\s*$/, '').trim();
           const domainMatch = cleanName.match(/([a-z0-9.-]+\.[a-z]{2,})/i);
           const domain = domainMatch ? normalizeDomainKey(domainMatch[1]) : `ga4-${r.id}`;
+          const resolvedDomain = domainMatch ? domain : cleanName;
           const existing = byDomain.get(domain);
           byDomain.set(domain, {
             websiteId: domain,
-            shortName: existing?.shortName || cleanName,
-            domain: domainMatch ? domain : cleanName,
+            shortName: existing?.shortName || resolveFriendlyWebsiteName(resolvedDomain, cleanName),
+            domain: resolvedDomain,
             ga4PropertyId: r.id,
             gscSiteUrl: existing?.gscSiteUrl || null,
             adsCustomerId: existing?.adsCustomerId || null,
@@ -92,7 +122,7 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
           const existing = byDomain.get(domain);
           byDomain.set(domain, {
             websiteId: domain,
-            shortName: existing?.shortName || domain,
+            shortName: existing?.shortName || resolveFriendlyWebsiteName(domain),
             domain,
             ga4PropertyId: existing?.ga4PropertyId || null,
             gscSiteUrl: r.id,
@@ -108,7 +138,7 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
   if (byDomain.size === 0) {
     byDomain.set('toantrung.com.vn', {
       websiteId: 'toantrung.com.vn',
-      shortName: 'Toàn Trung',
+      shortName: 'Website Toàn Trung',
       domain: 'toantrung.com.vn',
       ga4PropertyId: '512879968',
       gscSiteUrl: 'https://toantrung.com.vn/',
@@ -116,7 +146,7 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
     });
     byDomain.set('bangled.vn', {
       websiteId: 'bangled.vn',
-      shortName: 'Bảng LED',
+      shortName: 'Chuyên trang Bảng LED',
       domain: 'bangled.vn',
       ga4PropertyId: '538179128',
       gscSiteUrl: 'https://bangled.vn/',
@@ -124,7 +154,7 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
     });
     byDomain.set('manhinhled.net.vn', {
       websiteId: 'manhinhled.net.vn',
-      shortName: 'Màn hình LED',
+      shortName: 'Chuyên trang Màn hình LED',
       domain: 'manhinhled.net.vn',
       ga4PropertyId: '509190194',
       gscSiteUrl: 'https://manhinhled.net.vn/',
@@ -132,7 +162,9 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
     });
   }
 
-  return Array.from(byDomain.values());
+  const items = Array.from(byDomain.values());
+  websitesMemCache = { expiresAt: Date.now() + 60_000, items };
+  return items;
 }
 
 export interface ResolvedDashboardScope {
@@ -150,6 +182,8 @@ export interface ResolvedDashboardScope {
   endDateTime: Date;
   prevStartDateStr: string;
   prevEndDateStr: string;
+  prevStartDateTime: Date;
+  prevEndDateTime: Date;
   totalCalendarDays: number;
   isTodayIncluded: boolean;
   timezone: string;
@@ -192,6 +226,8 @@ export async function resolveDashboardScope(params?: {
   const curStartNoon = new Date(`${range.startDateStr}T12:00:00+07:00`);
   const prevEndD = new Date(curStartNoon.getTime() - 24 * 60 * 60 * 1000);
   const prevStartD = new Date(curStartNoon.getTime() - days * 24 * 60 * 60 * 1000);
+  const prevStartDateStr = getVietnamDateParts(prevStartD).dateStr;
+  const prevEndDateStr = getVietnamDateParts(prevEndD).dateStr;
 
   return {
     websiteId: selectedWebsite ? selectedWebsite.websiteId : 'all',
@@ -216,8 +252,10 @@ export async function resolveDashboardScope(params?: {
     endDateStr: range.endDateStr,
     startDateTime: range.startDateTime,
     endDateTime: range.endDateTime,
-    prevStartDateStr: getVietnamDateParts(prevStartD).dateStr,
-    prevEndDateStr: getVietnamDateParts(prevEndD).dateStr,
+    prevStartDateStr,
+    prevEndDateStr,
+    prevStartDateTime: new Date(`${prevStartDateStr}T00:00:00.000+07:00`),
+    prevEndDateTime: new Date(`${prevEndDateStr}T23:59:59.999+07:00`),
     totalCalendarDays: days,
     isTodayIncluded: range.isTodayIncluded,
     timezone: range.timezone,

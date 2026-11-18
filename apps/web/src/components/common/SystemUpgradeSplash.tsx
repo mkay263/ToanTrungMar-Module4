@@ -11,9 +11,9 @@ interface SystemUpgradeSplashProps {
 }
 
 export function SystemUpgradeSplash({
-  title = 'Hệ thống Toàn Trung CRM đang nâng cấp & đồng bộ',
-  subtitle = 'Đang khởi tạo không gian làm việc và cập nhật cấu hình dữ liệu mới nhất. Vui lòng đợi trong giây lát...',
-  badgeText = 'NÂNG CẤP & ĐỒNG BỘ HỆ THỐNG V2',
+  title = 'Toàn Trung CRM',
+  subtitle = 'Đang kết nối không gian làm việc và đồng bộ phiên của bạn...',
+  badgeText = 'KHÔNG GIAN QUẢN TRỊ NỘI BỘ',
   showReloadAction = false,
   onRetry,
 }: SystemUpgradeSplashProps) {
@@ -70,6 +70,12 @@ export function SystemUpgradeSplash({
           0% { transform: translateX(-100%); }
           50% { transform: translateX(15%); }
           100% { transform: translateX(120%); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          * {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+          }
         }
       `}</style>
 

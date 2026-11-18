@@ -8,15 +8,16 @@ export async function GET(request: Request) {
 
   try {
     const url = new URL(request.url);
+    const websiteId = url.searchParams.get('websiteId') ?? 'all';
     const preset = url.searchParams.get('preset') ?? '30d';
-    const fromDate = url.searchParams.get('fromDate') ?? undefined;
-    const toDate = url.searchParams.get('toDate') ?? undefined;
+    const fromDate = url.searchParams.get('from') ?? url.searchParams.get('fromDate') ?? undefined;
+    const toDate = url.searchParams.get('to') ?? url.searchParams.get('toDate') ?? undefined;
     const formatParam = url.searchParams.get('format');
     const format = formatParam === 'csv' ? 'csv' : 'xlsx';
 
     const { buffer, fileName, mimeType } = await generateScopedReportExportBuffer(
       auth.user,
-      { preset, fromDate, toDate },
+      { websiteId, preset, fromDate, toDate },
       format
     );
 

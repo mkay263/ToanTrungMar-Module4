@@ -1,7 +1,11 @@
 import { prisma } from '@toantrung/database';
 import {
   isL2Valid,
+  normalizeMarketingChannelDisplay,
+  type M02AdsSectionDto,
+  type M02CampaignRowDto,
   type M02ChannelRowDto,
+  type M02InteractionRowDto,
   type M02LandingPageRowDto,
   type M02TrafficInteractionDto,
   type M02TrafficSeriesPointDto,
@@ -10,172 +14,66 @@ import {
   matchesWebsiteDomain,
   paginateArray,
   resolveDashboardScope,
-  safeDiv,
   sanitizeLandingPageUrl,
 } from '../../core/website-catalog';
-import { getGoogleConnection, getValidAccessToken } from './google-oauth.service';
-import { getGa4LiveSnapshotsForProperties } from './ga4-live-cache.service';
+import {
+  getGa4LiveSnapshotsForProperties,
+  getGa4RealtimeSnapshotNonBlocking,
+} from './ga4-live-cache.service';
+import { getGoogleAdsApiConfig } from './google-oauth.service';
 import { getStoredTouchpoints } from './service';
 
-const REALTIME_CACHE_TTL_MS = 60_000;
-const globalM02Cache = globalThis as typeof globalThis & {
-  __m02RealtimeCache?: Map<string, { fetchedAt: number; activeUsers30m: number | null; minutesSeries: Array<{ minutesAgo: number; activeUsers: number }> }>;
-};
-
-function mapChannelLabel(rawSourceMedium: string): { key: string; label: string } {
-  const s = (rawSourceMedium || '').toLowerCase();
-  if (!s || s === '(not set)' || s === 'chưa xác định') {
-    return { key: 'unknown', label: 'Chưa xác định' };
+function mapGa4ChannelGroup(rawChannelGroup: string): {
+  key: string;
+  label: string;
+  source: string;
+  medium: string;
+} {
+  const s = (rawChannelGroup || '').trim().toLowerCase();
+  if (!s || s === '(not set)' || s === 'unassigned' || s === 'chưa xác định') {
+    return { key: 'unknown', label: 'Chưa xác định', source: 'Chưa xác định', medium: 'Chưa phân loại' };
   }
-  if (s.includes('organic') || s.includes('seo') || s.includes('tìm kiếm tự nhiên')) {
-    return { key: 'organic', label: 'Tìm kiếm tự nhiên (Google)' };
+  if (s.includes('organic search') || s.includes('tìm kiếm tự nhiên')) {
+    return { key: 'organic', label: 'Tìm kiếm tự nhiên', source: 'Google / Search', medium: 'organic' };
   }
-  if (s.includes('cpc') || s.includes('ppc') || s.includes('ads') || s.includes('quảng cáo')) {
-    return { key: 'paid_ads', label: 'Quảng cáo (Google Ads)' };
+  if (s.includes('paid search') || s.includes('cpc') || s.includes('ppc') || s.includes('cross-network') || s.includes('display')) {
+    return { key: 'paid_ads', label: 'Google Ads', source: 'google', medium: 'cpc' };
   }
-  if (s.includes('facebook') || s.includes('fb') || s.includes('zalo') || s.includes('social') || s.includes('tiktok')) {
-    return { key: 'social', label: s.includes('facebook') || s.includes('fb') ? 'Mạng xã hội (Facebook)' : 'Mạng xã hội' };
+  if (s.includes('paid social')) {
+    return { key: 'paid_social', label: 'Quảng cáo mạng xã hội', source: 'social', medium: 'paid_social' };
   }
-  if (s.includes('direct') || s.includes('(none)') || s.includes('trực tiếp')) {
-    return { key: 'direct', label: 'Truy cập trực tiếp' };
+  if (s.includes('social') || s.includes('facebook') || s.includes('zalo') || s.includes('tiktok')) {
+    return { key: 'social', label: 'Mạng xã hội', source: 'social', medium: 'social' };
   }
-  if (s.includes('referral') || s.includes('giới thiệu')) {
-    return { key: 'referral', label: 'Website giới thiệu' };
+  if (s.includes('direct') || s === '(none)') {
+    return { key: 'direct', label: 'Truy cập trực tiếp', source: '(direct)', medium: '(none)' };
   }
-  return { key: 'other', label: 'Khác' };
+  if (s.includes('referral')) {
+    return { key: 'referral', label: 'Website giới thiệu', source: 'referral', medium: 'referral' };
+  }
+  return { key: 'other', label: rawChannelGroup.trim() || 'Khác', source: rawChannelGroup.trim(), medium: 'other' };
 }
 
-async function fetchGa4RealtimeCached(propertyIds: string[]): Promise<{
-  activeUsers30m: number | null;
-  minutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
-}> {
-  if (propertyIds.length === 0) {
-    return { activeUsers30m: null, minutesSeries: [] };
-  }
-  const cacheKey = propertyIds.slice().sort().join(',');
-  if (!globalM02Cache.__m02RealtimeCache) {
-    globalM02Cache.__m02RealtimeCache = new Map();
-  }
-  const cached = globalM02Cache.__m02RealtimeCache.get(cacheKey);
-  if (cached && Date.now() - cached.fetchedAt < REALTIME_CACHE_TTL_MS) {
-    return { activeUsers30m: cached.activeUsers30m, minutesSeries: cached.minutesSeries };
-  }
+function mapCrmChannelKey(channelLabel: string): string {
+  const l = channelLabel.toLowerCase();
+  if (l === 'google ads') return 'paid_ads';
+  if (l === 'quảng cáo facebook') return 'paid_social';
+  if (l === 'tìm kiếm tự nhiên') return 'organic';
+  if (l === 'mạng xã hội') return 'social';
+  if (l === 'website giới thiệu') return 'referral';
+  if (l === 'truy cập trực tiếp') return 'direct';
+  return 'unknown';
+}
 
-  const conn = await getGoogleConnection();
-  if (!conn?.connected || conn.isSandboxDemo) {
-    return { activeUsers30m: null, minutesSeries: [] };
-  }
-  const token = await getValidAccessToken();
-  if (!token) {
-    return {
-      activeUsers30m: cached?.activeUsers30m ?? null,
-      minutesSeries: cached?.minutesSeries ?? [],
-    };
-  }
+function microsToUnitNumber(micros: bigint | null | undefined): number {
+  if (!micros) return 0;
+  return Number((Number(micros) / 1_000_000).toFixed(2));
+}
 
-  let total30m = 0;
-  let anySucceeded = false;
-  const minuteMap = new Map<number, number>();
-
-  await Promise.all(
-    propertyIds.slice(0, 4).map(async (propId) => {
-      const perPropKey = `prop:${propId}`;
-      const perPropCached = globalM02Cache.__m02RealtimeCache?.get(perPropKey);
-      if (perPropCached && Date.now() - perPropCached.fetchedAt < REALTIME_CACHE_TTL_MS * 2) {
-        if (perPropCached.activeUsers30m !== null) {
-          anySucceeded = true;
-          total30m += perPropCached.activeUsers30m;
-        }
-        for (const m of perPropCached.minutesSeries) {
-          minuteMap.set(m.minutesAgo, (minuteMap.get(m.minutesAgo) || 0) + m.activeUsers);
-        }
-        return;
-      }
-
-      let propUsers: number | null = null;
-      const propMins: Array<{ minutesAgo: number; activeUsers: number }> = [];
-      try {
-        const [respTotal, respMin] = await Promise.all([
-          fetch(
-            `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ metrics: [{ name: 'activeUsers' }] }),
-            },
-          ),
-          fetch(
-            `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
-            {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${token}`,
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({
-                dimensions: [{ name: 'minutesAgo' }],
-                metrics: [{ name: 'activeUsers' }],
-              }),
-            },
-          ),
-        ]);
-
-        if (respTotal.ok) {
-          const j = (await respTotal.json()) as {
-            rows?: Array<{ metricValues?: Array<{ value?: string }> }>;
-          };
-          const val = Number(j.rows?.[0]?.metricValues?.[0]?.value || 0);
-          if (Number.isFinite(val)) {
-            propUsers = val;
-            total30m += val;
-            anySucceeded = true;
-          }
-        }
-        if (respMin.ok) {
-          const jm = (await respMin.json()) as {
-            rows?: Array<{
-              dimensionValues?: Array<{ value?: string }>;
-              metricValues?: Array<{ value?: string }>;
-            }>;
-          };
-          for (const r of jm.rows || []) {
-            const minAgo = Number(r.dimensionValues?.[0]?.value);
-            const cnt = Number(r.metricValues?.[0]?.value || 0);
-            if (Number.isFinite(minAgo) && minAgo >= 0 && minAgo <= 29) {
-              propMins.push({ minutesAgo: minAgo, activeUsers: cnt });
-              minuteMap.set(minAgo, (minuteMap.get(minAgo) || 0) + cnt);
-            }
-          }
-        }
-        globalM02Cache.__m02RealtimeCache?.set(perPropKey, {
-          fetchedAt: Date.now(),
-          activeUsers30m: propUsers,
-          minutesSeries: propMins,
-        });
-      } catch {
-        // keep partial
-      }
-    }),
-  );
-
-  const activeUsers30m = anySucceeded ? total30m : cached?.activeUsers30m ?? null;
-  const minutesSeries = anySucceeded
-    ? Array.from({ length: 30 }, (_, idx) => {
-        const minutesAgo = 29 - idx;
-        return { minutesAgo, activeUsers: minuteMap.get(minutesAgo) || 0 };
-      })
-    : cached?.minutesSeries ?? [];
-
-  globalM02Cache.__m02RealtimeCache.set(cacheKey, {
-    fetchedAt: Date.now(),
-    activeUsers30m,
-    minutesSeries,
-  });
-
-  return { activeUsers30m, minutesSeries };
+function conversionsMicrosToNumber(micros: bigint | null | undefined): number {
+  if (!micros) return 0;
+  // Giữ phần thập phân từ phân bổ Data-Driven / Fractional Conversions (không ép thành số nguyên)
+  return Number((Number(micros) / 1_000_000).toFixed(2));
 }
 
 export async function getM02TrafficInteractionSpec(params?: {
@@ -185,76 +83,162 @@ export async function getM02TrafficInteractionSpec(params?: {
   to?: string | null;
   page?: number;
   pageSize?: number;
+  adsPage?: number;
+  adsPageSize?: number;
 }): Promise<M02TrafficInteractionDto> {
   const scope = await resolveDashboardScope(params);
   const propIds = scope.ga4PropertyIds;
+  const adsCfg = await getGoogleAdsApiConfig();
+  const hasAdsToken = Boolean(adsCfg?.developerToken);
 
-  const [accountRows, pageRows, leads, products, touchpoints, syncLogs, realtime, ga4LiveSnaps] =
-    await Promise.all([
-      propIds.length > 0
-        ? prisma.platformDailyMetric.findMany({
-            where: {
-              platform: 'ga4',
-              grain: 'account',
-              accountPropertyId: { in: propIds },
-              metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
-            },
-            orderBy: { metricDate: 'asc' },
-          })
-        : Promise.resolve([]),
-      propIds.length > 0
-        ? prisma.platformDailyMetric.findMany({
-            where: {
-              platform: 'ga4',
-              grain: 'page',
-              accountPropertyId: { in: propIds },
-              metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
-            },
-          })
-        : Promise.resolve([]),
-      prisma.lead.findMany({
-        where: {
-          createdAt: { gte: scope.startDateTime, lte: scope.endDateTime },
+  const [
+    accountRows,
+    prevAccountRows,
+    pageRows,
+    adsMetricRows,
+    leads,
+    prevLeads,
+    products,
+    touchpoints,
+    syncLogs,
+    realtime,
+    ga4LiveSnaps,
+  ] = await Promise.all([
+    propIds.length > 0
+      ? prisma.platformDailyMetric.findMany({
+          where: {
+            platform: 'ga4',
+            grain: 'account',
+            accountPropertyId: { in: propIds },
+            metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
+          },
+          orderBy: { metricDate: 'asc' },
+        })
+      : Promise.resolve([]),
+    propIds.length > 0
+      ? prisma.platformDailyMetric.findMany({
+          where: {
+            platform: 'ga4',
+            grain: 'account',
+            accountPropertyId: { in: propIds },
+            metricDate: { gte: scope.prevStartDateStr, lte: scope.prevEndDateStr },
+          },
+        })
+      : Promise.resolve([]),
+    propIds.length > 0
+      ? prisma.platformDailyMetric.findMany({
+          where: {
+            platform: 'ga4',
+            grain: 'page',
+            accountPropertyId: { in: propIds },
+            metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
+          },
+        })
+      : Promise.resolve([]),
+    prisma.platformDailyMetric.findMany({
+      where: {
+        platform: { in: ['google_ads', 'facebook_ads', 'facebook'] },
+        grain: { in: ['campaign', 'ad_group', 'keyword'] },
+        metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
+        NOT: [
+          { accountPropertyId: { startsWith: 'GA4-' } },
+          { campaignExternalId: { startsWith: 'ga4_' } },
+        ],
+      },
+      include: {
+        campaign: {
+          select: {
+            id: true,
+            campaignCode: true,
+            campaignName: true,
+            isActive: true,
+            platform: true,
+          },
         },
-        include: {
-          tracking: true,
-          leadProducts: { select: { productId: true } },
-        },
-      }),
-      prisma.product.findMany({
-        where: { isActive: true },
-        orderBy: { id: 'asc' },
-      }),
-      getStoredTouchpoints(),
-      prisma.platformSyncLog.findMany({
-        where: { platform: 'ga4' },
-        orderBy: { id: 'desc' },
-        take: 10,
-      }),
-      fetchGa4RealtimeCached(propIds),
-      getGa4LiveSnapshotsForProperties(propIds, scope.startDateStr, scope.endDateStr),
-    ]);
+      },
+      orderBy: { metricDate: 'asc' },
+    }),
+    prisma.lead.findMany({
+      where: {
+        createdAt: { gte: scope.startDateTime, lte: scope.endDateTime },
+      },
+      include: {
+        tracking: true,
+        leadProducts: { select: { productId: true } },
+      },
+    }),
+    prisma.lead.findMany({
+      where: {
+        createdAt: { gte: scope.prevStartDateTime, lte: scope.prevEndDateTime },
+      },
+      select: {
+        id: true,
+        isSpam: true,
+        sourceWebsite: true,
+        contactChannel: true,
+      },
+    }),
+    prisma.product.findMany({
+      where: { isActive: true },
+      orderBy: { id: 'asc' },
+    }),
+    getStoredTouchpoints(),
+    prisma.platformSyncLog.findMany({
+      where: { platform: { in: ['ga4', 'google_ads'] } },
+      orderBy: { id: 'desc' },
+      take: 15,
+    }),
+    getGa4RealtimeSnapshotNonBlocking(propIds),
+    getGa4LiveSnapshotsForProperties(propIds, scope.startDateStr, scope.endDateStr, false),
+  ]);
 
   const scopedLeads = leads.filter((l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite));
   const validLeads = scopedLeads.filter((l) => isL2Valid(l));
   const validFormLeads = validLeads.filter((l) => l.contactChannel === 'form_web');
 
-  // Build daily trafficSeries across every calendar day in range (prefer GA4 live daily if available, else DB accountRows)
-  const dailyMap = new Map<string, { sessions: number; pageViews: number; users: number | null; hasRow: boolean }>();
+  const prevScopedLeads = prevLeads.filter(
+    (l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite) && isL2Valid(l),
+  );
+  const prevValidFormLeadsCount = prevScopedLeads.filter((l) => l.contactChannel === 'form_web').length;
+  const prevSessionsTotal =
+    prevAccountRows.length > 0
+      ? prevAccountRows.reduce((s, r) => s + (r.clicks || r.pageViews), 0)
+      : null;
+  const prevPageViewsTotal =
+    prevAccountRows.length > 0 ? prevAccountRows.reduce((s, r) => s + r.pageViews, 0) : null;
+
+  // Chuỗi ngày liên tục (C07): ưu tiên dữ liệu chi tiết GA4 đã cache, fallback sang accountRows trong DB
+  const dailyMap = new Map<
+    string,
+    { sessions: number; pageViews: number; users: number | null; hasRow: boolean }
+  >();
   if (ga4LiveSnaps.length > 0) {
+    const canShowDailyUsers = propIds.length === 1 && ga4LiveSnaps.length === 1;
     for (const snap of ga4LiveSnaps) {
       for (const d of snap.daily) {
-        const cur = dailyMap.get(d.date) || { sessions: 0, pageViews: 0, users: 0, hasRow: false };
+        const cur = dailyMap.get(d.date) || {
+          sessions: 0,
+          pageViews: 0,
+          users: canShowDailyUsers ? 0 : null,
+          hasRow: false,
+        };
         cur.sessions += d.sessions;
         cur.pageViews += d.pageViews;
-        cur.users = (cur.users ?? 0) + d.users;
+        if (canShowDailyUsers) {
+          cur.users = (cur.users ?? 0) + d.users;
+        }
         cur.hasRow = true;
         dailyMap.set(d.date, cur);
       }
     }
   } else {
     for (const r of accountRows) {
-      const cur = dailyMap.get(r.metricDate) || { sessions: 0, pageViews: 0, users: null, hasRow: false };
+      const cur = dailyMap.get(r.metricDate) || {
+        sessions: 0,
+        pageViews: 0,
+        users: null,
+        hasRow: false,
+      };
       cur.sessions += r.clicks || r.pageViews;
       cur.pageViews += r.pageViews;
       cur.hasRow = true;
@@ -311,81 +295,26 @@ export async function getM02TrafficInteractionSpec(params?: {
   let periodAvgEngagementSec: number | null = null;
 
   if (hasLiveGa4) {
-    const u = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.totalUsers, 0);
-    const nu = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.newUsers, 0);
-    const au = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.activeUsers, 0);
+    // C04: Không cộng người dùng distinct giữa các website hoặc từng ngày thành "người dùng duy nhất toàn công ty"
+    if (propIds.length === 1 && ga4LiveSnaps.length === 1) {
+      periodUsers = ga4LiveSnaps[0].totals.totalUsers;
+      periodNewUsers = ga4LiveSnaps[0].totals.newUsers;
+      const au = ga4LiveSnaps[0].totals.activeUsers;
+      const dur = ga4LiveSnaps[0].totals.userEngagementDurationSec;
+      periodAvgEngagementSec = au > 0 ? Number((dur / au).toFixed(1)) : null;
+    } else {
+      // Khi xem nhiều website: chỉ tính thời gian tương tác trên lượt activeUsers nếu cùng 1 property; nhiều property không gộp activeUsers distinct
+      periodUsers = null;
+      periodNewUsers = null;
+      periodAvgEngagementSec = null;
+    }
     const es = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.engagedSessions, 0);
-    const dur = ga4LiveSnaps.reduce((acc, s) => acc + s.totals.userEngagementDurationSec, 0);
-    periodUsers = u;
-    periodNewUsers = nu;
     periodEngagedSessions = es;
     periodEngagementRatePct =
       totalSessions && totalSessions > 0 ? Number(((es / totalSessions) * 100).toFixed(2)) : null;
-    periodAvgEngagementSec = au > 0 ? Number((dur / au).toFixed(1)) : null;
   }
 
-  const resolvedUsers = periodUsers;
-
-  // Channel breakdown: merge GA4 sessionDefaultChannelGroup + CRM validLeadCount (no traffic-ratio allocation)
-  const channelMap = new Map<
-    string,
-    {
-      channelKey: string;
-      channelLabel: string;
-      sessions: number;
-      engagedSessions: number;
-      hasGa4: boolean;
-      validLeadCount: number;
-    }
-  >();
-
-  for (const snap of ga4LiveSnaps) {
-    for (const ch of snap.channels) {
-      const mapped = mapChannelLabel(ch.channelGroup);
-      const cur = channelMap.get(mapped.key) || {
-        channelKey: mapped.key,
-        channelLabel: mapped.label,
-        sessions: 0,
-        engagedSessions: 0,
-        hasGa4: false,
-        validLeadCount: 0,
-      };
-      cur.sessions += ch.sessions;
-      cur.engagedSessions += ch.engagedSessions;
-      cur.hasGa4 = true;
-      channelMap.set(mapped.key, cur);
-    }
-  }
-
-  for (const l of validLeads) {
-    const mapped = mapChannelLabel(l.tracking?.marketingSource || '');
-    const cur = channelMap.get(mapped.key) || {
-      channelKey: mapped.key,
-      channelLabel: mapped.label,
-      sessions: 0,
-      engagedSessions: 0,
-      hasGa4: false,
-      validLeadCount: 0,
-    };
-    cur.validLeadCount += 1;
-    channelMap.set(mapped.key, cur);
-  }
-  const channelRows: M02ChannelRowDto[] = Array.from(channelMap.values())
-    .sort((a, b) => b.sessions - a.sessions || b.validLeadCount - a.validLeadCount)
-    .slice(0, 8)
-    .map((c) => ({
-      channelKey: c.channelKey,
-      channelLabel: c.channelLabel,
-      sessions: c.sessions,
-      engagedSessions: c.hasGa4 ? c.engagedSessions : null,
-      engagementRatePct:
-        c.hasGa4 && c.sessions > 0
-          ? Number(((c.engagedSessions / c.sessions) * 100).toFixed(2))
-          : null,
-      validLeadCount: c.validLeadCount,
-    }));
-
-  // Device & Geo breakdowns from GA4 live snapshots
+  // Device, Geo & GA4 Event aggregations
   const deviceMap = new Map<string, number>();
   const geoMap = new Map<string, { country: string; region: string; city: string; sessions: number }>();
   const ga4EventMap = new Map<string, { count: number; users: number }>();
@@ -413,6 +342,122 @@ export async function getM02TrafficInteractionSpec(params?: {
     }
   }
 
+  // Touchpoint interactions (chỉ lấy sự kiện tracking thực sự thu thập được — C07 & C10)
+  const scopedTouchpoints = touchpoints.filter((t) => {
+    const ms = new Date(t.occurredAt).getTime();
+    if (ms < scope.startDateTime.getTime() || ms > scope.endDateTime.getTime()) return false;
+    return matchesWebsiteDomain(t.sourceWebsite, scope.selectedWebsite);
+  });
+  const phoneClicksTp = scopedTouchpoints.filter((t) => t.eventType === 'contact_click').length;
+  const formSubmitTp = scopedTouchpoints.filter((t) => t.eventType === 'form_submit_success').length;
+
+  const ga4FormEventEntry = Array.from(ga4EventMap.entries()).filter(([k]) => {
+    const l = k.toLowerCase();
+    return l === 'form_submit' || l === 'generate_lead' || l === 'contact_form_submit';
+  });
+  const ga4PhoneEventEntry = Array.from(ga4EventMap.entries()).filter(([k]) => {
+    const l = k.toLowerCase();
+    return l.includes('click_call') || l.includes('phone_click') || l === 'tel_click';
+  });
+  const ga4ZaloEventEntry = Array.from(ga4EventMap.entries()).filter(([k]) => {
+    const l = k.toLowerCase();
+    return l.includes('zalo_click') || l.includes('click_zalo');
+  });
+
+  const hasFormTracking = ga4FormEventEntry.length > 0 || formSubmitTp > 0;
+  const formEventTotal = hasFormTracking
+    ? ga4FormEventEntry.reduce((s, [, v]) => s + v.count, 0) + formSubmitTp
+    : null;
+
+  const hasPhoneTracking = ga4PhoneEventEntry.length > 0 || phoneClicksTp > 0;
+  const phoneEventTotal = hasPhoneTracking
+    ? ga4PhoneEventEntry.reduce((s, [, v]) => s + v.count, 0) + phoneClicksTp
+    : null;
+
+  const hasZaloTracking = ga4ZaloEventEntry.length > 0;
+  const zaloEventTotal = hasZaloTracking
+    ? ga4ZaloEventEntry.reduce((s, [, v]) => s + v.count, 0)
+    : null;
+
+  // Channel breakdown (C04 & C07: không gán thiếu UTM / Zalo / Email thành Organic/Direct)
+  const channelMap = new Map<
+    string,
+    {
+      channelKey: string;
+      channelLabel: string;
+      source: string;
+      medium: string;
+      sessions: number;
+      engagedSessions: number;
+      hasGa4: boolean;
+      formEvents: number | null;
+      validLeadCount: number;
+    }
+  >();
+
+  for (const snap of ga4LiveSnaps) {
+    for (const ch of snap.channels) {
+      const mapped = mapGa4ChannelGroup(ch.channelGroup);
+      const cur = channelMap.get(mapped.key) || {
+        channelKey: mapped.key,
+        channelLabel: mapped.label,
+        source: mapped.source,
+        medium: mapped.medium,
+        sessions: 0,
+        engagedSessions: 0,
+        hasGa4: false,
+        formEvents: null,
+        validLeadCount: 0,
+      };
+      cur.sessions += ch.sessions;
+      cur.engagedSessions += ch.engagedSessions;
+      cur.hasGa4 = true;
+      channelMap.set(mapped.key, cur);
+    }
+  }
+
+  for (const l of validLeads) {
+    const normalizedLabel = normalizeMarketingChannelDisplay({
+      marketingSource: l.tracking?.marketingSource,
+      utmSource: l.tracking?.utmSource,
+      utmMedium: l.tracking?.utmMedium,
+      gclid: l.tracking?.gclid,
+      contactChannel: l.contactChannel,
+    });
+    const key = mapCrmChannelKey(normalizedLabel);
+    const cur = channelMap.get(key) || {
+      channelKey: key,
+      channelLabel: normalizedLabel,
+      source: l.tracking?.utmSource || 'Chưa xác định',
+      medium: l.tracking?.utmMedium || 'Chưa phân loại',
+      sessions: 0,
+      engagedSessions: 0,
+      hasGa4: false,
+      formEvents: null,
+      validLeadCount: 0,
+    };
+    cur.validLeadCount += 1;
+    channelMap.set(key, cur);
+  }
+
+  const channelRows: M02ChannelRowDto[] = Array.from(channelMap.values())
+    .sort((a, b) => b.sessions - a.sessions || b.validLeadCount - a.validLeadCount)
+    .slice(0, 10)
+    .map((c) => ({
+      channelKey: c.channelKey,
+      channelLabel: c.channelLabel,
+      source: c.source,
+      medium: c.medium,
+      sessions: c.sessions,
+      engagedSessions: c.hasGa4 ? c.engagedSessions : null,
+      engagementRatePct:
+        c.hasGa4 && c.sessions > 0
+          ? Number(((c.engagedSessions / c.sessions) * 100).toFixed(2))
+          : null,
+      formEvents: c.formEvents,
+      validLeadCount: c.validLeadCount,
+    }));
+
   const deviceRows = Array.from(deviceMap.entries())
     .map(([deviceCategory, sessions]) => ({ deviceCategory, sessions }))
     .sort((a, b) => b.sessions - a.sessions);
@@ -423,11 +468,11 @@ export async function getM02TrafficInteractionSpec(params?: {
     .map((g) => ({
       locationLabel:
         [g.city, g.region, g.country].filter((x) => x && x !== '(not set)').join(', ') ||
-        'Không xác định',
+        'Chưa xác định',
       sessions: g.sessions,
     }));
 
-  // Landing pages table (prefer GA4 live landingPagePlusQueryString + CRM landingPageUrl links)
+  // Landing pages table
   const lpMap = new Map<
     string,
     {
@@ -448,12 +493,14 @@ export async function getM02TrafficInteractionSpec(params?: {
           landingPage: cleanUrl,
           sessions: 0,
           engagedSessions: 0,
-          conversions: 0,
+          conversions: hasFormTracking ? 0 : null,
           validLeadCount: 0,
         };
         cur.sessions += lp.sessions;
         cur.engagedSessions = (cur.engagedSessions ?? 0) + lp.engagedSessions;
-        cur.conversions = (cur.conversions ?? 0) + lp.conversions;
+        if (cur.conversions !== null) {
+          cur.conversions += lp.conversions;
+        }
         lpMap.set(cleanUrl, cur);
       }
     }
@@ -471,6 +518,7 @@ export async function getM02TrafficInteractionSpec(params?: {
       lpMap.set(cleanUrl, cur);
     }
   }
+
   for (const l of validLeads) {
     if (l.tracking?.landingPageUrl) {
       const cleanUrl = sanitizeLandingPageUrl(l.tracking.landingPageUrl);
@@ -478,13 +526,14 @@ export async function getM02TrafficInteractionSpec(params?: {
         landingPage: cleanUrl,
         sessions: 0,
         engagedSessions: hasLiveLandingPages ? 0 : null,
-        conversions: hasLiveLandingPages ? 0 : null,
+        conversions: null,
         validLeadCount: 0,
       };
       cur.validLeadCount += 1;
       lpMap.set(cleanUrl, cur);
     }
   }
+
   const allLandingRows: M02LandingPageRowDto[] = Array.from(lpMap.values())
     .sort((a, b) => b.sessions - a.sessions || b.validLeadCount - a.validLeadCount)
     .map((r) => ({
@@ -499,49 +548,326 @@ export async function getM02TrafficInteractionSpec(params?: {
       validLeadCount: r.validLeadCount,
     }));
 
-  // Touchpoint interactions (actual collected events only)
-  const scopedTouchpoints = touchpoints.filter((t) => {
-    const ms = new Date(t.occurredAt).getTime();
-    if (ms < scope.startDateTime.getTime() || ms > scope.endDateTime.getTime()) return false;
-    return matchesWebsiteDomain(t.sourceWebsite, scope.selectedWebsite);
-  });
-  const phoneClicks = scopedTouchpoints.filter((t) => t.eventType === 'contact_click').length;
-  const formSubmitEvents = scopedTouchpoints.filter((t) => t.eventType === 'form_submit_success').length;
-
-  const interactionRows = [
+  const interactionRows: M02InteractionRowDto[] = [
+    {
+      actionKey: 'successfulFormEvent',
+      actionLabel: 'Sự kiện gửi biểu mẫu (Tracking)',
+      count: formEventTotal,
+      users: ga4FormEventEntry.length > 0 ? ga4FormEventEntry.reduce((s, [, v]) => s + v.users, 0) : null,
+      meaning: hasFormTracking
+        ? 'Lượt gửi biểu mẫu được mã theo dõi website/GA4 ghi nhận (tách biệt với hồ sơ Lead CRM)'
+        : 'Chưa cài sự kiện tracking form_submit / generate_lead trên website',
+      mappedEventName: ga4FormEventEntry[0]?.[0] || (formSubmitTp > 0 ? 'form_submit_success' : null),
+      trackingConfigured: hasFormTracking,
+    },
     {
       actionKey: 'phoneClickEvent',
-      actionLabel: 'Bấm số điện thoại',
-      count: phoneClicks > 0 ? phoneClicks : null,
-      users: null,
-      meaning: 'Lượt bấm nút gọi trên website (khác với cuộc gọi thực tế)',
-      mappedEventName: phoneClicks > 0 ? 'contact_click' : null,
+      actionLabel: 'Bấm nút Gọi điện',
+      count: phoneEventTotal,
+      users: ga4PhoneEventEntry.length > 0 ? ga4PhoneEventEntry.reduce((s, [, v]) => s + v.users, 0) : null,
+      meaning: hasPhoneTracking
+        ? 'Lượt bấm số điện thoại trên website (không đồng nhất với cuộc gọi thành công hay Lead)'
+        : 'Chưa cài sự kiện tracking bấm nút gọi (tel_click / contact_click)',
+      mappedEventName: ga4PhoneEventEntry[0]?.[0] || (phoneClicksTp > 0 ? 'contact_click' : null),
+      trackingConfigured: hasPhoneTracking,
     },
     {
       actionKey: 'zaloClickEvent',
-      actionLabel: 'Bấm Zalo',
-      count: null,
-      users: null,
-      meaning: 'Lượt bấm mở Zalo trên website (khác với tin nhắn thực tế)',
-      mappedEventName: null,
-    },
-    {
-      actionKey: 'successfulFormEvent',
-      actionLabel: 'Form gửi thành công',
-      count: formSubmitEvents > 0 ? formSubmitEvents : null,
-      users: null,
-      meaning: 'Sự kiện gửi form thành công ghi nhận từ website',
-      mappedEventName: formSubmitEvents > 0 ? 'form_submit_success' : null,
+      actionLabel: 'Bấm nút mở Zalo',
+      count: zaloEventTotal,
+      users: ga4ZaloEventEntry.length > 0 ? ga4ZaloEventEntry.reduce((s, [, v]) => s + v.users, 0) : null,
+      meaning: hasZaloTracking
+        ? 'Lượt bấm mở liên kết Zalo trên website (không đồng nhất với tin nhắn Lead)'
+        : 'Chưa cài sự kiện tracking bấm Zalo (zalo_click)',
+      mappedEventName: ga4ZaloEventEntry[0]?.[0] || null,
+      trackingConfigured: hasZaloTracking,
     },
     {
       actionKey: 'validFormLead',
-      actionLabel: 'Lead hợp lệ từ form',
+      actionLabel: 'Lead biểu mẫu hợp lệ (CRM đối soát)',
       count: validFormLeads.length,
       users: null,
-      meaning: 'Số Lead duy nhất hợp lệ đã tiếp nhận & sàng lọc trong CRM',
-      mappedEventName: 'crm_valid_form_lead',
+      meaning: 'Hồ sơ Lead biểu mẫu thực tế đã tiếp nhận và sàng lọc không spam trong CRM',
+      mappedEventName: 'leads.contactChannel=form_web',
+      trackingConfigured: true,
     },
   ];
+
+  // ==========================================================================
+  // C07 — KHỐI QUẢNG CÁO (ADS CAMPAIGNS & CRM ATTRIBUTION)
+  // ==========================================================================
+  const campaignRowsFromDb = adsMetricRows.filter((m) => m.grain === 'campaign');
+  const adGroupRowsFromDb = adsMetricRows.filter((m) => m.grain === 'ad_group');
+  const keywordRowsFromDb = adsMetricRows.filter((m) => m.grain === 'keyword');
+
+  // CRM Leads có bằng chứng quảng cáo (gclid, google_lead_form, hoặc utm_medium=cpc/paid)
+  const isPaidAdLead = (l: (typeof leads)[number]) => {
+    const med = (l.tracking?.utmMedium || '').toLowerCase();
+    const src = (l.tracking?.marketingSource || '').toLowerCase();
+    return (
+      Boolean(l.tracking?.gclid) ||
+      l.contactChannel === 'google_lead_form' ||
+      med === 'cpc' ||
+      med === 'ppc' ||
+      med === 'paid' ||
+      src.includes('google ads') ||
+      src.includes('facebook ads')
+    );
+  };
+
+  const allScopedAdLeads = scopedLeads.filter(isPaidAdLead);
+  const validScopedAdLeads = allScopedAdLeads.filter((l) => isL2Valid(l));
+  const wonScopedAdLeads = validScopedAdLeads.filter((l) => l.pipelineStatus === 'won');
+
+  // Tổng hợp chiến dịch quảng cáo (không chia đều chi phí campaign cho nhiều website nếu thiếu dữ liệu phân bổ!)
+  const campAggMap = new Map<
+    string,
+    {
+      campaignId: string;
+      campaignName: string;
+      status: string;
+      channelType: string | null;
+      costMicros: bigint;
+      impressions: number;
+      clicks: number;
+      conversionsMicros: bigint;
+      mappedWebsite: string | null;
+    }
+  >();
+
+  for (const m of campaignRowsFromDb) {
+    const cid = m.campaignExternalId || String(m.campaignId || 'unmapped');
+    const cname = m.campaign?.campaignName || m.campaignExternalId || 'Chiến dịch chưa đặt tên';
+    const cur = campAggMap.get(cid) || {
+      campaignId: cid,
+      campaignName: cname,
+      status: m.campaign ? (m.campaign.isActive ? 'ENABLED' : 'PAUSED') : 'ENABLED',
+      channelType: m.platform,
+      costMicros: 0n,
+      impressions: 0,
+      clicks: 0,
+      conversionsMicros: 0n,
+      mappedWebsite: null,
+    };
+    cur.costMicros += m.spendMicros ?? 0n;
+    cur.impressions += m.impressions || 0;
+    cur.clicks += m.clicks || 0;
+    cur.conversionsMicros += m.conversionsMicros ?? 0n;
+    if (!cur.mappedWebsite && m.pageUrlRaw) {
+      for (const w of scope.availableWebsites) {
+        if (m.pageUrlRaw.toLowerCase().includes(w.domain.toLowerCase())) {
+          cur.mappedWebsite = w.domain;
+          break;
+        }
+      }
+    }
+    campAggMap.set(cid, cur);
+  }
+
+  // Đối soát Lead CRM theo tên chiến dịch / utmCampaign / campaignId
+  const crmByCampKey = new Map<
+    string,
+    { total: number; valid: number; won: number; websites: Set<string> }
+  >();
+  for (const l of allScopedAdLeads) {
+    const campKey = (
+      l.tracking?.utmCampaign ||
+      l.tracking?.campaignName ||
+      '__UNMAPPED_AD_CAMPAIGN__'
+    )
+      .trim()
+      .toLowerCase();
+    const entry = crmByCampKey.get(campKey) || {
+      total: 0,
+      valid: 0,
+      won: 0,
+      websites: new Set<string>(),
+    };
+    entry.total += 1;
+    if (isL2Valid(l)) {
+      entry.valid += 1;
+      if (l.pipelineStatus === 'won') entry.won += 1;
+    }
+    if (l.sourceWebsite) entry.websites.add(l.sourceWebsite.toLowerCase());
+    crmByCampKey.set(campKey, entry);
+  }
+
+  let unattributedAccountCampaignCount = 0;
+  const campaignList: M02CampaignRowDto[] = [];
+
+  for (const c of campAggMap.values()) {
+    const matchCrm =
+      crmByCampKey.get(c.campaignName.trim().toLowerCase()) ||
+      crmByCampKey.get(c.campaignId.trim().toLowerCase()) ||
+      null;
+    const resolvedWebsite =
+      c.mappedWebsite ||
+      (matchCrm && matchCrm.websites.size === 1 ? Array.from(matchCrm.websites)[0] : null);
+
+    // Nếu đang lọc 1 website cụ thể mà campaign cấp tài khoản chưa xác định thuộc website nào -> không tự chia tỷ lệ chi phí!
+    if (scope.selectedWebsite && (!resolvedWebsite || !matchesWebsiteDomain(resolvedWebsite, scope.selectedWebsite))) {
+      if (!resolvedWebsite) unattributedAccountCampaignCount += 1;
+      continue;
+    }
+
+    const cost = microsToUnitNumber(c.costMicros);
+    const conversions = conversionsMicrosToNumber(c.conversionsMicros);
+    const attrTotal = matchCrm?.total || 0;
+    const attrValid = matchCrm?.valid || 0;
+    const attrWon = matchCrm?.won || 0;
+
+    campaignList.push({
+      campaignId: c.campaignId,
+      campaignName: c.campaignName,
+      status: c.status,
+      channelType: c.channelType,
+      currency: 'VND',
+      cost,
+      impressions: c.impressions,
+      clicks: c.clicks,
+      ctrPct: c.impressions > 0 ? Number(((c.clicks / c.impressions) * 100).toFixed(2)) : null,
+      avgCpc: c.clicks > 0 ? Number((cost / c.clicks).toFixed(0)) : null,
+      conversions,
+      costPerConversion: conversions > 0 ? Number((cost / conversions).toFixed(0)) : null,
+      attributedLeadCount: attrTotal,
+      validAttributedLeadCount: attrValid,
+      wonAttributedLeadCount: attrWon,
+      costPerValidLead: attrValid > 0 && cost > 0 ? Number((cost / attrValid).toFixed(0)) : null,
+      attributionStatus: !resolvedWebsite
+        ? 'UNATTRIBUTED_WEBSITE'
+        : attrValid > 0
+          ? 'RECONCILED'
+          : 'NO_CRM_MATCH',
+      attributionNote: !resolvedWebsite
+        ? 'Chiến dịch cấp tài khoản chưa gắn website đích cụ thể'
+        : attrValid > 0
+          ? 'Đã đối soát bằng UTM / GCLID với CRM'
+          : 'Chưa phát sinh Lead CRM khớp khóa chiến dịch trong kỳ',
+    });
+  }
+
+  campaignList.sort((a, b) => b.cost - a.cost || b.validAttributedLeadCount - a.validAttributedLeadCount);
+
+  const hasConnectedAdsData = hasAdsToken || campaignRowsFromDb.length > 0;
+  const adsTotalCost = hasConnectedAdsData
+    ? Number(campaignList.reduce((s, c) => s + c.cost, 0).toFixed(0))
+    : null;
+  const adsTotalImpr = hasConnectedAdsData
+    ? campaignList.reduce((s, c) => s + c.impressions, 0)
+    : null;
+  const adsTotalClicks = hasConnectedAdsData
+    ? campaignList.reduce((s, c) => s + c.clicks, 0)
+    : null;
+  const adsTotalConv = hasConnectedAdsData
+    ? Number(campaignList.reduce((s, c) => s + c.conversions, 0).toFixed(2))
+    : null;
+  const adsCtrPct =
+    adsTotalClicks !== null && adsTotalImpr !== null && adsTotalImpr > 0
+      ? Number(((adsTotalClicks / adsTotalImpr) * 100).toFixed(2))
+      : null;
+  const adsAvgCpc =
+    adsTotalCost !== null && adsTotalClicks !== null && adsTotalClicks > 0
+      ? Number((adsTotalCost / adsTotalClicks).toFixed(0))
+      : null;
+  const adsCostPerConv =
+    adsTotalCost !== null && adsTotalConv !== null && adsTotalConv > 0
+      ? Number((adsTotalCost / adsTotalConv).toFixed(0))
+      : null;
+  const crmCpl =
+    adsTotalCost !== null && adsTotalCost > 0 && validScopedAdLeads.length > 0
+      ? Number((adsTotalCost / validScopedAdLeads.length).toFixed(0))
+      : null;
+
+  // Chuỗi ngày cho Quảng cáo
+  const adsDayMap = new Map<string, { cost: number; conversions: number; clicks: number }>();
+  if (hasConnectedAdsData && !scope.selectedWebsite) {
+    for (const m of campaignRowsFromDb) {
+      const cur = adsDayMap.get(m.metricDate) || { cost: 0, conversions: 0, clicks: 0 };
+      cur.cost += microsToUnitNumber(m.spendMicros);
+      cur.conversions += conversionsMicrosToNumber(m.conversionsMicros);
+      cur.clicks += m.clicks || 0;
+      adsDayMap.set(m.metricDate, cur);
+    }
+  }
+
+  const adsSeries = trafficSeries.map((pt) => {
+    const hit = adsDayMap.get(pt.date);
+    return {
+      date: pt.date,
+      cost: hit ? Number(hit.cost.toFixed(0)) : hasConnectedAdsData && !scope.selectedWebsite ? 0 : null,
+      conversions: hit ? Number(hit.conversions.toFixed(2)) : hasConnectedAdsData && !scope.selectedWebsite ? 0 : null,
+      clicks: hit ? hit.clicks : hasConnectedAdsData && !scope.selectedWebsite ? 0 : null,
+    };
+  });
+
+  const adsSection: M02AdsSectionDto = {
+    status: hasConnectedAdsData ? 'CONNECTED' : 'UNCONFIGURED',
+    statusMessage: hasConnectedAdsData
+      ? unattributedAccountCampaignCount > 0 && scope.selectedWebsite
+        ? `Có ${unattributedAccountCampaignCount} chiến dịch cấp tài khoản chưa gắn riêng cho ${scope.selectedWebsite.domain}; chọn "Tất cả website" để xem tổng chi phí cấp tài khoản.`
+        : 'Đã đồng bộ chỉ số chiến dịch quảng cáo và đối soát Lead CRM.'
+      : 'Chưa kết nối Google Ads API (thiếu Developer Token). Bấm "Kiểm tra kết nối" để dán Developer Token & Mã tài khoản Google Ads ngay trên giao diện Cài đặt (không hiển thị số 0 giả cho chi phí/click).',
+    currencyCode: 'VND',
+    metrics: {
+      cost: adsTotalCost,
+      impressions: adsTotalImpr,
+      clicks: adsTotalClicks,
+      ctrPct: adsCtrPct,
+      avgCpc: adsAvgCpc,
+      conversions: adsTotalConv,
+      costPerConversion: adsCostPerConv,
+      attributedLeadCount: allScopedAdLeads.length,
+      validAttributedLeadCount: validScopedAdLeads.length,
+      wonAttributedLeadCount: wonScopedAdLeads.length,
+      costPerValidLead: crmCpl,
+      reconciliationNote: !hasConnectedAdsData
+        ? `Ghi nhận ${validScopedAdLeads.length} Lead hợp lệ có bằng chứng quảng cáo (GCLID/UTM) trong CRM; cần kết nối Google Ads API để tính CPL thực tế.`
+        : unattributedAccountCampaignCount > 0 && scope.selectedWebsite
+          ? `Không chia đều chi phí của ${unattributedAccountCampaignCount} chiến dịch chưa phân bổ website.`
+          : 'CPL tính trên chi phí quảng cáo thực tế đối soát cùng phạm vi với Lead hợp lệ từ quảng cáo.',
+    },
+    series: adsSeries,
+    campaigns: paginateArray(campaignList, params?.adsPage || 1, params?.adsPageSize || 20),
+    breakdowns: {
+      adGroups: adGroupRowsFromDb.slice(0, 30).map((r, idx) => {
+        const cost = microsToUnitNumber(r.spendMicros);
+        const conv = conversionsMicrosToNumber(r.conversionsMicros);
+        return {
+          adGroupId: `ag-${r.id}-${idx + 1}`,
+          adGroupName: r.keywordRaw || r.campaignExternalId || 'Nhóm quảng cáo',
+          campaignName: r.campaign?.campaignName || r.campaignExternalId || 'Chiến dịch',
+          cost,
+          impressions: r.impressions || 0,
+          clicks: r.clicks || 0,
+          conversions: conv,
+          cpa: conv > 0 ? Number((cost / conv).toFixed(0)) : null,
+        };
+      }),
+      keywords: keywordRowsFromDb.slice(0, 50).map((r) => {
+        const cost = microsToUnitNumber(r.spendMicros);
+        const impr = r.impressions || 0;
+        const clk = r.clicks || 0;
+        return {
+          keywordText: r.keywordRaw || r.keywordTextNorm || 'Từ khóa quảng cáo',
+          matchType: r.keywordMatchType || 'BROAD',
+          adGroupName: r.campaignExternalId || 'Nhóm quảng cáo',
+          campaignName: r.campaign?.campaignName || 'Chiến dịch',
+          impressions: impr,
+          clicks: clk,
+          ctrPct: impr > 0 ? Number(((clk / impr) * 100).toFixed(2)) : null,
+          cost,
+          conversions: conversionsMicrosToNumber(r.conversionsMicros),
+        };
+      }),
+      keywordAvailabilityNote: hasConnectedAdsData
+        ? keywordRowsFromDb.length === 0
+          ? 'Chưa có dữ liệu cấp từ khóa quảng cáo trong kỳ đang chọn.'
+          : null
+        : 'Chưa kết nối tài khoản Google Ads nên chưa tải được nhóm quảng cáo, từ khóa, thiết bị và khu vực quảng cáo.',
+      devices: [],
+      regions: [],
+    },
+  };
 
   // Product interest rows
   const productInterestRows = products
@@ -563,48 +889,13 @@ export async function getM02TrafficInteractionSpec(params?: {
     .filter((p) => p.validLeadCount > 0)
     .sort((a, b) => b.validLeadCount - a.validLeadCount);
 
-  const lastLog = syncLogs[0] || null;
-  // Journey steps derived from pageRows + GA4 events + CRM valid form leads
-  const productViewSessions = pageRows.reduce((sum, p) => {
-    const url = (p.pageUrlRaw || p.pagePathNorm || '').toLowerCase();
-    if (
-      url.includes('/san-pham') ||
-      url.includes('man-hinh-led') ||
-      url.includes('bang-led') ||
-      url.includes('bang-dien-tu') ||
-      url.includes('module-led') ||
-      url.includes('/led-')
-    ) {
-      return sum + (p.clicks || p.pageViews);
-    }
-    return sum;
-  }, 0);
-
-  const contactPageSessions = pageRows.reduce((sum, p) => {
-    const url = (p.pageUrlRaw || p.pagePathNorm || '').toLowerCase();
-    if (
-      url.includes('/lien-he') ||
-      url.includes('/bao-gia') ||
-      url.includes('/tu-van') ||
-      url.includes('/contact')
-    ) {
-      return sum + (p.clicks || p.pageViews);
-    }
-    return sum;
-  }, 0);
-
-  const ga4FormCount = Array.from(ga4EventMap.entries())
-    .filter(([k]) => {
-      const l = k.toLowerCase();
-      return l.includes('form_submit') || l.includes('generate_lead') || l.includes('contact_form');
-    })
-    .reduce((s, [, v]) => s + v.count, 0);
-
-  const resolvedFormStepCount =
-    ga4FormCount > 0 ? ga4FormCount : formSubmitEvents > 0 ? formSubmitEvents : validFormLeads.length;
-
-  const lastSuccessLog = syncLogs.find((s) => s.status === 'success') || null;
-  const isError = lastLog?.status === 'failed';
+  const ga4Logs = syncLogs.filter((s) => s.platform === 'ga4');
+  const lastLog = ga4Logs[0] || null;
+  const lastSuccessLog = ga4Logs.find((s) => s.status === 'success') || null;
+  const isError = lastLog?.status === 'failed' && !hasTrafficData;
+  const latestDataThrough =
+    accountRows[accountRows.length - 1]?.metricDate ||
+    (ga4LiveSnaps.length > 0 ? scope.endDateStr : null);
 
   return {
     scope: {
@@ -615,12 +906,15 @@ export async function getM02TrafficInteractionSpec(params?: {
       endDate: scope.endDateStr,
       timezone: scope.timezone,
       isTodayIncluded: scope.isTodayIncluded,
-      cohortDefinition: 'Truy cập & Lead phát sinh trong khoảng ngày và website đang chọn',
+      cohortDefinition: 'Truy cập website, chiến dịch quảng cáo và Lead CRM phát sinh trong kỳ đang chọn',
+      previousStartDate: scope.prevStartDateStr,
+      previousEndDate: scope.prevEndDateStr,
     },
     freshness: {
-      lastCheckedAt: lastLog?.startedAt?.toISOString() || new Date().toISOString(),
-      lastSuccessAt: lastSuccessLog?.completedAt?.toISOString() || null,
-      dataThrough: accountRows[accountRows.length - 1]?.metricDate || null,
+      lastCheckedAt: ga4LiveSnaps[0]?.fetchedAt || lastLog?.startedAt?.toISOString() || new Date().toISOString(),
+      lastSuccessAt:
+        ga4LiveSnaps[0]?.fetchedAt || lastSuccessLog?.completedAt?.toISOString() || null,
+      dataThrough: latestDataThrough,
       state: isError
         ? 'ERROR'
         : !hasTrafficData
@@ -629,27 +923,31 @@ export async function getM02TrafficInteractionSpec(params?: {
             ? 'PRELIMINARY'
             : 'FINALIZED',
       statusMessage: isError
-        ? 'Chưa cập nhật được; đang hiển thị số liệu gần nhất.'
-        : scope.isTodayIncluded
-          ? 'Số liệu trong ngày còn sơ bộ.'
-          : lastSuccessLog?.completedAt
-            ? `Cập nhật lúc ${new Date(lastSuccessLog.completedAt).toLocaleString('vi-VN')}`
-            : 'Đang hiển thị dữ liệu cập nhật gần nhất.',
+        ? 'Không tải được dữ liệu mới từ GA4; vui lòng kiểm tra kết nối.'
+        : !hasTrafficData
+          ? 'Đang đồng bộ dữ liệu GA4 nền cho khoảng thời gian này.'
+          : scope.isTodayIncluded
+            ? 'Số liệu trong ngày đang tạm tính (GA4 cập nhật đầy đủ sau 24–48 giờ).'
+            : latestDataThrough
+              ? `Dữ liệu đến ${latestDataThrough}`
+              : 'Đã đồng bộ dữ liệu.',
     },
     coverage: {
       availableWebsites: scope.availableWebsites,
       includedWebsites: scope.selectedWebsite
         ? [scope.selectedWebsite.domain]
         : scope.availableWebsites.map((w) => w.domain),
-      missingWebsites: [],
+      missingWebsites: scope.availableWebsites
+        .filter((w) => !w.ga4PropertyId)
+        .map((w) => w.domain),
       note:
-        !scope.selectedWebsite && scope.availableWebsites.length > 1
-          ? 'Khi xem tất cả website, số người dùng tổng hợp có thể trùng lặp giữa các website.'
+        !scope.selectedWebsite && propIds.length > 1
+          ? 'Khi chọn "Tất cả website", chỉ số "Người dùng" và "Thời gian tương tác/người dùng hoạt động" cần xem theo từng website để không cộng trùng người dùng giữa các GA4 property.'
           : null,
     },
     version: `m02-${scope.websiteId}-${scope.startDateStr}-${scope.endDateStr}-${validFormLeads.length}-${totalSessions ?? 'null'}`,
     metrics: {
-      users: resolvedUsers,
+      users: periodUsers,
       newUsers: periodNewUsers,
       sessions: totalSessions,
       pageViews: totalPageViews,
@@ -657,7 +955,13 @@ export async function getM02TrafficInteractionSpec(params?: {
       engagedSessions: periodEngagedSessions,
       averageEngagementSeconds: periodAvgEngagementSec,
       validFormLeadCount: validFormLeads.length,
+      formEventCount: formEventTotal,
       activeUsers30m: realtime.activeUsers30m,
+      activeWindowCheckedAt: realtime.checkedAt,
+      previousSessions: prevSessionsTotal,
+      previousUsers: null,
+      previousPageViews: prevPageViewsTotal,
+      previousFormLeadCount: prevValidFormLeadsCount,
     },
     realtimeMinutesSeries: realtime.minutesSeries,
     charts: {
@@ -669,17 +973,16 @@ export async function getM02TrafficInteractionSpec(params?: {
     tables: {
       landingPageRows: paginateArray(allLandingRows, params?.page || 1, params?.pageSize || 20),
       interactionRows,
-      formSessionRatePct: null,
+      formSessionRatePct:
+        totalSessions && totalSessions > 0 && formEventTotal !== null
+          ? Number(((formEventTotal / totalSessions) * 100).toFixed(2))
+          : null,
       productInterestRows,
-      journeySteps: [
-        { stepKey: 'landing', label: 'Trang vào', sessionCount: totalSessions },
-        { stepKey: 'product_view', label: 'Xem sản phẩm', sessionCount: productViewSessions > 0 ? productViewSessions : null },
-        { stepKey: 'contact_click', label: 'Trang liên hệ', sessionCount: contactPageSessions > 0 ? contactPageSessions : null },
-        { stepKey: 'form_submit', label: 'Gửi form thành công', sessionCount: resolvedFormStepCount },
-      ],
+      journeySteps: [],
       journeyAvailable: false,
       journeyNote:
-        'Chưa có dữ liệu chuỗi bước theo cùng nhóm phiên; chỉ hiển thị các chỉ số độc lập đang thu thập được.',
+        'Các chỉ số Phiên truy cập, Sự kiện biểu mẫu và Lead CRM có đơn vị thống kê khác nhau nên không ghép chung một phễu phiên.',
     },
+    ads: adsSection,
   };
 }

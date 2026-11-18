@@ -9,6 +9,7 @@
  */
 
 import { prisma } from '@toantrung/database';
+import { upsertActionableNotification } from '../core/notifications/service';
 import {
   retryUnresolvedGclids,
   triggerPlatformSyncExecution,
@@ -212,16 +213,14 @@ export async function runDailyOverdueQuoteReminderJob() {
   let notifiedCount = 0;
   for (const lead of overdueLeads) {
     if (lead.assignedSalesId) {
-      await prisma.notification.create({
-        data: {
-          userId: lead.assignedSalesId,
-          title: `Nhắc báo giá quá 7 ngày: ${lead.leadCode}`,
-          summary: `Hồ sơ ${lead.companyName || lead.contactName || lead.leadCode} đã gửi báo giá quá 7 ngày nhưng chưa ghi nhận phản hồi từ khách hàng.`,
-          category: 'Nhắc báo giá',
-          actionLabel: 'Kiểm tra Lead',
-          actionUrl: `/leads`,
-          requiredPermission: 'LEAD_VIEW_OWN',
-        },
+      await upsertActionableNotification({
+        userId: lead.assignedSalesId,
+        title: `Nhắc báo giá quá 7 ngày: ${lead.leadCode}`,
+        summary: `Hồ sơ ${lead.companyName || lead.contactName || lead.leadCode} đã gửi báo giá quá 7 ngày nhưng chưa ghi nhận phản hồi từ khách hàng.`,
+        category: 'Nhắc báo giá',
+        actionLabel: 'Xem chi tiết',
+        actionUrl: `/leads?leadId=${lead.id}`,
+        requiredPermission: 'LEAD_VIEW_OWN',
       });
       notifiedCount += 1;
     }

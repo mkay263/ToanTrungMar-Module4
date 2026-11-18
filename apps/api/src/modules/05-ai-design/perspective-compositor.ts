@@ -88,29 +88,79 @@ export function validateGeneratedImageBuffer(buffer: Buffer | null | undefined):
     }
   }
 
-  // JPEG magic header: FF D8 FF
+  // JPEG magic header: FF D8 FF — scan SOF markers (C0..CF except C4, C8, CC) for exact dimensions
   if (buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    let jpegW: number | null = null;
+    let jpegH: number | null = null;
+    let offset = 2;
+    while (offset + 9 < buffer.length) {
+      if (buffer[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = buffer[offset + 1];
+      if (marker === 0xff) {
+        offset += 1;
+        continue;
+      }
+      if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+        offset += 2;
+        continue;
+      }
+      const segLen = buffer.readUInt16BE(offset + 2);
+      if (segLen < 2) break;
+      if (
+        marker >= 0xc0 &&
+        marker <= 0xcf &&
+        marker !== 0xc4 &&
+        marker !== 0xc8 &&
+        marker !== 0xcc &&
+        offset + 9 <= buffer.length
+      ) {
+        jpegH = buffer.readUInt16BE(offset + 5);
+        jpegW = buffer.readUInt16BE(offset + 7);
+        break;
+      }
+      offset += 2 + segLen;
+    }
     return {
       isValid: true,
       detectedMimeType: 'image/jpeg',
-      widthPx: null,
-      heightPx: null,
+      widthPx: jpegW && jpegW > 0 ? jpegW : null,
+      heightPx: jpegH && jpegH > 0 ? jpegH : null,
       errorCode: null,
       errorMessage: null,
     };
   }
 
-  // WEBP magic header: RIFF....WEBP
+  // WEBP magic header: RIFF....WEBP — parse VP8 / VP8L / VP8X chunk for exact dimensions
   if (
-    buffer.length >= 16 &&
+    buffer.length >= 30 &&
     buffer.toString('ascii', 0, 4) === 'RIFF' &&
     buffer.toString('ascii', 8, 12) === 'WEBP'
   ) {
+    let webpW: number | null = null;
+    let webpH: number | null = null;
+    const chunkTag = buffer.toString('ascii', 12, 16);
+    if (chunkTag === 'VP8X' && buffer.length >= 30) {
+      webpW = 1 + (buffer[24] | (buffer[25] << 8) | (buffer[26] << 16));
+      webpH = 1 + (buffer[27] | (buffer[28] << 8) | (buffer[29] << 16));
+    } else if (chunkTag === 'VP8 ' && buffer.length >= 30) {
+      webpW = buffer.readUInt16LE(26) & 0x3fff;
+      webpH = buffer.readUInt16LE(28) & 0x3fff;
+    } else if (chunkTag === 'VP8L' && buffer.length >= 25 && buffer[20] === 0x2f) {
+      const b0 = buffer[21];
+      const b1 = buffer[22];
+      const b2 = buffer[23];
+      const b3 = buffer[24];
+      webpW = 1 + (((b1 & 0x3f) << 8) | b0);
+      webpH = 1 + (((b3 & 0x0f) << 10) | (b2 << 2) | ((b1 & 0xc0) >> 6));
+    }
     return {
       isValid: true,
       detectedMimeType: 'image/webp',
-      widthPx: null,
-      heightPx: null,
+      widthPx: webpW && webpW > 0 ? webpW : null,
+      heightPx: webpH && webpH > 0 ? webpH : null,
       errorCode: null,
       errorMessage: null,
     };

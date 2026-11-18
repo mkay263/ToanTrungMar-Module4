@@ -1,15 +1,18 @@
 import { prisma } from '@toantrung/database';
 import {
   isL2Valid,
+  normalizeMarketingChannelDisplay,
   type M03AdsSeoDashboardDto,
   type M03SeoComparisonRowDto,
+  type M03SeoContentRowDto,
   type M03SeoDailyPointDto,
+  type M03SeoDeviceCountryRowDto,
+  type RoleCode,
 } from '@toantrung/contracts';
 import {
   matchesWebsiteDomain,
   paginateArray,
   resolveDashboardScope,
-  safeDiv,
   sanitizeLandingPageUrl,
 } from '../../core/website-catalog';
 import {
@@ -20,6 +23,10 @@ import {
   getCachedGscSiteStatus,
   getGa4LiveSnapshotsForProperties,
 } from '../02-tracking-sync/ga4-live-cache.service';
+import {
+  getGoogleTrendsLiveSnapshot,
+  getSerpApiTrendsKey,
+} from './google-trends.service';
 
 export function computeCostPerValidAdLead(
   adCost: number | null,
@@ -31,6 +38,14 @@ export function computeCostPerValidAdLead(
   return Number((adCost / validAdLeadCount).toFixed(2));
 }
 
+function mapSeoWorkflowLabel(status: string, hasError: boolean): string {
+  if (status === 'published') return 'Đã xuất bản';
+  if (status === 'approved_scheduled') {
+    return hasError ? 'Lỗi xuất bản' : 'Đã duyệt lịch đăng';
+  }
+  return 'Bản nháp';
+}
+
 export async function getM03AdsSeoDashboardSpec(params?: {
   websiteId?: string | null;
   preset?: string | null;
@@ -38,9 +53,14 @@ export async function getM03AdsSeoDashboardSpec(params?: {
   to?: string | null;
   page?: number;
   pageSize?: number;
+  contentPage?: number;
+  minImpr?: number;
+  maxCtr?: number;
+  roleCode?: RoleCode;
 }): Promise<M03AdsSeoDashboardDto> {
   const scope = await resolveDashboardScope(params);
   const hasAdsToken = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
+  const isAdsReadOnly = params?.roleCode === 'ADS';
 
   const gscSites = scope.gscSiteUrls;
   const [
@@ -56,6 +76,9 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     ga4LiveSnaps,
     siteStatusRows,
     trendMetricRows,
+    seoArticles,
+    liveTrendsSnap,
+    serpApiKey,
   ] = await Promise.all([
     gscSites.length > 0
       ? prisma.platformDailyMetric.findMany({
@@ -130,7 +153,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       orderBy: { id: 'desc' },
       take: 10,
     }),
-    getGa4LiveSnapshotsForProperties(scope.ga4PropertyIds, scope.startDateStr, scope.endDateStr),
+    getGa4LiveSnapshotsForProperties(scope.ga4PropertyIds, scope.startDateStr, scope.endDateStr, false),
     getCachedGscSiteStatus(gscSites),
     prisma.platformDailyMetric.findMany({
       where: {
@@ -140,27 +163,81 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       orderBy: { metricDate: 'asc' },
       take: 200,
     }),
+    isAdsReadOnly
+      ? Promise.resolve([])
+      : prisma.seoArticle.findMany({
+          include: {
+            keyword: { select: { keyword: true } },
+            createdBy: { select: { fullName: true } },
+          },
+          orderBy: { updatedAt: 'desc' },
+          take: 200,
+        }),
+    getGoogleTrendsLiveSnapshot(false).catch(() => null),
+    getSerpApiTrendsKey().catch(() => null),
   ]);
 
-  const organicSessionsFromGa4 =
-    ga4LiveSnaps.length > 0
-      ? ga4LiveSnaps.reduce((sum, snap) => {
-          const org = snap.channels.find((c) => c.channelGroup.toLowerCase().includes('organic search'));
-          return sum + (org?.sessions || 0);
-        }, 0)
+  let organicSessionsFromGa4: number | null = null;
+  let organicEngagedSessionsFromGa4 = 0;
+  if (ga4LiveSnaps.length > 0) {
+    organicSessionsFromGa4 = 0;
+    for (const snap of ga4LiveSnaps) {
+      const org = snap.channels.find((c) =>
+        c.channelGroup.toLowerCase().includes('organic search'),
+      );
+      if (org) {
+        organicSessionsFromGa4 += org.sessions;
+        organicEngagedSessionsFromGa4 += org.engagedSessions;
+      }
+    }
+  }
+  const organicEngagementRatePct =
+    organicSessionsFromGa4 !== null && organicSessionsFromGa4 > 0
+      ? Number(((organicEngagedSessionsFromGa4 / organicSessionsFromGa4) * 100).toFixed(2))
       : null;
 
   const scopedLeads = leads.filter((l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite));
   const validLeads = scopedLeads.filter((l) => isL2Valid(l));
-  const validAdLeads = validLeads.filter(
-    (l) =>
-      Boolean(l.tracking?.gclid) ||
-      (l.tracking?.marketingSource || '').toLowerCase().includes('google ads'),
-  );
-  const organicValidLeads = validLeads.filter((l) => {
-    const ms = (l.tracking?.marketingSource || '').toLowerCase();
-    return ms.includes('organic') || ms.includes('seo') || ms.includes('tìm kiếm tự nhiên');
+
+  const validAdLeads = validLeads.filter((l) => {
+    const ch = normalizeMarketingChannelDisplay({
+      marketingSource: l.tracking?.marketingSource,
+      utmSource: l.tracking?.utmSource,
+      utmMedium: l.tracking?.utmMedium,
+      gclid: l.tracking?.gclid,
+      contactChannel: l.contactChannel,
+    });
+    return ch === 'Google Ads' || ch === 'Quảng cáo Facebook';
   });
+
+  // C08 & C04: Chỉ tính Lead từ tìm kiếm tự nhiên khi có bằng chứng UTM/marketingSource rõ ràng; không tự suy từ thiếu UTM
+  const organicValidLeads = validLeads.filter((l) => {
+    const ch = normalizeMarketingChannelDisplay({
+      marketingSource: l.tracking?.marketingSource,
+      utmSource: l.tracking?.utmSource,
+      utmMedium: l.tracking?.utmMedium,
+      gclid: l.tracking?.gclid,
+      contactChannel: l.contactChannel,
+    });
+    return ch === 'Tìm kiếm tự nhiên';
+  });
+
+  const websiteFormLeadsWithoutUtm = validLeads.filter(
+    (l) =>
+      l.contactChannel === 'form_web' &&
+      !l.tracking?.utmSource &&
+      !l.tracking?.utmMedium &&
+      !l.tracking?.gclid &&
+      normalizeMarketingChannelDisplay({
+        marketingSource: l.tracking?.marketingSource,
+        contactChannel: l.contactChannel,
+      }) === 'Chưa xác định',
+  );
+
+  const organicLeadVerificationState: 'VERIFIED' | 'INSUFFICIENT_EVIDENCE' =
+    organicValidLeads.length === 0 && websiteFormLeadsWithoutUtm.length > 0
+      ? 'INSUFFICIENT_EVIDENCE'
+      : 'VERIFIED';
 
   // -------------------------------------------------------------------------
   // SEO CALCULATIONS (from account grain for totals, keyword/page for tables)
@@ -192,10 +269,15 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       ? Number((((totalClicks - prevTotalClicks) / prevTotalClicks) * 100).toFixed(2))
       : null;
 
-  // Daily SEO series across every calendar day
   const gscDayMap = new Map<
     string,
-    { clicks: number; impressions: number; posWeighted: number; posImpr: number; completeness: M03SeoDailyPointDto['completenessState'] }
+    {
+      clicks: number;
+      impressions: number;
+      posWeighted: number;
+      posImpr: number;
+      completeness: M03SeoDailyPointDto['completenessState'];
+    }
   >();
   for (const r of gscAccountCur) {
     const cur = gscDayMap.get(r.metricDate) || {
@@ -213,7 +295,12 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     }
     const siteMeta = gscMetaMap[r.accountPropertyId];
     const state = classifyGscDateBySourceMetadata(r.metricDate, siteMeta);
-    if (state === 'FINALIZED' || state === 'PRELIMINARY' || state === 'UNKNOWN' || state === 'QUERY_ERROR') {
+    if (
+      state === 'FINALIZED' ||
+      state === 'PRELIMINARY' ||
+      state === 'UNKNOWN' ||
+      state === 'QUERY_ERROR'
+    ) {
       cur.completeness = state;
     }
     gscDayMap.set(r.metricDate, cur);
@@ -234,8 +321,12 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       date: dateStr,
       clicks: hit ? hit.clicks : null,
       impressions: hit ? hit.impressions : null,
-      ctrPct: hit && hit.impressions > 0 ? Number(((hit.clicks / hit.impressions) * 100).toFixed(2)) : null,
-      averagePosition: hit && hit.posImpr > 0 ? Number((hit.posWeighted / hit.posImpr).toFixed(2)) : null,
+      ctrPct:
+        hit && hit.impressions > 0
+          ? Number(((hit.clicks / hit.impressions) * 100).toFixed(2))
+          : null,
+      averagePosition:
+        hit && hit.posImpr > 0 ? Number((hit.posWeighted / hit.posImpr).toFixed(2)) : null,
       completenessState: hit ? hit.completeness : 'NO_DATA',
     });
   }
@@ -245,6 +336,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     prevRows: typeof gscQueryPrev,
     sanitizeUrl: boolean,
   ): M03SeoComparisonRowDto[] => {
+    const hasPrevAny = prevRows.length > 0;
     const curMap = new Map<string, { clicks: number; impr: number; posW: number; posI: number }>();
     for (const r of curRows) {
       const k = sanitizeUrl
@@ -277,17 +369,30 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       prevMap.set(k, prev);
     }
 
-    return Array.from(curMap.entries())
-      .map(([key, c]) => {
+    // Bao gồm cả những trang/từ khóa có ở kỳ trước nhưng giảm về 0 ở kỳ này để phát hiện suy giảm chính xác!
+    const allKeys = new Set<string>([...curMap.keys(), ...prevMap.keys()]);
+
+    return Array.from(allKeys)
+      .map((key) => {
+        const c = curMap.get(key) || { clicks: 0, impr: 0, posW: 0, posI: 0 };
         const p = prevMap.get(key);
+        const curCtr = c.impr > 0 ? Number(((c.clicks / c.impr) * 100).toFixed(2)) : null;
         const avgPos = c.posI > 0 ? Number((c.posW / c.posI).toFixed(2)) : null;
+
+        const prevClicks = hasPrevAny ? (p ? p.clicks : 0) : null;
+        const prevImpr = hasPrevAny ? (p ? p.impr : 0) : null;
+        const prevCtr =
+          p && p.impr > 0 ? Number(((p.clicks / p.impr) * 100).toFixed(2)) : hasPrevAny ? 0 : null;
         const prevPos = p && p.posI > 0 ? Number((p.posW / p.posI).toFixed(2)) : null;
-        const prevClicks = p ? p.clicks : null;
+
         const clickChange = prevClicks !== null ? c.clicks - prevClicks : null;
         const clickChangePct =
           clickChange !== null && prevClicks !== null && prevClicks > 0
             ? Number(((clickChange / prevClicks) * 100).toFixed(2))
             : null;
+        const impressionChange = prevImpr !== null ? c.impr - prevImpr : null;
+        const ctrChangePctPt =
+          curCtr !== null && prevCtr !== null ? Number((curCtr - prevCtr).toFixed(2)) : null;
         const positionImprovement =
           avgPos !== null && prevPos !== null ? Number((prevPos - avgPos).toFixed(2)) : null;
 
@@ -295,11 +400,15 @@ export async function getM03AdsSeoDashboardSpec(params?: {
           key,
           clicks: c.clicks,
           impressions: c.impr,
-          ctrPct: c.impr > 0 ? Number(((c.clicks / c.impr) * 100).toFixed(2)) : null,
+          ctrPct: curCtr,
           averagePosition: avgPos,
           previousClicks: prevClicks,
           clickChange,
           clickChangePct,
+          previousImpressions: prevImpr,
+          impressionChange,
+          previousCtrPct: prevCtr,
+          ctrChangePctPt,
           previousPosition: prevPos,
           positionImprovement,
         };
@@ -310,8 +419,27 @@ export async function getM03AdsSeoDashboardSpec(params?: {
   const allQueryRows = aggregateBreakdown(gscQueryCur, gscQueryPrev, false);
   const allPageRows = aggregateBreakdown(gscPageCur, gscPagePrev, true);
 
-  const opportunityThresholdMinImpr = 10;
-  const ctrCeiling = overallCtrPct ?? 3;
+  // Trang tăng / giảm cho cột 4/12 (C08)
+  const risingPages = allPageRows
+    .filter((p) => (p.clickChange ?? 0) > 0 || ((p.clickChange ?? 0) === 0 && (p.impressionChange ?? 0) > 10))
+    .sort((a, b) => (b.clickChange ?? 0) - (a.clickChange ?? 0) || (b.impressionChange ?? 0) - (a.impressionChange ?? 0))
+    .slice(0, 5);
+
+  const decliningPages = allPageRows
+    .filter((p) => (p.clickChange ?? 0) < 0 || ((p.clickChange ?? 0) === 0 && (p.impressionChange ?? 0) < -10))
+    .sort((a, b) => (a.clickChange ?? 0) - (b.clickChange ?? 0) || (a.impressionChange ?? 0) - (b.impressionChange ?? 0))
+    .slice(0, 5);
+
+  // Điều kiện cơ hội có thể cấu hình (C08)
+  const opportunityThresholdMinImpr =
+    params?.minImpr && Number.isFinite(params.minImpr) && params.minImpr > 0
+      ? Math.round(params.minImpr)
+      : 15;
+  const ctrCeiling =
+    params?.maxCtr && Number.isFinite(params.maxCtr) && params.maxCtr > 0
+      ? Number(params.maxCtr.toFixed(2))
+      : Number((overallCtrPct ?? 3).toFixed(2));
+
   const opportunityQueries = allQueryRows
     .filter(
       (q) =>
@@ -319,7 +447,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         (q.ctrPct === null || q.ctrPct < ctrCeiling),
     )
     .sort((a, b) => b.impressions - a.impressions)
-    .slice(0, 10)
+    .slice(0, 12)
     .map((q) => ({
       query: q.key,
       impressions: q.impressions,
@@ -327,10 +455,50 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       averagePosition: q.averagePosition,
     }));
 
+  // Tab Nội dung (C08: contentId, targetWebsite, targetUrl, targetQuery, owner, workflowStatus, updatedAt, publishedAt, publishError)
+  const scopedArticles = seoArticles.filter((a) =>
+    matchesWebsiteDomain(a.targetWebsite, scope.selectedWebsite),
+  );
+  const contentRows: M03SeoContentRowDto[] = scopedArticles.map((a) => ({
+    contentId: a.id,
+    title: a.title,
+    targetWebsite: a.targetWebsite || null,
+    targetUrl: a.publishedUrl || (a.slug ? `/${a.slug}` : null),
+    targetQuery: a.keyword?.keyword || a.topic || 'Chưa gắn từ khóa',
+    owner: a.createdBy?.fullName || 'Phòng Marketing',
+    workflowStatus: mapSeoWorkflowLabel(a.status, Boolean(a.lastPublishError)),
+    updatedAt: a.updatedAt.toISOString(),
+    publishedAt: a.publishedAt ? a.publishedAt.toISOString() : null,
+    publishError: a.lastPublishError || null,
+  }));
+
+  // Thiết bị & Quốc gia từ GA4/GSC khi có dữ liệu
+  const deviceCountryRows: M03SeoDeviceCountryRowDto[] = [];
+  for (const snap of ga4LiveSnaps) {
+    for (const d of snap.devices) {
+      const existing = deviceCountryRows.find(
+        (x) => x.dimensionType === 'DEVICE' && x.dimensionKey === d.deviceCategory,
+      );
+      if (existing) {
+        existing.clicks += d.sessions;
+      } else {
+        deviceCountryRows.push({
+          dimensionType: 'DEVICE',
+          dimensionKey: d.deviceCategory,
+          clicks: d.sessions,
+          impressions: 0,
+          ctrPct: null,
+          averagePosition: null,
+        });
+      }
+    }
+  }
+
   const gscLogs = syncLogs.filter((s) => s.platform === 'search_console');
   const lastGscLog = gscLogs[0] || null;
   const lastGscSuccess = gscLogs.find((s) => s.status === 'success') || null;
-  const isError = lastGscLog?.status === 'failed';
+  const isError = lastGscLog?.status === 'failed' && !hasGscData;
+  const latestDataThrough = gscAccountCur[gscAccountCur.length - 1]?.metricDate || null;
 
   return {
     scope: {
@@ -341,12 +509,15 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       endDate: scope.endDateStr,
       timezone: scope.timezone,
       isTodayIncluded: scope.isTodayIncluded,
-      cohortDefinition: 'Dữ liệu tìm kiếm, quảng cáo & Lead quy nguồn trong kỳ đang chọn',
+      cohortDefinition:
+        'Dữ liệu tìm kiếm tự nhiên (Search Console cấp site), lưu lượng tìm kiếm tự nhiên (GA4) và bài viết SEO trong kỳ',
+      previousStartDate: scope.prevStartDateStr,
+      previousEndDate: scope.prevEndDateStr,
     },
     freshness: {
       lastCheckedAt: lastGscLog?.startedAt?.toISOString() || new Date().toISOString(),
       lastSuccessAt: lastGscSuccess?.completedAt?.toISOString() || null,
-      dataThrough: gscAccountCur[gscAccountCur.length - 1]?.metricDate || null,
+      dataThrough: latestDataThrough,
       state: isError
         ? 'ERROR'
         : !hasGscData
@@ -355,27 +526,32 @@ export async function getM03AdsSeoDashboardSpec(params?: {
             ? 'PRELIMINARY'
             : 'FINALIZED',
       statusMessage: isError
-        ? 'Chưa cập nhật được; đang hiển thị số liệu gần nhất.'
-        : scope.isTodayIncluded
-          ? 'Số liệu trong ngày còn sơ bộ.'
-          : lastGscSuccess?.completedAt
-            ? `Cập nhật lúc ${new Date(lastGscSuccess.completedAt).toLocaleString('vi-VN')}`
-            : 'Đang hiển thị dữ liệu cập nhật gần nhất.',
+        ? 'Không tải được dữ liệu Search Console mới.'
+        : !hasGscData
+          ? 'Chưa có dữ liệu Search Console trong khoảng ngày đang chọn (Search Console có độ trễ chuẩn 24–48 giờ).'
+          : latestDataThrough
+            ? `Dữ liệu đến ${latestDataThrough} (Search Console trễ chuẩn 1–2 ngày)`
+            : 'Đã đồng bộ dữ liệu Search Console.',
     },
     coverage: {
       availableWebsites: scope.availableWebsites,
       includedWebsites: scope.selectedWebsite
         ? [scope.selectedWebsite.domain]
-        : scope.availableWebsites.map((w) => w.domain),
-      missingWebsites: [],
-      note: null,
+        : scope.availableWebsites.filter((w) => Boolean(w.gscSiteUrl)).map((w) => w.domain),
+      missingWebsites: scope.availableWebsites
+        .filter((w) => !w.gscSiteUrl)
+        .map((w) => w.domain),
+      note:
+        organicLeadVerificationState === 'INSUFFICIENT_EVIDENCE'
+          ? `Có ${websiteFormLeadsWithoutUtm.length} Lead biểu mẫu từ website chưa gắn tham số UTM/nguồn tìm kiếm nên không tự cộng vào "Lead từ tìm kiếm tự nhiên".`
+          : null,
     },
     version: `m03-${scope.websiteId}-${scope.startDateStr}-${scope.endDateStr}-${totalClicks ?? 'null'}`,
     ads: {
       status: hasAdsToken ? 'CONNECTED' : 'UNCONFIGURED',
       statusMessage: hasAdsToken
         ? 'Đã kết nối dữ liệu quảng cáo.'
-        : 'Chưa đủ dữ liệu: tài khoản chưa cấu hình khóa truy cập quảng cáo.',
+        : 'Chưa kết nối Google Ads API (thiếu GOOGLE_ADS_DEVELOPER_TOKEN). Vui lòng xem chi tiết quảng cáo tại mục Chiến dịch.',
       currencyCode: 'VND',
       metrics: {
         adCost: null,
@@ -399,7 +575,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         keywords: [],
         keywordAvailabilityNote: hasAdsToken
           ? null
-          : 'Chưa có dữ liệu từ khóa quảng cáo do chưa kết nối tài khoản quảng cáo.',
+          : 'Chưa kết nối tài khoản quảng cáo.',
         deviceBreakdown: [],
         geoBreakdown: [],
       },
@@ -411,7 +587,10 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         organicSearchCtrPct: overallCtrPct,
         averageSearchPosition: avgSearchPosition,
         organicSessions: organicSessionsFromGa4,
+        organicEngagementRatePct,
+        organicFormEvents: null,
         organicValidLeadCount: organicValidLeads.length,
+        organicLeadVerificationState,
       },
       comparison: {
         previousStartDate: scope.prevStartDateStr,
@@ -423,36 +602,73 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       charts: {
         seoDailySeries,
         opportunityQueries,
-        opportunityThresholdNote: `Hiển thị ≥ ${opportunityThresholdMinImpr} và CTR < ${ctrCeiling}% (CTR chung của kỳ)`,
+        opportunityThresholdNote: `Điều kiện lọc cơ hội: Hiển thị ≥ ${opportunityThresholdMinImpr} và CTR < ${ctrCeiling}% (gợi ý cần kiểm chứng, không khẳng định kết quả chắc chắn)`,
+        pagesDeltaSummary: {
+          risingPages,
+          decliningPages,
+          comparisonNote:
+            gscPagePrev.length === 0
+              ? `Kỳ trước (${scope.prevStartDateStr} → ${scope.prevEndDateStr}) chưa có dữ liệu trang chi tiết để đối chiếu tăng/giảm.`
+              : `So sánh kỳ hiện tại với kỳ trước (${scope.prevStartDateStr} → ${scope.prevEndDateStr})`,
+        },
       },
       tables: {
         queries: paginateArray(allQueryRows, params?.page || 1, params?.pageSize || 20),
         pages: paginateArray(allPageRows, params?.page || 1, params?.pageSize || 20),
+        content: paginateArray(contentRows, params?.contentPage || 1, params?.pageSize || 20),
+        deviceCountry: deviceCountryRows,
+      },
+      opportunityConfig: {
+        minImpressionsForLowCtr: opportunityThresholdMinImpr,
+        maxCtrPctForOpportunity: ctrCeiling,
+        staleContentDays: 30,
       },
     },
     siteStatus: {
       status: siteStatusRows.length > 0 ? 'CONNECTED' : 'UNCONFIGURED',
       statusMessage:
         siteStatusRows.length > 0
-          ? 'Đã kiểm tra trạng thái lập chỉ mục URL theo kỳ cập nhật gần nhất.'
-          : 'Chưa có dữ liệu kiểm tra lập chỉ mục URL cho website đang chọn.',
+          ? 'Kiểm tra lập chỉ mục từng URL tiêu biểu qua URL Inspection API (không phải báo cáo toàn bộ lỗi lập chỉ mục toàn site).'
+          : 'Chưa có kết quả kiểm tra URL tiêu biểu cho website đang chọn.',
       rows: siteStatusRows,
     },
-    trends: {
-      status: trendMetricRows.length > 0 ? 'CONNECTED' : 'UNCONFIGURED',
-      statusMessage:
-        trendMetricRows.length > 0
-          ? 'Dữ liệu xu hướng tìm kiếm theo ngày.'
-          : 'Chưa kết nối nguồn dữ liệu xu hướng tìm kiếm.',
-      rows: trendMetricRows.map((t) => ({
-        term: t.keywordRaw || t.keywordTextNorm || t.campaignExternalId || 'Từ khóa LED',
-        geoCode: 'VN',
+    trends: (() => {
+      const dbTrendRows = trendMetricRows.map((t) => ({
+        term: t.keywordRaw || t.keywordTextNorm || t.campaignExternalId || 'Từ khóa',
+        geoCode: t.accountPropertyId || 'VN',
         geoName: 'Việt Nam',
         date: t.metricDate,
-        interestValue: t.trendInterestScore ?? 0,
-        scaleType: 'RELATIVE_0_100',
-        comparisonGroupId: t.accountPropertyId || 'default',
-      })),
-    },
+        interestValue: t.trendInterestScore ?? t.impressions ?? 0,
+        scaleType: 'INDEX_0_100',
+        comparisonGroupId: t.campaignExternalId || 'default',
+        sourceType: 'GOOGLE_TRENDS_INDEX' as const,
+      }));
+      const rssRows = liveTrendsSnap?.dailyRssTrends || [];
+      const industrySuggestions = liveTrendsSnap?.industrySuggestions || [];
+      const hasAnyLiveTrends =
+        dbTrendRows.length > 0 || rssRows.length > 0 || industrySuggestions.length > 0;
+
+      return {
+        status: hasAnyLiveTrends ? 'CONNECTED' : 'UNCONFIGURED',
+        statusMessage: hasAnyLiveTrends
+          ? `Đã kết nối Google Trends Việt Nam (RSS xu hướng ngày & Google Suggest VN${
+              serpApiKey ? ' + SerpApi 0–100' : ''
+            }). Cập nhật lúc ${
+              liveTrendsSnap?.fetchedAt
+                ? new Date(liveTrendsSnap.fetchedAt).toLocaleTimeString('vi-VN', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                : 'hiện tại'
+            }.`
+          : liveTrendsSnap?.errorMessage ||
+            'Chưa tải được dữ liệu Google Trends trực tuyến; không hiển thị điểm số ước lượng giả.',
+        rows: dbTrendRows.length > 0 ? dbTrendRows : rssRows,
+        dailyRssTrends: rssRows,
+        industrySuggestions,
+        serpApiConfigured: Boolean(serpApiKey),
+        lastSyncedAt: liveTrendsSnap?.fetchedAt || null,
+      };
+    })(),
   };
 }

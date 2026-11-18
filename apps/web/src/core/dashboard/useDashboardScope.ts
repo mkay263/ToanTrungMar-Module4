@@ -49,8 +49,8 @@ function readInitialScope(): DashboardScopeState {
 }
 
 export function useDashboardScope() {
-  const [scope, setScope] = useState<DashboardScopeState>(DEFAULT_SCOPE);
-  const [hydrated, setHydrated] = useState(false);
+  const [scope, setScope] = useState<DashboardScopeState>(() => readInitialScope());
+  const [hydrated, setHydrated] = useState<boolean>(() => typeof window !== 'undefined');
 
   useEffect(() => {
     setScope(readInitialScope());
@@ -84,4 +84,3 @@ export function useDashboardScope() {
 
   return { scope, hydrated, updateScope };
 }
-

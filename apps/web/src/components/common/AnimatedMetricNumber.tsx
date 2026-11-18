@@ -9,8 +9,8 @@ interface AnimatedMetricNumberProps {
 }
 
 /**
- * Chỉ chạy hiệu ứng số (~400ms) khi giá trị số thực sự thay đổi (tăng hoặc giảm),
- * tôn trọng `prefers-reduced-motion: reduce`, không đổi số khi chỉ có thời gian kiểm tra thay đổi.
+ * C02 — Chỉ animate con số thực sự thay đổi trong khoảng 200–300 ms (240 ms),
+ * tôn trọng `prefers-reduced-motion: reduce`, dùng `tabular-nums` để không giật bố cục.
  */
 export function AnimatedMetricNumber({
   value,
@@ -45,7 +45,7 @@ export function AnimatedMetricNumber({
       return;
     }
 
-    const durationMs = 400;
+    const durationMs = 240;
     const startMs = performance.now();
     let rafId = 0;
 
@@ -68,9 +68,8 @@ export function AnimatedMetricNumber({
   }, [value]);
 
   if (displayValue === null) {
-    return <span className="text-slate-400 font-semibold text-lg">{emptyText}</span>;
+    return <span className="text-slate-500 font-semibold text-base">{emptyText}</span>;
   }
 
-  return <span>{format(displayValue)}</span>;
+  return <span className="tabular-nums">{format(displayValue)}</span>;
 }
-

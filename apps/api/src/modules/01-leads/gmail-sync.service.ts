@@ -1,5 +1,11 @@
 import { prisma, ingestLeadWithTrackingIdempotent } from '@toantrung/database';
-import { findProvinceEntry, inferAreaTypeFromProvince } from '@toantrung/contracts';
+import {
+  findProvinceEntry,
+  hasPlaceholderMacro,
+  inferAreaTypeFromProvince,
+  sanitizeProjectOrSubjectText,
+} from '@toantrung/contracts';
+import { upsertActionableNotification } from '../../core/notifications/service';
 import {
   getGoogleConnection,
   getValidAccessToken,
@@ -1241,9 +1247,13 @@ async function runSyncLeadsFromGmailInternal(options?: {
         structured.isStructuredForm || senderIsInternal ? null : parsedFrom.companyHint;
       const leadContactName =
         structured.contactName || (structured.isStructuredForm || senderIsInternal ? null : parsedFrom.contactName);
+      const subjectHasMacro = hasPlaceholderMacro(subject);
+      const sanitizedSubjectProject = sanitizeProjectOrSubjectText(subject);
       const leadProjectName = structured.productNote
-        ? `${structured.productNote}${structured.formSource ? ` (${structured.formSource})` : ''}`.slice(0, 160)
-        : subject.slice(0, 160);
+        ? `${sanitizeProjectOrSubjectText(structured.productNote) || structured.productNote}${structured.formSource ? ` (${structured.formSource})` : ''}`.slice(0, 160)
+        : sanitizedSubjectProject
+          ? sanitizedSubjectProject.slice(0, 160)
+          : null;
       const phoneForLead = resolvedPhone || 'Chưa có SĐT';
 
       const dupCheck = await inspectDuplicateAndPriceCheck({
@@ -1257,6 +1267,7 @@ async function runSyncLeadsFromGmailInternal(options?: {
         !resolvedPhone ||
         isPhoneUnstandardized ||
         (!structured.isStructuredForm && !resolvedPhone) ||
+        (subjectHasMacro && !structured.productNote) ||
         dupCheck.isDuplicateAlert;
 
       const intakeClassification: GmailIntakeClassification = needsIntakeReview
@@ -1306,9 +1317,7 @@ async function runSyncLeadsFromGmailInternal(options?: {
         utmCampaign: structured.utmCampaign,
         gclid: structured.gclid,
         referrerUrl: structured.referrerUrl,
-        selfReportedSource: structured.sourceWebsite
-          ? `${structured.sourceWebsite} (${structured.websiteResolutionMethod})${structured.formSubmissionId ? ` [sub:${structured.formSubmissionId}]` : ''}`
-          : structured.formSource || 'Chưa xác định website',
+        selfReportedSource: structured.sourceWebsite || structured.formSource || 'Chưa xác định',
         assignedSalesId: assignment.assignedSalesId,
         marketingSource: marketingSourceFromForm,
         sourceResolutionMethod: sourceResolutionMethodFromForm,
@@ -1375,6 +1384,9 @@ async function runSyncLeadsFromGmailInternal(options?: {
                 : '',
               `Người gửi: ${fromHeader}`,
               `Tiêu đề: ${subject}`,
+              structured.sourceWebsite
+                ? `Website nguồn: ${structured.sourceWebsite} (phương thức kỹ thuật: ${structured.websiteResolutionMethod})`
+                : '',
               excerpt ? `Nội dung tóm tắt:\n${excerpt}` : '',
             ]
               .filter(Boolean)
@@ -1382,6 +1394,18 @@ async function runSyncLeadsFromGmailInternal(options?: {
           },
         });
       });
+
+      if (assignment.assignedSalesId) {
+        await upsertActionableNotification({
+          userId: assignment.assignedSalesId,
+          title: `Lead cần tiếp nhận: ${ingested.lead.leadCode}`,
+          summary: `Yêu cầu mới từ ${structured.sourceWebsite || 'email'} (${leadContactName || phoneForLead}). Vui lòng kiểm tra và bấm xác nhận tiếp nhận.`,
+          category: 'Lead',
+          actionLabel: 'Xem chi tiết',
+          actionUrl: `/leads?leadId=${ingested.lead.id}`,
+          requiredPermission: 'LEAD_VIEW_OWN',
+        });
+      }
 
       summary.created += 1;
       classificationCounts[intakeClassification] += 1;

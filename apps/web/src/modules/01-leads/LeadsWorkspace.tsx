@@ -47,7 +47,9 @@ import {
   PIPELINE_STATUS_LABELS,
   REASSIGN_REASONS,
   SPAM_REASONS,
+  UI_VOCABULARY,
   composeLeadDistrictField,
+  formatContactChannelClean,
   formatLeadLocationLabel,
   hasBaPermission,
   inferAreaTypeFromProvince,
@@ -549,7 +551,9 @@ export function LeadsWorkspace() {
   const [leads, setLeads] = useState<LeadItemDto[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
   const [currentPage, setCurrentPage] = useState<number>(1);
-  const [pageSize, setPageSize] = useState<number>(50);
+  const [pageSize, setPageSize] = useState<number>(20);
+  const [missingProductOnly, setMissingProductOnly] = useState<boolean>(false);
+  const savedScrollTopRef = useRef<number>(0);
   const [products, setProducts] = useState<ProductCatalogDto[]>([]);
   const [salesOptions, setSalesOptions] = useState<SalesAssigneeOptionDto[]>([]);
   const [openRowMenuId, setOpenRowMenuId] = useState<number | null>(null);
@@ -633,13 +637,47 @@ export function LeadsWorkspace() {
   const [importFileName, setImportFileName] = useState<string | null>(null);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Sync initial filters from URL query params (?status=..., ?overdueOnly=true, ?unreceived=1, ?search=...)
+  // Sync initial filters from URL query params (?status=..., ?websiteId=..., ?preset=..., ?needsReview=1, ?missingWebsite=1, ?missingProduct=1, ?leadId=...)
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
     const st = params.get('status');
     if (st && (st === 'all' || PIPELINE_STATUSES.includes(st as PipelineStatus))) {
       setStatusFilter(st);
+    }
+    const webParam = params.get('websiteId') || params.get('sourceWebsite');
+    if (webParam && webParam.trim()) {
+      setSourceWebsiteFilter(webParam.trim());
+    }
+    if (params.get('missingWebsite') === '1') {
+      setSourceWebsiteFilter('__unresolved__');
+    }
+    if (params.get('missingProduct') === '1') {
+      setMissingProductOnly(true);
+    }
+    if (params.get('needsReview') === '1') {
+      setSpecialAlertFilter('all_alerts');
+    }
+    const presetParam = params.get('preset')?.toUpperCase();
+    const fromParam = params.get('from');
+    const toParam = params.get('to');
+    if (presetParam === 'CUSTOM' && fromParam && toParam) {
+      setDateRangePreset('CUSTOM');
+      setCustomStartDate(fromParam);
+      setCustomEndDate(toParam);
+    } else if (
+      presetParam &&
+      ['TODAY', 'YESTERDAY', '7D', '30D', 'ALL'].includes(presetParam)
+    ) {
+      setDateRangePreset(presetParam as StandardDatePreset);
+    }
+    const pageParam = Number(params.get('page'));
+    if (Number.isInteger(pageParam) && pageParam > 1) {
+      setCurrentPage(pageParam);
+    }
+    const viewParam = params.get('view');
+    if (viewParam === 'kanban' || viewParam === 'table') {
+      setViewMode(viewParam);
     }
     const q = params.get('search');
     if (q && q.trim()) {
@@ -724,7 +762,7 @@ export function LeadsWorkspace() {
 
       if (e.key === 'Escape') {
         if (showCreateModal) setShowCreateModal(false);
-        else if (selectedLeadId !== null) setSelectedLeadId(null);
+        else if (selectedLeadId !== null) closeLeadDetail();
         return;
       }
 
@@ -860,15 +898,8 @@ export function LeadsWorkspace() {
         isReceivingLeads?: boolean;
       }>(url, { signal: controller.signal, skipCache: forceFresh });
 
-      setLeads((prev) => {
-        if (forceFresh && prev.length > 0 && data.leads.length > prev.length) {
-          const addedCount = data.leads.length - prev.length;
-          setFeedbackMsg(
-            `⚡ Hệ thống vừa tự động quét và tiếp nhận ${addedCount} Lead mới từ Form Website / Gmail!`,
-          );
-        }
-        return data.leads;
-      });
+      // C10: Đồng bộ định kỳ chạy ngầm không bật toast lặp trên màn hình
+      setLeads(data.leads);
       setTotalCount(data.totalCount ?? data.leads.length);
       setProducts(data.products);
       setSalesOptions(data.salesOptions);
@@ -941,15 +972,36 @@ export function LeadsWorkspace() {
     };
   }, [fetchLeads]);
 
+  const openLeadDetail = useCallback(
+    (leadId: number, tab: 'info' | 'pipeline' | 'attachments' | 'activity' = 'info') => {
+      if (typeof document !== 'undefined') {
+        const scroller = document.getElementById('main-workspace-content');
+        if (scroller) savedScrollTopRef.current = scroller.scrollTop;
+      }
+      setSelectedLeadId(leadId);
+      setLeadDetailTab(tab);
+    },
+    [],
+  );
+
+  const closeLeadDetail = useCallback(() => {
+    setSelectedLeadId(null);
+    if (typeof window !== 'undefined') {
+      requestAnimationFrame(() => {
+        const scroller = document.getElementById('main-workspace-content');
+        if (scroller) scroller.scrollTop = savedScrollTopRef.current;
+      });
+    }
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined' || leads.length === 0) return;
     const params = new URLSearchParams(window.location.search);
-    const highlightId = Number(params.get('highlight'));
+    const highlightId = Number(params.get('leadId') || params.get('highlight'));
     if (Number.isInteger(highlightId) && highlightId > 0) {
       const target = leads.find((l) => l.id === highlightId);
-      if (target) {
-        setSelectedLeadId(target.id);
-        setLeadDetailTab('info');
+      if (target && selectedLeadId === null) {
+        openLeadDetail(target.id, 'info');
         return;
       }
     }
@@ -959,11 +1011,10 @@ export function LeadsWorkspace() {
         (l) => l.leadCode.toLowerCase() === q.trim().toLowerCase(),
       );
       if (matched && selectedLeadId === null) {
-        setSelectedLeadId(matched.id);
-        setLeadDetailTab('info');
+        openLeadDetail(matched.id, 'info');
       }
     }
-  }, [leads, selectedLeadId]);
+  }, [leads, selectedLeadId, openLeadDetail]);
 
   const fraudByLeadId = useMemo(() => {
     const map = new Map<number, FraudEvaluationResult>();
@@ -979,7 +1030,13 @@ export function LeadsWorkspace() {
     ): 'none' | 'active_dup' | 'won_returning' | 'lost_returning' | 'spam_probe' => {
       const fraud = fraudByLeadId.get(l.id);
       if (!fraud) return 'none';
-      if (l.spamStatus !== 'NONE' || fraud.hasBlacklistedOrSpam || fraud.hasPriceProbeBehavior) {
+      if (
+        l.spamStatus !== 'NONE' ||
+        fraud.hasBlacklistedOrSpam ||
+        fraud.hasPriceProbeBehavior ||
+        l.hasMissingSubjectContent ||
+        l.needsManagerAttention
+      ) {
         return 'spam_probe';
       }
       if (
@@ -1131,53 +1188,44 @@ export function LeadsWorkspace() {
     [slaUnreceivedHours, slaStagnantDays],
   );
 
+  // C04: Đồng bộ múi giờ Asia/Ho_Chi_Minh và mốc thời gian leads.createdAt để khớp 100% số liệu với Tổng quan và Báo cáo
   const timeFilteredLeads = useMemo(() => {
     if (dateRangePreset === 'ALL' && !customStartDate && !customEndDate) {
       return leads;
     }
-    const now = Date.now();
+    const fmtVn = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const todayStr = fmtVn.format(new Date());
+    const todayNoon = new Date(`${todayStr}T12:00:00+07:00`);
+    const shiftStr = (daysBack: number) =>
+      fmtVn.format(new Date(todayNoon.getTime() - daysBack * 24 * 60 * 60 * 1000));
+
     return leads.filter((l) => {
-      const t = new Date(l.contactedAt).getTime();
+      const leadDateStr = fmtVn.format(new Date(l.createdAt || l.contactedAt));
       if (dateRangePreset === 'TODAY') {
-        const d1 = new Date(l.contactedAt);
-        const d2 = new Date();
-        return (
-          d1.getFullYear() === d2.getFullYear() &&
-          d1.getMonth() === d2.getMonth() &&
-          d1.getDate() === d2.getDate()
-        );
+        return leadDateStr === todayStr;
       }
       if (dateRangePreset === 'YESTERDAY') {
-        const d1 = new Date(l.contactedAt);
-        const y = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        return (
-          d1.getFullYear() === y.getFullYear() &&
-          d1.getMonth() === y.getMonth() &&
-          d1.getDate() === y.getDate()
-        );
-      }
-      if (dateRangePreset === '90D') {
-        return now - t <= 90 * 24 * 60 * 60 * 1000;
+        return leadDateStr === shiftStr(1);
       }
       if (dateRangePreset === '7D') {
-        return now - t <= 7 * 24 * 60 * 60 * 1000;
+        return leadDateStr >= shiftStr(6) && leadDateStr <= todayStr;
       }
       if (dateRangePreset === '30D') {
-        return now - t <= 30 * 24 * 60 * 60 * 1000;
+        return leadDateStr >= shiftStr(29) && leadDateStr <= todayStr;
+      }
+      if (dateRangePreset === '90D') {
+        return leadDateStr >= shiftStr(89) && leadDateStr <= todayStr;
       }
       if (dateRangePreset === 'THIS_MONTH') {
-        const d1 = new Date(l.contactedAt);
-        const d2 = new Date();
-        return d1.getFullYear() === d2.getFullYear() && d1.getMonth() === d2.getMonth();
+        return leadDateStr.slice(0, 7) === todayStr.slice(0, 7);
       }
-      if (customStartDate) {
-        const startMs = new Date(`${customStartDate}T00:00:00`).getTime();
-        if (t < startMs) return false;
-      }
-      if (customEndDate) {
-        const endMs = new Date(`${customEndDate}T23:59:59`).getTime();
-        if (t > endMs) return false;
-      }
+      if (customStartDate && leadDateStr < customStartDate) return false;
+      if (customEndDate && leadDateStr > customEndDate) return false;
       return true;
     });
   }, [leads, dateRangePreset, customStartDate, customEndDate]);
@@ -1302,6 +1350,9 @@ export function LeadsWorkspace() {
         (l) => l.pipelineStatus === 'new_lead' && !l.receivedConfirmedAt && l.spamStatus === 'NONE',
       );
     }
+    if (missingProductOnly) {
+      list = list.filter((l) => l.products.length === 0);
+    }
     if (sourceWebsiteFilter !== 'all') {
       if (sourceWebsiteFilter === '__unresolved__') {
         list = list.filter((l) => !l.sourceWebsite || !l.sourceWebsite.trim());
@@ -1368,6 +1419,7 @@ export function LeadsWorkspace() {
     overdueOnly,
     unreceivedOnly,
     sourceWebsiteFilter,
+    missingProductOnly,
     b2bHorizonFilter,
     searchQuery,
   ]);
@@ -1375,6 +1427,53 @@ export function LeadsWorkspace() {
   const totalFilteredCount = displayedLeads.length;
   const totalPages = Math.max(1, Math.ceil(displayedLeads.length / pageSize));
   const safePage = Math.min(currentPage, totalPages);
+
+  // C06: Khi dữ liệu hoặc bộ lọc thay đổi làm trang hiện tại không còn hợp lệ -> chuyển rõ ràng về trang hợp lệ gần nhất
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  // C06: Đồng bộ trạng thái bộ lọc, chế độ xem và trang hiện tại lên URL để giữ nguyên ngữ cảnh khi quay lại
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (statusFilter !== 'all') url.searchParams.set('status', statusFilter);
+    else url.searchParams.delete('status');
+
+    if (sourceWebsiteFilter !== 'all' && sourceWebsiteFilter !== '__unresolved__') {
+      url.searchParams.set('websiteId', sourceWebsiteFilter);
+      url.searchParams.delete('missingWebsite');
+    } else if (sourceWebsiteFilter === '__unresolved__') {
+      url.searchParams.delete('websiteId');
+      url.searchParams.set('missingWebsite', '1');
+    } else {
+      url.searchParams.delete('websiteId');
+      url.searchParams.delete('missingWebsite');
+    }
+
+    if (specialAlertFilter !== 'none') url.searchParams.set('needsReview', '1');
+    else url.searchParams.delete('needsReview');
+
+    if (missingProductOnly) url.searchParams.set('missingProduct', '1');
+    else url.searchParams.delete('missingProduct');
+
+    if (viewMode === 'kanban') url.searchParams.set('view', 'kanban');
+    else url.searchParams.delete('view');
+
+    if (safePage > 1) url.searchParams.set('page', String(safePage));
+    else url.searchParams.delete('page');
+
+    window.history.replaceState({}, '', url.toString());
+  }, [
+    statusFilter,
+    sourceWebsiteFilter,
+    specialAlertFilter,
+    missingProductOnly,
+    viewMode,
+    safePage,
+  ]);
 
   const paginatedLeads = useMemo(() => {
     const start = (safePage - 1) * pageSize;
@@ -1396,6 +1495,7 @@ export function LeadsWorkspace() {
 
   const b2bSummaryCounts = useMemo(() => {
     const valid = timeFilteredLeads.filter((l) => l.spamStatus === 'NONE');
+    const spamExcludedCount = timeFilteredLeads.length - valid.length;
     let newLeadCount = 0;
     let quotingCount = 0;
     let quoteSentCount = 0;
@@ -1430,6 +1530,7 @@ export function LeadsWorkspace() {
 
     return {
       validTotal: valid.length,
+      spamExcludedCount,
       newLeadCount,
       quotingCount,
       quoteSentCount,
@@ -2127,191 +2228,8 @@ export function LeadsWorkspace() {
 
   return (
     <div className="space-y-3.5">
-      {/* Control Bar — Căn giữa toàn bộ công cụ trên 1 hàng: Mốc thời gian + Chế độ xem + Nhắc việc tự động + Xuất/Nhập Excel + Tạo Lead mới */}
-      <div className="rounded-2xl bg-white text-slate-900 px-4 py-2.5 shadow-2xs border border-slate-200/90 flex flex-wrap items-center justify-center gap-2.5">
-        {/* Standard Date Range Dropdown */}
-        <StandardDateRangeDropdown
-          preset={dateRangePreset as StandardDatePreset}
-          customStartDate={customStartDate}
-          customEndDate={customEndDate}
-          onChangePreset={(p) => {
-            setDateRangePreset(p as any);
-            setCustomStartDate('');
-            setCustomEndDate('');
-            setCurrentPage(1);
-          }}
-          onChangeCustomRange={(start, end) => {
-            setCustomStartDate(start);
-            setCustomEndDate(end);
-            setDateRangePreset('CUSTOM');
-            setCurrentPage(1);
-          }}
-          include90Days={false}
-          size="sm"
-        />
-
-          <select
-            aria-label="Lọc theo Website tạo Lead"
-            value={sourceWebsiteFilter}
-            onChange={(e) => {
-              setSourceWebsiteFilter(e.target.value);
-              setCurrentPage(1);
-            }}
-            className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs sm:text-sm font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-[#1E3A8A]/20"
-            title="Lọc Lead theo Website nguồn"
-          >
-            <option value="all">Tất cả website</option>
-            <option value="bangled.vn">bangled.vn</option>
-            <option value="toantrung.com.vn">toantrung.com.vn</option>
-            <option value="manhinhled.net.vn">manhinhled.net.vn</option>
-            <option value="__unresolved__">Chưa xác định website</option>
-          </select>
-
-          {searchQuery.trim() && (
-            <div className="inline-flex items-center gap-1.5 h-9 px-3 rounded-xl bg-blue-50 border border-blue-200 text-xs font-semibold text-[#1E3A8A]">
-              <Search className="w-3.5 h-3.5" />
-              <span>&ldquo;{searchQuery}&rdquo;</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchQuery('');
-                  if (typeof window !== 'undefined') {
-                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
-                  }
-                }}
-                className="ml-1 text-slate-400 hover:text-rose-600 font-bold"
-                title="Xóa từ khóa tìm kiếm"
-              >
-                ×
-              </button>
-            </div>
-          )}
-
-          {user?.roleCode === 'SALES' && (
-            <button
-              type="button"
-              onClick={() => void handleToggleReceivingStatus()}
-              className={`h-9 px-3 rounded-xl border text-xs sm:text-sm font-semibold inline-flex items-center gap-2 transition-colors ${
-                isReceivingLeads
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100/70'
-                  : 'bg-slate-100 border-slate-200 text-slate-600 hover:bg-slate-200/70'
-              }`}
-              title="Bật/tắt chế độ nhận phân bổ Lead tự động (Round-Robin)"
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  isReceivingLeads ? 'bg-emerald-500' : 'bg-slate-400'
-                }`}
-              />
-              <span>{isReceivingLeads ? 'Đang nhận Lead' : 'Tạm ngưng nhận'}</span>
-            </button>
-          )}
-
-          {/* Chuyển đổi Bảng / Kanban / Nhắc việc tự động */}
-          <div className="inline-flex rounded-xl border border-slate-200 bg-slate-50 p-0.5">
-            <button
-              type="button"
-              onClick={() => {
-                setViewMode('table');
-                setReminderFilter('none');
-              }}
-              className={`h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
-                viewMode === 'table' && reminderFilter === 'none'
-                  ? 'bg-white text-[#1E3A8A] shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Table2 className="w-3.5 h-3.5" />
-              <span>Danh sách</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setViewMode('kanban');
-                setReminderFilter('none');
-              }}
-              className={`h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
-                viewMode === 'kanban'
-                  ? 'bg-white text-[#1E3A8A] shadow-2xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Kanban className="w-3.5 h-3.5" />
-              <span>Kanban</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setViewMode('table');
-                setSpecialAlertFilter('none');
-                setStatusFilter('all');
-                setReminderFilter((prev) => (prev === 'none' ? 'all_reminders' : 'none'));
-                setCurrentPage(1);
-              }}
-              className={`h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
-                reminderFilter !== 'none'
-                  ? 'bg-white text-rose-700 shadow-2xs ring-1 ring-rose-300'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-              title="Các Lead cần xử lý theo quy tắc nhắc việc tự động"
-            >
-              <Bell className="w-3.5 h-3.5 text-rose-600" />
-              <span>Nhắc việc tự động</span>
-              <span className="px-1.5 py-0.2 rounded-full bg-rose-600 text-white text-[10px] font-bold">
-                {reminderStats.totalLeadsWithReminder}
-              </span>
-            </button>
-          </div>
-
-          {/* Xuất & Nhập Excel gộp chung 1 ô */}
-          {((user && hasBaPermission(user.roleCode, 'EXPORT_DATA')) || canCreate) && (
-            <div className="inline-flex h-9 items-center rounded-xl border border-slate-200 bg-white overflow-hidden shadow-2xs">
-              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && (
-                <a
-                  href={exportHref}
-                  className="h-full px-3 hover:bg-slate-50 text-slate-700 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
-                  title="Xuất danh sách Lead hiện tại ra file Excel (.xlsx)"
-                >
-                  <Download className="w-4 h-4 text-emerald-600" />
-                  <span>Xuất ({displayedLeads.length})</span>
-                </a>
-              )}
-              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && canCreate && (
-                <span className="h-5 w-px bg-slate-200" aria-hidden="true" />
-              )}
-              {canCreate && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setImportPreviewRows([]);
-                    setImportFileName(null);
-                    setImportPastedText('');
-                    setShowImportModal(true);
-                  }}
-                  className="h-full px-3 hover:bg-emerald-50 text-emerald-800 text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 transition-colors"
-                  title="Nhập danh sách Lead từ file Excel (.xlsx, .csv) kèm kiểm tra trùng lặp tự động"
-                >
-                  <FolderUp className="w-4 h-4 text-emerald-700" />
-                  <span>Nhập Excel</span>
-                </button>
-              )}
-            </div>
-          )}
-
-          {canCreate && (
-            <button
-              type="button"
-              onClick={() => setShowCreateModal(true)}
-              className="h-9 px-3.5 rounded-xl bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs sm:text-sm font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Tạo Lead mới</span>
-            </button>
-          )}
-      </div>
-
-      {/* Unified 7-Card Interactive Status Strip (Includes dedicated Duplicate / Returning / Spam Box) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-7 gap-2.5">
+      {/* C06: Sáu ô tổng hợp chuẩn BA (Tổng Lead hợp lệ + 5 trạng thái bán hàng; ghi rõ bao gồm/loại trừ; không đánh số 1..6) */}
+      <section aria-label="Tổng hợp trạng thái Lead" className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
         <button
           type="button"
           onClick={() => {
@@ -2320,33 +2238,33 @@ export function LeadsWorkspace() {
             setSpecialAlertFilter('none');
             setReminderFilter('none');
             setB2bHorizonFilter('all');
+            setMissingProductOnly(false);
             setOverdueOnly(false);
             setUnreceivedOnly(false);
             setCurrentPage(1);
           }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
+          className={`min-h-[104px] text-left rounded-[12px] p-3.5 border flex flex-col justify-between transition-colors shadow-2xs focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
             viewMode !== 'reminders' &&
             statusFilter === 'all' &&
             specialAlertFilter === 'none' &&
             reminderFilter === 'none' &&
             b2bHorizonFilter === 'all' &&
+            !missingProductOnly &&
             !overdueOnly &&
             !unreceivedOnly
-              ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-500/20'
+              ? 'bg-blue-50/60 border-[#1E3A8A] ring-1 ring-[#1E3A8A]/20'
               : 'bg-white border-slate-200/90 hover:border-slate-300'
           }`}
         >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            Tổng Lead Hợp Lệ
+          <span className="text-xs font-medium text-slate-600 block">
+            Tổng Lead trong bộ lọc
           </span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="font-display text-2xl font-bold text-slate-900">
-              {b2bSummaryCounts.validTotal}
-            </span>
-            <span className="text-[11px] font-medium text-slate-600 bg-slate-100 px-1.5 py-0.5 rounded">
-              Tất cả
-            </span>
-          </div>
+          <span className="text-2xl font-bold text-slate-900 tabular-nums mt-1">
+            {b2bSummaryCounts.validTotal}
+          </span>
+          <span className="text-[11px] text-slate-500 mt-1 leading-snug">
+            Gồm nghi trùng · Trừ {b2bSummaryCounts.spamExcludedCount} spam đã xác minh
+          </span>
         </button>
 
         <button
@@ -2361,26 +2279,24 @@ export function LeadsWorkspace() {
             setUnreceivedOnly(false);
             setCurrentPage(1);
           }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
+          className={`min-h-[104px] text-left rounded-[12px] p-3.5 border flex flex-col justify-between transition-colors shadow-2xs focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
             viewMode !== 'reminders' &&
             statusFilter === 'new_lead' &&
             specialAlertFilter === 'none' &&
             reminderFilter === 'none'
-              ? 'bg-violet-50/50 border-violet-300 ring-1 ring-violet-500/20'
+              ? 'bg-violet-50/60 border-violet-400 ring-1 ring-violet-500/20'
               : 'bg-white border-slate-200/90 hover:border-slate-300'
           }`}
         >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            1. Vừa Nhận Thông Tin
+          <span className="text-xs font-medium text-slate-600 block">
+            {PIPELINE_STATUS_LABELS.new_lead}
           </span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="font-display text-2xl font-bold text-slate-900">
-              {b2bSummaryCounts.newLeadCount}
-            </span>
-            <span className="text-[11px] font-medium text-violet-700 bg-violet-50 border border-violet-200/70 px-1.5 py-0.5 rounded">
-              {unreceivedCount} chờ nhận
-            </span>
-          </div>
+          <span className="text-2xl font-bold text-slate-900 tabular-nums mt-1">
+            {b2bSummaryCounts.newLeadCount}
+          </span>
+          <span className="text-[11px] text-violet-700 font-medium mt-1">
+            {unreceivedCount} chờ tiếp nhận
+          </span>
         </button>
 
         <button
@@ -2395,26 +2311,24 @@ export function LeadsWorkspace() {
             setUnreceivedOnly(false);
             setCurrentPage(1);
           }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
+          className={`min-h-[104px] text-left rounded-[12px] p-3.5 border flex flex-col justify-between transition-colors shadow-2xs focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
             viewMode !== 'reminders' &&
             statusFilter === 'quoting' &&
             specialAlertFilter === 'none' &&
             reminderFilter === 'none'
-              ? 'bg-blue-50/50 border-blue-300 ring-1 ring-blue-500/20'
+              ? 'bg-blue-50/60 border-blue-400 ring-1 ring-blue-500/20'
               : 'bg-white border-slate-200/90 hover:border-slate-300'
           }`}
         >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            2. Đang Soạn Báo Giá
+          <span className="text-xs font-medium text-slate-600 block">
+            {PIPELINE_STATUS_LABELS.quoting}
           </span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="font-display text-2xl font-bold text-slate-900">
-              {b2bSummaryCounts.quotingCount}
-            </span>
-            <span className="text-[11px] font-medium text-blue-700 bg-blue-50 border border-blue-200/70 px-1.5 py-0.5 rounded">
-              Khảo sát / CAD
-            </span>
-          </div>
+          <span className="text-2xl font-bold text-slate-900 tabular-nums mt-1">
+            {b2bSummaryCounts.quotingCount}
+          </span>
+          <span className="text-[11px] text-slate-500 mt-1">
+            Đang khảo sát &amp; lên cấu hình
+          </span>
         </button>
 
         <button
@@ -2429,26 +2343,24 @@ export function LeadsWorkspace() {
             setUnreceivedOnly(false);
             setCurrentPage(1);
           }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
+          className={`min-h-[104px] text-left rounded-[12px] p-3.5 border flex flex-col justify-between transition-colors shadow-2xs focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
             viewMode !== 'reminders' &&
             statusFilter === 'quote_sent' &&
             specialAlertFilter === 'none' &&
             reminderFilter === 'none'
-              ? 'bg-amber-50/50 border-amber-300 ring-1 ring-amber-500/20'
+              ? 'bg-amber-50/60 border-amber-400 ring-1 ring-amber-500/20'
               : 'bg-white border-slate-200/90 hover:border-slate-300'
           }`}
         >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            3. Đã Gửi Báo Giá
+          <span className="text-xs font-medium text-slate-600 block">
+            {PIPELINE_STATUS_LABELS.quote_sent}
           </span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="font-display text-2xl font-bold text-slate-900">
-              {b2bSummaryCounts.quoteSentCount}
-            </span>
-            <span className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200/80 px-1.5 py-0.5 rounded">
-              Đang tư vấn
-            </span>
-          </div>
+          <span className="text-2xl font-bold text-slate-900 tabular-nums mt-1">
+            {b2bSummaryCounts.quoteSentCount}
+          </span>
+          <span className="text-[11px] text-amber-800 font-medium mt-1">
+            {overdueCount > 0 ? `${overdueCount} quá hạn >7 ngày` : 'Chờ khách phản hồi'}
+          </span>
         </button>
 
         <button
@@ -2463,26 +2375,24 @@ export function LeadsWorkspace() {
             setUnreceivedOnly(false);
             setCurrentPage(1);
           }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
+          className={`min-h-[104px] text-left rounded-[12px] p-3.5 border flex flex-col justify-between transition-colors shadow-2xs focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
             viewMode !== 'reminders' &&
             statusFilter === 'won' &&
             specialAlertFilter === 'none' &&
             reminderFilter === 'none'
-              ? 'bg-emerald-50/50 border-emerald-300 ring-1 ring-emerald-500/20'
+              ? 'bg-emerald-50/60 border-emerald-400 ring-1 ring-emerald-500/20'
               : 'bg-white border-slate-200/90 hover:border-slate-300'
           }`}
         >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            4. Chốt Thành Công
+          <span className="text-xs font-medium text-slate-600 block">
+            {PIPELINE_STATUS_LABELS.won}
           </span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="font-display text-2xl font-bold text-slate-900">
-              {b2bSummaryCounts.wonCount}
-            </span>
-            <span className="text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200/70 px-1.5 py-0.5 rounded">
-              Hợp đồng LED
-            </span>
-          </div>
+          <span className="text-2xl font-bold text-emerald-700 tabular-nums mt-1">
+            {b2bSummaryCounts.wonCount}
+          </span>
+          <span className="text-[11px] text-slate-500 mt-1">
+            Hợp đồng thành công
+          </span>
         </button>
 
         <button
@@ -2497,60 +2407,258 @@ export function LeadsWorkspace() {
             setUnreceivedOnly(false);
             setCurrentPage(1);
           }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
+          className={`min-h-[104px] text-left rounded-[12px] p-3.5 border flex flex-col justify-between transition-colors shadow-2xs focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
             viewMode !== 'reminders' &&
             statusFilter === 'lost' &&
             specialAlertFilter === 'none' &&
             reminderFilter === 'none'
-              ? 'bg-rose-50/60 border-rose-300 ring-1 ring-rose-500/20'
+              ? 'bg-slate-100 border-slate-400'
               : 'bg-white border-slate-200/90 hover:border-slate-300'
           }`}
         >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500 block">
-            5. Thất Bại
+          <span className="text-xs font-medium text-slate-600 block">
+            {PIPELINE_STATUS_LABELS.lost}
           </span>
-          <div className="flex items-baseline justify-between mt-1">
-            <span className="font-display text-2xl font-bold text-slate-900">
-              {b2bSummaryCounts.lostCount}
-            </span>
-            <span className="text-[11px] font-medium text-rose-700 bg-rose-50 border border-rose-200/70 px-1.5 py-0.5 rounded">
-              Đã đóng
-            </span>
-          </div>
+          <span className="text-2xl font-bold text-slate-700 tabular-nums mt-1">
+            {b2bSummaryCounts.lostCount}
+          </span>
+          <span className="text-[11px] text-slate-500 mt-1">
+            Đã đóng hồ sơ
+          </span>
         </button>
+      </section>
 
-        {/* Ô số 6: Xem Trùng / Quay lại / Spam / Nghi dò giá */}
-        <button
-          type="button"
-          onClick={() => {
-            if (viewMode === 'reminders') setViewMode('table');
-            setStatusFilter('all');
-            setReminderFilter('none');
-            setSpecialAlertFilter(specialAlertFilter === 'none' ? 'all_alerts' : 'none');
-            setB2bHorizonFilter('all');
-            setOverdueOnly(false);
-            setUnreceivedOnly(false);
-            setCurrentPage(1);
-          }}
-          className={`text-left rounded-xl p-3 border transition shadow-2xs ${
-            viewMode !== 'reminders' && specialAlertFilter !== 'none'
-              ? 'bg-amber-50/80 border-amber-400 ring-2 ring-amber-500/25'
-              : 'bg-white border-amber-200/90 hover:border-amber-300'
-          }`}
-        >
-          <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800 flex items-center gap-1">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            <span>6. Lưu ý</span>
-          </span>
-          <div className="flex items-baseline justify-between gap-1 mt-1">
-            <span className="font-display text-2xl font-bold text-amber-900">
+      {/* Toolbar gọn khít: Bộ lọc ở trên · Xuất/Nhập Excel & Tạo Lead ở chính giữa */}
+      <div className="rounded-[12px] bg-white text-slate-900 px-3.5 py-2.5 shadow-2xs border border-slate-200/90 space-y-2">
+        <div className="flex flex-wrap items-center justify-center gap-1.5">
+          <select
+            aria-label="Lọc theo website nguồn"
+            value={sourceWebsiteFilter}
+            onChange={(e) => {
+              setSourceWebsiteFilter(e.target.value);
+              setCurrentPage(1);
+            }}
+            className="min-h-9 max-w-[205px] px-2.5 rounded-[10px] border border-slate-200 bg-white text-xs font-semibold text-slate-700 truncate focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+          >
+            <option value="all">Tất cả website</option>
+            <option value="toantrung.com.vn">Website Toàn Trung (toantrung.com.vn)</option>
+            <option value="bangled.vn">Chuyên trang Bảng LED (bangled.vn)</option>
+            <option value="manhinhled.net.vn">Chuyên trang Màn hình LED (manhinhled.net.vn)</option>
+            <option value="__unresolved__">Chưa xác định website</option>
+          </select>
+
+          <StandardDateRangeDropdown
+            preset={dateRangePreset as StandardDatePreset}
+            customStartDate={customStartDate}
+            customEndDate={customEndDate}
+            onChangePreset={(p) => {
+              setDateRangePreset(p as any);
+              setCustomStartDate('');
+              setCustomEndDate('');
+              setCurrentPage(1);
+            }}
+            onChangeCustomRange={(start, end) => {
+              setCustomStartDate(start);
+              setCustomEndDate(end);
+              setDateRangePreset('CUSTOM');
+              setCurrentPage(1);
+            }}
+            include90Days={false}
+            size="sm"
+          />
+
+          {/* Danh sách / Kanban */}
+          <div className="inline-flex rounded-[10px] border border-slate-200 bg-slate-100 p-0.5">
+            <button
+              type="button"
+              aria-pressed={viewMode === 'table' && reminderFilter === 'none'}
+              onClick={() => {
+                setViewMode('table');
+                setReminderFilter('none');
+              }}
+              className={`min-h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                viewMode === 'table' && reminderFilter === 'none'
+                  ? 'bg-white text-[#0F275C] shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Table2 aria-hidden="true" className="w-3.5 h-3.5" />
+              <span>Danh sách</span>
+            </button>
+            <button
+              type="button"
+              aria-pressed={viewMode === 'kanban'}
+              onClick={() => {
+                setViewMode('kanban');
+                setReminderFilter('none');
+              }}
+              className={`min-h-8 px-2.5 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                viewMode === 'kanban'
+                  ? 'bg-white text-[#0F275C] shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Kanban aria-hidden="true" className="w-3.5 h-3.5" />
+              <span>Kanban</span>
+            </button>
+          </div>
+
+          {/* Tìm kiếm tại chỗ */}
+          <div className="flex items-center gap-1.5 min-h-9 px-2.5 rounded-[10px] border border-slate-200 bg-slate-50 focus-within:bg-white focus-within:border-[#1E3A8A]">
+            <Search aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <label htmlFor="leads-toolbar-search" className="sr-only">
+              Tìm kiếm Lead
+            </label>
+            <input
+              id="leads-toolbar-search"
+              ref={searchInputRef}
+              type="search"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Tìm SĐT, tên, mã Lead..."
+              className="w-36 sm:w-44 bg-transparent outline-none text-xs text-slate-800 placeholder:text-slate-400"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                aria-label="Xóa tìm kiếm"
+                onClick={() => {
+                  setSearchQuery('');
+                  if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+                  }
+                }}
+                className="text-slate-400 hover:text-slate-700 font-bold text-xs"
+              >
+                ×
+              </button>
+            )}
+          </div>
+
+          {/* Chip lọc Cần kiểm tra (C06: Cần kiểm tra là filter chip ở toolbar, không phải trạng thái thứ 6) */}
+          <button
+            type="button"
+            aria-pressed={specialAlertFilter !== 'none'}
+            onClick={() => {
+              setViewMode('table');
+              setStatusFilter('all');
+              setReminderFilter('none');
+              setSpecialAlertFilter(specialAlertFilter === 'none' ? 'all_alerts' : 'none');
+              setCurrentPage(1);
+            }}
+            className={`min-h-9 px-3 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+              specialAlertFilter !== 'none'
+                ? 'bg-amber-100 border-amber-400 text-amber-900'
+                : 'bg-white border-slate-200 text-slate-700 hover:bg-amber-50/50'
+            }`}
+          >
+            <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span>{UI_VOCABULARY.qualityFlags.needsReview}</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-900 text-[11px] font-bold tabular-nums">
               {b2bSummaryCounts.alertAllCount}
             </span>
-            <span className="text-[10px] font-semibold text-amber-800 bg-amber-100/80 border border-amber-300/80 px-1.5 py-0.5 rounded whitespace-nowrap">
-              {b2bSummaryCounts.activeDupCount} trùng · {b2bSummaryCounts.returningTotalCount} quay lại · {b2bSummaryCounts.spamProbeCount} spam
+          </button>
+
+          {/* Chip Nhắc việc */}
+          <button
+            type="button"
+            aria-pressed={reminderFilter !== 'none'}
+            onClick={() => {
+              setViewMode('table');
+              setSpecialAlertFilter('none');
+              setStatusFilter('all');
+              setReminderFilter((prev) => (prev === 'none' ? 'all_reminders' : 'none'));
+              setCurrentPage(1);
+            }}
+            className={`min-h-9 px-3 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+              reminderFilter !== 'none'
+                ? 'bg-rose-50 border-rose-300 text-rose-800'
+                : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+            }`}
+          >
+            <Bell aria-hidden="true" className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+            <span>Nhắc việc</span>
+            <span className="px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-bold tabular-nums">
+              {reminderStats.totalLeadsWithReminder}
             </span>
-          </div>
-        </button>
+          </button>
+
+          {missingProductOnly && (
+            <button
+              type="button"
+              onClick={() => setMissingProductOnly(false)}
+              className="min-h-9 px-2.5 rounded-[10px] bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1"
+            >
+              <span>Chưa phân loại sản phẩm</span>
+              <span>×</span>
+            </button>
+          )}
+        </div>
+
+        {/* Cụm hành động đưa ra chính giữa: Xuất/Nhập Excel + Tạo Lead */}
+        <div className="w-full pt-2 border-t border-slate-100 flex flex-wrap items-center justify-center gap-2.5">
+          {user?.roleCode === 'SALES' && (
+            <button
+              type="button"
+              onClick={() => void handleToggleReceivingStatus()}
+              className={`min-h-9 px-3 rounded-[10px] border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                isReceivingLeads
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-slate-100 border-slate-200 text-slate-600'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isReceivingLeads ? 'bg-emerald-500' : 'bg-slate-400'
+                }`}
+              />
+              <span>{isReceivingLeads ? 'Đang nhận Lead' : 'Tạm ngưng nhận'}</span>
+            </button>
+          )}
+
+          {((user && hasBaPermission(user.roleCode, 'EXPORT_DATA')) || canCreate) && (
+            <div className="inline-flex min-h-9 items-center rounded-[10px] border border-slate-200 bg-white overflow-hidden">
+              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && (
+                <a
+                  href={exportHref}
+                  className="min-h-9 px-3 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <Download aria-hidden="true" className="w-3.5 h-3.5 text-slate-500" />
+                  <span>{UI_VOCABULARY.actions.exportExcel}</span>
+                </a>
+              )}
+              {user && hasBaPermission(user.roleCode, 'EXPORT_DATA') && canCreate && (
+                <span className="h-5 w-px bg-slate-200" aria-hidden="true" />
+              )}
+              {canCreate && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setImportPreviewRows([]);
+                    setImportFileName(null);
+                    setImportPastedText('');
+                    setShowImportModal(true);
+                  }}
+                  className="min-h-9 px-3 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <FolderUp aria-hidden="true" className="w-3.5 h-3.5 text-slate-500" />
+                  <span>{UI_VOCABULARY.actions.importExcel}</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {canCreate && (
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(true)}
+              className="min-h-9 px-3.5 rounded-[10px] bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1E3A8A]"
+            >
+              <Plus aria-hidden="true" className="w-4 h-4" />
+              <span>{UI_VOCABULARY.actions.createLead}</span>
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Khối Nhắc Việc Tự Động (4 quy tắc tự động như Ảnh 1: Chưa tiếp nhận, Lead đứng yên > 3 ngày, Báo giá chưa phản hồi 1d/1w/>1m, Đến lịch hẹn) */}
@@ -3030,51 +3138,40 @@ export function LeadsWorkspace() {
             })}
           </div>
 
-          {/* UI-01, UI-02, UI-03: Simplified 7-Column Default Desktop Table — Fits 100% Width with Zero Horizontal Scroll */}
-          <div className="hidden md:block bg-white border border-slate-200/90 rounded-2xl overflow-hidden shadow-2xs">
-            <div className={showOptionalColumns ? 'overflow-x-auto' : 'overflow-x-hidden'}>
-              <table
-                className={`w-full text-left border-collapse text-[13px] ${
-                  showOptionalColumns ? 'min-w-[1220px]' : 'table-fixed'
-                }`}
-              >
-                <thead className="bg-slate-50/90 text-slate-600 border-b border-slate-200/80 text-[11px] font-bold uppercase tracking-wider">
+          {/* Bảng 7 cột gọn (Khách hàng / dự án · Liên hệ & nguồn · Sản phẩm · Trạng thái / lịch theo dõi · Sales phụ trách · Ngày nhận · Thao tác) */}
+          <div className="hidden md:block bg-white border border-slate-200/90 rounded-[12px] overflow-hidden shadow-2xs">
+            <div
+              tabIndex={0}
+              role="region"
+              aria-label="Bảng danh sách Lead"
+              className="overflow-x-auto"
+            >
+              <table className="w-full min-w-[980px] xl:min-w-0 xl:table-fixed text-left border-collapse text-sm">
+                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 text-xs font-semibold sticky top-0 z-10">
                   <tr>
-                    <th className="py-2.5 px-3 w-[19%]">Khách hàng / Dự án</th>
-                    <th className="py-2.5 px-2.5 w-[16%]">Liên hệ &amp; Nguồn / Kênh</th>
-                    <th className="py-2.5 px-2.5 w-[13%]">Sản phẩm LED</th>
-                    <th className="py-2.5 px-2.5 w-[16%]">Trạng thái &amp; Lịch theo dõi</th>
-                    <th className="py-2.5 px-2.5 w-[14%]">Sales phụ trách</th>
-                    <th className="py-2.5 px-2 w-[9%]">Ngày nhận</th>
-                    {showOptionalColumns && (
-                      <>
-                        <th className="py-2.5 px-2.5 w-[135px]">Khu vực / Địa chỉ</th>
-                        <th className="py-2.5 px-2.5 w-[115px]">Chi tiết UTM</th>
-                        <th className="py-2.5 px-2.5 w-[150px]">Ghi chú</th>
-                      </>
-                    )}
-                    <th className="py-2.5 px-3 text-right w-[13%]">Thao tác</th>
+                    <th scope="col" className="py-2.5 px-3 w-[27%]">Khách hàng / dự án</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[18%]">Liên hệ &amp; nguồn</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[14%]">Sản phẩm</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[19%]">Trạng thái / lịch theo dõi</th>
+                    <th scope="col" className="py-2.5 px-2.5 w-[15%]">Sales phụ trách</th>
+                    <th scope="col" className="py-2.5 px-2 w-[104px]">Ngày nhận</th>
+                    <th scope="col" className="py-2.5 px-3 text-right w-[206px]">Thao tác</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-200/70">
+                <tbody className="divide-y divide-slate-100">
                   {paginatedLeads.length === 0 ? (
                     <tr>
-                      <td
-                        colSpan={showOptionalColumns ? 10 : 7}
-                        className="py-10 px-4 text-center text-slate-500 text-sm"
-                      >
-                        Không tìm thấy hồ sơ Lead nào phù hợp với bộ lọc hiện tại.
+                      <td colSpan={7} className="py-12 px-4 text-center text-slate-500 text-sm">
+                        Không có hồ sơ Lead nào khớp bộ lọc đang chọn.
                       </td>
                     </tr>
                   ) : (
                     paginatedLeads.map((lead) => {
                       const cleanDigits = lead.phone.replace(/\D/g, '');
                       const fraud = evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
-                      const reminderInfo = classifyReminderCategories(lead);
                       const primaryProduct = lead.products[0];
                       const extraProducts = lead.products.slice(1);
                       const horizon = getB2bFollowUpHorizon(lead);
-                      const editable = canEditLead(lead);
 
                       const isPriceShoppingReasonOnly =
                         fraud.hasPriceProbeBehavior &&
@@ -3083,486 +3180,247 @@ export function LeadsWorkspace() {
                           lead.spamReason.toLowerCase().includes('khảo giá') ||
                           lead.spamReason.toLowerCase().includes('dò giá'));
                       const showSpamBadge = lead.spamStatus !== 'NONE' && !isPriceShoppingReasonOnly;
-                      const hasAnyWarning =
-                        showSpamBadge ||
+
+                      // C06: Không lặp tên khách hàng ở nhiều cột
+                      const hasCompany = Boolean(lead.companyName && lead.companyName.trim());
+                      const primaryCustomerLabel = (
+                        lead.companyName ||
+                        lead.contactName ||
+                        'Khách hàng chưa cập nhật tên'
+                      ).replace(/\s*\(nghi (dò|khảo) giá\)/i, '');
+
+                      const secondaryProjectLine = lead.projectName
+                        ? lead.projectName
+                        : lead.province || lead.hcmDistrict
+                          ? formatLeadLocationLabel(lead)
+                          : null;
+
+                      // Nhãn cảnh báo chất lượng gọn, đúng mức đã xác minh (C03 & C06)
+                      let qualityBadge: { label: string; className: string } | null = null;
+                      if (showSpamBadge) {
+                        qualityBadge = {
+                          label: UI_VOCABULARY.qualityFlags.suspectedSpam,
+                          className: 'bg-red-50 border-red-200 text-red-700 hover:bg-red-100',
+                        };
+                      } else if (
+                        fraud.duplicateScenario === 'SCENARIO_1_ACTIVE_DUP' ||
+                        fraud.duplicateScenario === 'SCENARIO_3_MULTI_CONTRACTOR' ||
+                        (fraud.duplicateScenario === 'NONE' && (lead.isDuplicateAlert || fraud.hasDuplicatePhone))
+                      ) {
+                        qualityBadge = {
+                          label: UI_VOCABULARY.qualityFlags.suspectedDuplicate,
+                          className: 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100',
+                        };
+                      } else if (
+                        fraud.duplicateScenario === 'SCENARIO_2_WON_RETURNING' ||
+                        fraud.duplicateScenario === 'SCENARIO_2_LOST_RETURNING'
+                      ) {
+                        qualityBadge = {
+                          label: UI_VOCABULARY.qualityFlags.returningCustomer,
+                          className: 'bg-sky-50 border-sky-200 text-sky-800 hover:bg-sky-100',
+                        };
+                      } else if (
                         fraud.hasPriceProbeBehavior ||
-                        fraud.duplicateScenario !== 'NONE' ||
-                        lead.isDuplicateAlert ||
-                        fraud.hasDuplicatePhone ||
-                        Boolean(fraud.duplicateProjectName);
+                        lead.hasMissingSubjectContent ||
+                        !lead.isPhoneNormalized
+                      ) {
+                        qualityBadge = {
+                          label: UI_VOCABULARY.qualityFlags.needsReview,
+                          className: 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100',
+                        };
+                      }
 
-                      // UC01 1.5 Kịch bản 1: Tô đỏ dòng khi trùng khách đang mở VÀ Lead hiện tại vẫn đang ở "Vừa nhận thông tin" (khi đổi trạng thái thì hết tô đỏ)
-                      const isActiveRedDuplicateRow =
-                        fraud.duplicateScenario === 'SCENARIO_1_ACTIVE_DUP' &&
-                        lead.pipelineStatus === 'new_lead';
-
-                      const rawPrimaryName =
-                        lead.companyName || lead.contactName || 'Khách hàng chưa cập nhật tên';
-                      const primaryName = rawPrimaryName.replace(/\s*\(nghi (dò|khảo) giá\)/i, '');
-                      const secondaryProject = lead.projectName
-                        ? `Dự án: ${lead.projectName}`
-                        : lead.province || lead.hcmDistrict || lead.installationAddress
-                          ? `Địa điểm: ${formatLeadLocationLabel(lead)}`
-                          : 'Chưa cập nhật tên dự án';
-
-                      const noteSummary =
-                        lead.lostReason ||
-                        lead.reopenReason ||
-                        lead.spamReason ||
-                        lead.customProductNote ||
-                        lead.initialNote ||
-                        '—';
+                      const mktChannel =
+                        lead.tracking?.marketingSource &&
+                        lead.tracking.marketingSource !== 'Chưa xác định'
+                          ? lead.tracking.marketingSource
+                          : null;
+                      const webShort = lead.sourceWebsite
+                        ? lead.sourceWebsite.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '')
+                        : null;
+                      const compactSourceLabel = webShort
+                        ? mktChannel
+                          ? `Web ${webShort} · ${mktChannel}`
+                          : `Web ${webShort}`
+                        : lead.contactChannel === 'zalo'
+                          ? 'Zalo'
+                          : lead.contactChannel === 'hotline'
+                            ? 'SĐT / Hotline'
+                            : lead.contactChannel === 'email'
+                              ? 'Email'
+                              : lead.contactChannel === 'fanpage'
+                                ? 'Fanpage'
+                                : lead.contactChannel === 'google_lead_form'
+                                  ? 'Form Google Ads'
+                                  : lead.contactChannel === 'form_web'
+                                    ? 'Biểu mẫu web'
+                                    : mktChannel || formatContactChannelClean(lead.contactChannel);
+                      const receivedDateObj = new Date(lead.createdAt || lead.contactedAt);
 
                       return (
                         <tr
                           key={lead.id}
-                          onClick={() => {
-                            setSelectedLeadId(lead.id);
-                            setLeadDetailTab('info');
-                          }}
-                          className={`cursor-pointer transition-colors ${
-                            showSpamBadge
-                              ? 'bg-red-50/85 hover:bg-red-100/70 border-l-4 border-l-red-600'
-                              : isActiveRedDuplicateRow
-                                ? 'bg-rose-50/75 hover:bg-rose-100/60 border-l-4 border-l-rose-500'
-                                : fraud.isCustomerWonVIP
-                                  ? 'bg-amber-50/45 hover:bg-amber-100/40 border-l-4 border-l-amber-500'
-                                  : `${STATUS_ROW_ACCENTS[lead.pipelineStatus]} hover:bg-blue-50/35`
-                          }`}
+                          onClick={() => openLeadDetail(lead.id, 'info')}
+                          className={`group cursor-pointer transition-colors min-h-[68px] hover:bg-slate-50/80 ${STATUS_ROW_ACCENTS[lead.pipelineStatus]}`}
                         >
-                          {/* Col 1: Customer / Project */}
-                          <td className="py-2 px-3 align-middle overflow-hidden">
-                            <div className="flex items-center gap-1.5 truncate">
-                              <span
-                                className="font-bold text-slate-900 text-[13px] truncate"
-                                title={primaryName}
-                              >
-                                {primaryName}
-                              </span>
-                              {fraud.isCustomerWonVIP && (
-                                <span
-                                  className="px-1.5 py-0.2 rounded bg-amber-500 text-slate-950 font-extrabold text-[10px] inline-flex items-center gap-0.5 shrink-0 shadow-2xs"
-                                  title="Khách hàng thân thiết đã từng mua thành công hợp đồng (VIP)"
-                                >
-                                  <Crown className="w-2.5 h-2.5 fill-slate-950 text-slate-950" />
-                                  <span>VIP</span>
-                                </span>
-                              )}
+                          {/* Cột 1: Khách hàng / dự án */}
+                          <th scope="row" className={`sticky start-0 z-[1] bg-white group-hover:bg-slate-50 py-3 px-3 align-middle font-normal ${STATUS_ROW_ACCENTS[lead.pipelineStatus]}`}>
+                            <div className="font-semibold text-slate-900 truncate max-w-full">
+                              {primaryCustomerLabel}
                             </div>
+                            {secondaryProjectLine ? (
+                              <div className="text-xs text-slate-600 truncate max-w-full mt-0.5">
+                                {secondaryProjectLine}
+                              </div>
+                            ) : lead.hasMissingSubjectContent ? (
+                              <div className="text-[11px] text-amber-700 truncate max-w-full mt-0.5">
+                                Thiếu tiêu đề nội dung biểu mẫu
+                              </div>
+                            ) : null}
+                            <div className="text-[11px] font-mono text-slate-500 truncate max-w-full mt-0.5">
+                              {lead.leadCode}
+                            </div>
+                          </th>
+
+                          {/* Cột 2: Liên hệ & Nguồn gộp gọn (SĐT + Web toantrung.com.vn / bangled.vn / Zalo / SĐT...) */}
+                          <td className="py-3 px-2.5 align-middle">
+                            <div className="font-semibold text-slate-900 tabular-nums whitespace-nowrap">
+                              {lead.phone}
+                            </div>
+                            {hasCompany && lead.contactName && (
+                              <div className="text-xs text-slate-600 truncate max-w-full mt-0.5">
+                                {lead.contactName}
+                              </div>
+                            )}
                             <div
-                              className="text-xs text-slate-600 truncate mt-0.5"
-                              title={secondaryProject}
+                              className="inline-flex items-center mt-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-xs font-medium max-w-full truncate"
+                              title={compactSourceLabel}
                             >
-                              {secondaryProject}
-                            </div>
-                            <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-slate-500 font-mono truncate">
-                              <span className="truncate font-semibold text-[#1E3A8A]" title={lead.leadCode}>
-                                {lead.leadCode}
-                              </span>
-                              {lead.attachmentsCount > 0 && (
-                                <span className="inline-flex items-center gap-1 font-sans text-slate-500 shrink-0">
-                                  · <FileText className="w-3 h-3 text-[#1E3A8A]" />
-                                  {lead.attachmentsCount} tệp
-                                </span>
-                              )}
+                              {compactSourceLabel}
                             </div>
                           </td>
 
-                          {/* Col 2: Contact (Readable Name, Phone, Channel — Bounded without forcing horizontal scroll) */}
-                          <td className="py-2 px-2.5 align-middle overflow-hidden">
-                            <div className="font-bold font-mono text-slate-900 text-[13px] flex items-center gap-1 truncate">
-                              <Phone className="w-3.5 h-3.5 text-[#1E3A8A] shrink-0" />
-                              <span className="truncate">{lead.phone}</span>
-                            </div>
-                            <div className="text-xs text-slate-600 truncate mt-0.5">
-                              {lead.contactName || 'Khách liên hệ'}
-                            </div>
-                            <div className="mt-1 flex items-center gap-1 flex-wrap">
-                              <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-900 border border-indigo-200/70 text-[11px] font-semibold truncate max-w-full">
-                                {(() => {
-                                  const rawSrc =
-                                    lead.selfReportedSource ||
-                                    lead.tracking?.marketingSource ||
-                                    '';
-                                  if (
-                                    rawSrc &&
-                                    rawSrc !== 'Nhập tay' &&
-                                    rawSrc !== 'Chưa xác định'
-                                  ) {
-                                    return rawSrc;
-                                  }
-                                  if (lead.contactChannel === 'zalo') return 'Zalo';
-                                  if (lead.contactChannel === 'form_web') return 'Website Toàn Trung';
-                                  if (lead.contactChannel === 'google_lead_form') return 'Google Ads';
-                                  if (lead.contactChannel === 'fanpage') return 'Fanpage Facebook';
-                                  if (lead.contactChannel === 'email') return 'Email Dự án';
-                                  return 'SĐT / Hotline';
-                                })()}
-                              </span>
-                              {!lead.isPhoneNormalized && (
-                                <span className="px-1.5 py-0.5 rounded bg-amber-50 border border-amber-200 text-amber-800 text-[10px] font-medium truncate">
-                                  SĐT cần chuẩn hóa
-                                </span>
-                              )}
-                            </div>
-                          </td>
-
-                          {/* Col 3: Products */}
-                          <td className="py-2 px-2.5 align-middle overflow-hidden">
+                          {/* Cột 3: Sản phẩm ("Chưa phân loại" thay câu dài lặp) */}
+                          <td className="py-3 px-2.5 align-middle">
                             {primaryProduct ? (
                               <div className="flex items-center gap-1 flex-wrap">
-                                <span
-                                  className="px-2 py-0.5 rounded-lg bg-blue-50 text-[#1E3A8A] border border-blue-200 text-[11px] font-semibold truncate max-w-full"
-                                  title={primaryProduct.productName}
-                                >
+                                <span className="px-2 py-0.5 rounded-md bg-blue-50 text-[#1E3A8A] border border-blue-200/80 text-xs font-medium truncate max-w-full">
                                   {primaryProduct.productName}
                                 </span>
                                 {extraProducts.length > 0 && (
-                                  <span
-                                    className="px-1.5 py-0.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 text-[11px] font-bold shrink-0"
-                                    title={`Sản phẩm kèm theo: ${extraProducts
-                                      .map((p) => p.productName)
-                                      .join(', ')}`}
-                                  >
+                                  <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold">
                                     +{extraProducts.length}
                                   </span>
                                 )}
                               </div>
                             ) : (
-                              <span className="text-xs text-slate-400">Chưa chọn SP</span>
+                              <span className="text-xs text-slate-400">
+                                {UI_VOCABULARY.fallbacks.unclassified}
+                              </span>
                             )}
                           </td>
 
-                          {/* Col 4: Pipeline Status & Warnings */}
-                          <td className="py-2 px-2.5 align-middle overflow-hidden">
-                            <div className="flex flex-col items-start gap-1 max-w-full">
+                          {/* Cột 5: Trạng thái / lịch theo dõi (1 badge trạng thái chính + chip cảnh báo gọn, không tô đỏ cả hàng) */}
+                          <td className="py-3 px-2.5 align-middle">
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <span
-                                className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-[11px] truncate max-w-full ${
-                                  STATUS_BADGE_STYLES[lead.pipelineStatus]
-                                }`}
+                                className={`inline-flex items-center whitespace-nowrap min-h-6 px-2.5 py-0.5 rounded-full border text-xs ${STATUS_BADGE_STYLES[lead.pipelineStatus]}`}
                               >
-                                <span className="w-1.5 h-1.5 rounded-full bg-current opacity-85 shrink-0" />
-                                <span className="truncate">{PIPELINE_STATUS_LABELS[lead.pipelineStatus]}</span>
+                                {PIPELINE_STATUS_LABELS[lead.pipelineStatus]}
                               </span>
 
-                              {/* Separate Restrained Warning Pills */}
-                              {hasAnyWarning && (
-                                <div
-                                  className="flex flex-wrap gap-1"
-                                  onClick={(e) => e.stopPropagation()}
+                              {qualityBadge && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setInvestigativeLead(lead);
+                                  }}
+                                  className={`inline-flex items-center whitespace-nowrap gap-1 min-h-6 px-2 py-0.5 rounded-full border text-[11px] font-semibold transition-colors ${qualityBadge.className}`}
                                 >
-                                  {showSpamBadge && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setInvestigativeLead(lead)}
-                                      className="px-2 py-0.5 rounded-md bg-red-600 hover:bg-red-700 border border-red-600 text-white text-[11px] font-bold inline-flex items-center gap-1 transition"
-                                      title={
-                                        lead.spamReason
-                                          ? `Lý do Spam: ${lead.spamReason}`
-                                          : 'Xem chi tiết cờ Spam'
-                                      }
-                                    >
-                                      <Ban className="w-3 h-3" />
-                                      Spam · {lead.spamStatus === 'CONFIRMED' ? 'Đã duyệt' : 'Chờ duyệt'}
-                                    </button>
-                                  )}
+                                  <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
+                                  <span>{qualityBadge.label}</span>
+                                </button>
+                              )}
+                            </div>
+                            {horizon.scheduledDate ? (
+                              <div className="text-[11px] text-slate-500 mt-1">
+                                Hẹn liên hệ: {horizon.scheduledDate}
+                              </div>
+                            ) : lead.isQuoteOverdue7Days ? (
+                              <div className="text-[11px] text-amber-700 font-medium mt-1">
+                                Báo giá quá 7 ngày chưa phản hồi
+                              </div>
+                            ) : null}
+                          </td>
 
-                                  {fraud.hasPriceProbeBehavior && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setInvestigativeLead(lead)}
-                                      className="px-2 py-0.5 rounded-md bg-orange-100 hover:bg-orange-200 border border-orange-300 text-orange-900 text-[11px] font-bold transition"
-                                      title={
-                                        fraud.priceProbeReason ||
-                                        'Xem bằng chứng nghi khảo giá / dò giá'
-                                      }
-                                    >
-                                      Nghi dò giá
-                                    </button>
-                                  )}
-
-                                  {fraud.duplicateScenario === 'SCENARIO_1_ACTIVE_DUP' && (
-                                    <div className="flex flex-col items-start gap-0.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setInvestigativeLead(lead)}
-                                        className={`px-2 py-0.5 rounded-md border text-[11px] font-bold transition ${
-                                          lead.pipelineStatus === 'new_lead'
-                                            ? 'bg-rose-600 hover:bg-rose-700 border-rose-600 text-white'
-                                            : 'bg-amber-100 hover:bg-amber-200 border-amber-300 text-amber-900'
-                                        }`}
-                                        title="Kịch bản 1 (UC01 1.5): Khách gửi thông tin nhiều kênh khi Lead đang mở"
-                                      >
-                                        CẢNH BÁO TRÙNG LEAD
-                                      </button>
-                                      {fraud.matchedCustomerLead ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setSelectedLeadId(fraud.matchedCustomerLead!.id);
-                                            setLeadDetailTab('info');
-                                          }}
-                                          className="text-[11px] font-semibold text-rose-700 hover:underline text-left truncate max-w-[180px]"
-                                          title={`Mở ngay hồ sơ gốc đang mở: ${fraud.matchedCustomerLead.leadCode}`}
-                                        >
-                                          🔗 Trùng: {fraud.matchedCustomerLead.leadCode} →
-                                        </button>
-                                      ) : (
-                                        <span className="text-[11px] font-medium text-rose-700 truncate max-w-[195px]">
-                                          ⚠️ Liên hệ lại · Đã gộp 1 SĐT
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  {fraud.duplicateScenario === 'SCENARIO_2_WON_RETURNING' && (
-                                    <div className="flex flex-col items-start gap-0.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setInvestigativeLead(lead)}
-                                        className="px-2 py-0.5 rounded-md bg-gradient-to-r from-amber-500 to-yellow-500 text-slate-950 text-[11px] font-extrabold inline-flex items-center gap-1 shadow-2xs transition"
-                                        title="Khách hàng từng chốt thành công hợp đồng trước đây nay quay lại mua dự án mới (VIP)"
-                                      >
-                                        <Crown className="w-3 h-3 fill-slate-950 text-slate-950" />
-                                        <span>👑 KHÁCH CŨ ĐÃ MUA (VIP)</span>
-                                      </button>
-                                      {fraud.matchedCustomerLead ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setSelectedLeadId(fraud.matchedCustomerLead!.id);
-                                            setLeadDetailTab('info');
-                                          }}
-                                          className="text-[11px] font-semibold text-emerald-800 hover:underline text-left truncate max-w-[180px]"
-                                          title={`Mở ngay hồ sơ đã chốt thành công trước đây: ${fraud.matchedCustomerLead.leadCode}`}
-                                        >
-                                          🔗 Đã mua: {fraud.matchedCustomerLead.leadCode} →
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setSelectedLeadId(lead.id);
-                                            setLeadDetailTab('info');
-                                          }}
-                                          className="text-[11px] font-bold text-emerald-800 hover:underline text-left truncate max-w-[180px]"
-                                          title="Xem chi tiết hồ sơ đã từng chốt HĐ"
-                                        >
-                                          💎 Đã từng chốt HĐ · Xem hồ sơ →
-                                        </button>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  {fraud.duplicateScenario === 'SCENARIO_2_LOST_RETURNING' && (
-                                    <div className="flex flex-col items-start gap-0.5">
-                                      <button
-                                        type="button"
-                                        onClick={() => setInvestigativeLead(lead)}
-                                        className="px-2 py-0.5 rounded-md bg-blue-100 hover:bg-blue-200 border border-blue-300 text-[#1E3A8A] text-[11px] font-bold transition"
-                                        title="Khách từng hỏi báo giá trước đây nhưng chưa chốt, nay quay lại tiếp tục muốn mua"
-                                      >
-                                        KHÁCH QUAY LẠI HỎI MUA
-                                      </button>
-                                      {fraud.matchedCustomerLead ? (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setSelectedLeadId(fraud.matchedCustomerLead!.id);
-                                            setLeadDetailTab('info');
-                                          }}
-                                          className="text-[11px] font-semibold text-[#1E3A8A] hover:underline text-left truncate max-w-[195px]"
-                                          title={`Mở xem ngay hồ sơ khách từng hỏi trước đây: ${fraud.matchedCustomerLead.leadCode}${fraud.matchedCustomerLead.lostReason ? ` (${fraud.matchedCustomerLead.lostReason})` : ''}`}
-                                        >
-                                          🔗 Hồ sơ trước: {fraud.matchedCustomerLead.leadCode} →
-                                        </button>
-                                      ) : (
-                                        <button
-                                          type="button"
-                                          onClick={() => {
-                                            setSelectedLeadId(lead.id);
-                                            setLeadDetailTab('info');
-                                          }}
-                                          className="text-[11px] font-medium text-[#1E3A8A] hover:underline text-left truncate max-w-[195px]"
-                                          title={`Lần trước chưa chốt: ${lead.reopenReason || lead.lostReason || 'Hỏi lại dự án'}`}
-                                        >
-                                          🔄 Trước: {lead.reopenReason || lead.lostReason || 'Từng hỏi chưa chốt'} →
-                                        </button>
-                                      )}
-                                    </div>
-                                  )}
-
-                                  {fraud.duplicateScenario === 'SCENARIO_3_MULTI_CONTRACTOR' && (
-                                    <button
-                                      type="button"
-                                      onClick={() => setInvestigativeLead(lead)}
-                                      className="px-2 py-0.5 rounded-md bg-purple-100 hover:bg-purple-200 border border-purple-300 text-purple-900 text-[11px] font-bold transition"
-                                      title="Kịch bản 3 (UC01 1.5): Nhiều nhà thầu cùng hỏi giá 1 dự án / công trình"
-                                    >
-                                      DỰ ÁN NHIỀU BÊN HỎI GIÁ ({fraud.projectContractors.length + 1} thầu)
-                                    </button>
-                                  )}
-
-                                  {fraud.duplicateScenario === 'NONE' &&
-                                    (lead.isDuplicateAlert ||
-                                      fraud.hasDuplicatePhone ||
-                                      fraud.duplicateProjectName) && (
-                                      <button
-                                        type="button"
-                                        onClick={() => setInvestigativeLead(lead)}
-                                        className="px-2 py-0.5 rounded-md bg-amber-100 hover:bg-amber-200 border border-amber-300 text-amber-900 text-[11px] font-bold transition"
-                                        title="Nhấn để xem đối chiếu hồ sơ trùng SĐT hoặc trùng tên dự án"
-                                      >
-                                        {fraud.duplicateProjectName
-                                          ? 'Trùng tên dự án'
-                                          : `Trùng SĐT (${fraud.phoneSubmitCount30d} lần)`}
-                                      </button>
-                                    )}
-                                </div>
+                          {/* Cột 5: Sales phụ trách (tách riêng trạng thái Chờ tiếp nhận / Đã tiếp nhận) */}
+                          <td className="py-3 px-2.5 align-middle">
+                            <div className="text-xs font-semibold text-slate-900 truncate max-w-full">
+                              {lead.assignedSalesName || 'Chưa phân bổ'}
+                            </div>
+                            <div className="mt-0.5">
+                              {lead.receivedConfirmedAt ? (
+                                <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-medium">
+                                  <CheckCircle2 aria-hidden="true" className="w-3 h-3 shrink-0" />
+                                  <span>{UI_VOCABULARY.acceptanceStatus.accepted}</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 font-medium">
+                                  <Clock aria-hidden="true" className="w-3 h-3 shrink-0" />
+                                  <span>{UI_VOCABULARY.acceptanceStatus.pending}</span>
+                                </span>
                               )}
                             </div>
                           </td>
 
-                          {/* Col 5: Assigned Sales (Clean Bounded Width, No Overflow into Col 6) */}
-                          <td className="py-2 px-2.5 align-middle min-w-0 max-w-0 overflow-hidden">
-                            <div className="flex flex-col min-w-0 max-w-full">
-                              <div
-                                className="font-semibold text-slate-900 text-[13px] truncate"
-                                title={lead.assignedSalesName || 'Chưa phân bổ'}
-                              >
-                                {lead.assignedSalesName || 'Chưa phân bổ'}
-                              </div>
-                              {fraud.transferredFromSalesName && (
-                                <div className="mt-0.5 min-w-0 max-w-full">
-                                  <span
-                                    className="inline-flex items-center gap-1 max-w-full min-w-0 px-1.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-[10px] font-semibold text-indigo-800"
-                                    title={`Chuyển từ ${fraud.transferredFromSalesName}${fraud.transferCount > 1 ? ` (${fraud.transferCount} lần)` : ''}`}
-                                  >
-                                    <span className="truncate min-w-0">
-                                      Chuyển từ {fraud.transferredFromSalesName}
-                                    </span>
-                                    {fraud.transferCount > 1 && (
-                                      <span className="shrink-0 text-[10px] font-bold text-indigo-600">
-                                        ({fraud.transferCount})
-                                      </span>
-                                    )}
-                                  </span>
-                                </div>
-                              )}
-                              <div className="mt-0.5 min-w-0 truncate">
-                                {lead.receivedConfirmedAt ? (
-                                  <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 font-semibold truncate">
-                                    <CheckCircle2 className="w-3 h-3 shrink-0" />
-                                    <span className="truncate">Đã tiếp nhận</span>
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1 text-[11px] text-amber-700 font-semibold truncate">
-                                    <Clock className="w-3 h-3 shrink-0" />
-                                    <span className="truncate">Chờ xác nhận</span>
-                                  </span>
-                                )}
-                              </div>
+                          {/* Cột 6: Ngày nhận */}
+                          <td className="py-3 px-2 align-middle whitespace-nowrap tabular-nums">
+                            <div className="text-xs font-medium text-slate-800">
+                              {receivedDateObj.toLocaleDateString('vi-VN')}
                             </div>
-                          </td>
-
-                          {/* Col 6: Received Date */}
-                          <td className="py-2 px-2 align-middle overflow-hidden min-w-0">
-                            <div className="text-[13px] font-semibold text-slate-800 truncate">
-                              {new Date(lead.contactedAt).toLocaleDateString('vi-VN')}
-                            </div>
-                            <div className="text-[11px] text-slate-500 mt-0.5 truncate">
-                              {new Date(lead.contactedAt).toLocaleTimeString('vi-VN', {
+                            <div className="text-[11px] text-slate-500 mt-0.5">
+                              {receivedDateObj.toLocaleTimeString('vi-VN', {
                                 hour: '2-digit',
                                 minute: '2-digit',
                               })}
                             </div>
                           </td>
 
-                          {/* Optional Columns when toggled on */}
-                          {showOptionalColumns && (
-                            <>
-                              <td className="py-2 px-2.5 align-middle max-w-[180px]">
-                                <div className="text-xs text-slate-800 truncate">
-                                  {[lead.hcmDistrict, lead.province || (lead.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : '')]
-                                    .filter(Boolean)
-                                    .join(', ') || '—'}
-                                </div>
-                                {lead.installationAddress && (
-                                  <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                                    {lead.installationAddress}
-                                  </div>
-                                )}
-                              </td>
-                              <td className="py-2 px-2.5 align-middle whitespace-nowrap">
-                                <div className="flex flex-col gap-0.5">
-                                  <span
-                                    className={`px-2 py-0.5 rounded text-[11px] font-semibold w-fit ${
-                                      lead.sourceWebsite
-                                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200/80'
-                                        : 'bg-slate-100 text-slate-600'
-                                    }`}
-                                  >
-                                    {lead.sourceWebsite || 'Chưa xác định website'}
-                                  </span>
-                                  <span className="text-[11px] text-slate-500">
-                                    {CONTACT_CHANNEL_LABELS[lead.contactChannel]}
-                                    {lead.tracking?.marketingSource &&
-                                    lead.tracking.marketingSource !== 'Chưa xác định'
-                                      ? ` · ${lead.tracking.marketingSource}`
-                                      : ''}
-                                  </span>
-                                </div>
-                              </td>
-                              <td className="py-2 px-2.5 align-middle max-w-[200px]">
-                                <p className="text-xs text-slate-600 truncate" title={noteSummary}>
-                                  {noteSummary}
-                                </p>
-                              </td>
-                            </>
-                          )}
-
-                          {/* Col 7: Consolidated Row Actions with Direct Edit — Compact Fit */}
+                          {/* Cột 7: Thao tác ("Xem chi tiết" là thao tác chính; Gọi/Zalo là shortcut gọn có nhãn) */}
                           <td
-                            className="py-2 px-2.5 align-middle text-right overflow-hidden"
+                            className="py-3 px-2.5 align-middle text-right whitespace-nowrap"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div className="inline-flex items-center justify-end gap-1 flex-wrap">
+                            <div className="inline-flex items-center justify-end gap-1">
+                              <button
+                                type="button"
+                                onClick={() => openLeadDetail(lead.id, 'info')}
+                                className="min-h-8 px-2 rounded-lg bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+                              >
+                                {UI_VOCABULARY.actions.viewDetails}
+                              </button>
                               {!lead.isAnonymized && cleanDigits.length >= 9 && (
                                 <>
                                   <a
                                     href={`tel:${cleanDigits}`}
-                                    className="h-7 px-2 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-[11px] font-bold inline-flex items-center gap-0.5 transition shrink-0"
-                                    title={`Gọi ${lead.phone}`}
+                                    aria-label={`Gọi ${lead.phone}`}
+                                    className="min-h-8 px-1.5 rounded-lg bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 border border-slate-200 text-xs font-medium inline-flex items-center gap-1 transition-colors"
                                   >
-                                    <Phone className="w-3 h-3" />
+                                    <Phone aria-hidden="true" className="w-3 h-3" />
                                     <span>Gọi</span>
                                   </a>
                                   <a
                                     href={`https://zalo.me/${cleanDigits}`}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="h-7 px-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#1E3A8A] border border-blue-200 text-[11px] font-bold inline-flex items-center transition shrink-0"
-                                    title="Nhắn Zalo"
+                                    aria-label={`Mở Zalo ${lead.phone}`}
+                                    className="min-h-8 px-1.5 rounded-lg bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-[#1E3A8A] border border-slate-200 text-xs font-medium inline-flex items-center transition-colors"
                                   >
-                                    Zalo
+                                    <span>Zalo</span>
                                   </a>
                                 </>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedLeadId(lead.id);
-                                  setLeadDetailTab('info');
-                                }}
-                                className="h-7 px-2.5 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-[#1E3A8A] text-[11px] font-semibold inline-flex items-center shadow-2xs transition shrink-0"
-                                title={
-                                  editable
-                                    ? 'Mở chi tiết để xem và chỉnh sửa trực tiếp thông tin Lead'
-                                    : 'Mở xem chi tiết hồ sơ Lead'
-                                }
-                              >
-                                <span>Chi tiết</span>
-                              </button>
                             </div>
                           </td>
                         </tr>
@@ -3573,36 +3431,35 @@ export function LeadsWorkspace() {
               </table>
             </div>
 
-            {/* DATA-02: Pagination Bar with Accurate Total and Bounded Page Size */}
-            <div className="px-4 py-2.5 bg-slate-50/90 border-t border-slate-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-sm text-slate-600">
+            {/* Phân trang mặc định 20 dòng/trang */}
+            <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs text-slate-600">
               <div className="flex flex-wrap items-center gap-3">
                 <span>
                   Hiển thị{' '}
-                  <strong className="text-slate-900">
+                  <strong className="text-slate-900 tabular-nums">
                     {displayedLeads.length === 0 ? 0 : (safePage - 1) * pageSize + 1}
                   </strong>
                   –
-                  <strong className="text-slate-900">
+                  <strong className="text-slate-900 tabular-nums">
                     {Math.min(safePage * pageSize, displayedLeads.length)}
                   </strong>{' '}
-                  trên tổng số{' '}
-                  <strong className="text-[#1E3A8A]">{totalFilteredCount}</strong> hồ sơ Lead
+                  trong tổng số{' '}
+                  <strong className="text-[#1E3A8A] tabular-nums">{totalFilteredCount}</strong> Lead
                 </span>
 
                 <label className="inline-flex items-center gap-1.5 text-xs text-slate-600">
-                  <span>Số dòng/trang:</span>
+                  <span>Mỗi trang:</span>
                   <select
                     value={pageSize}
                     onChange={(e) => {
                       setPageSize(Number(e.target.value));
                       setCurrentPage(1);
                     }}
-                    className="h-8 px-2 rounded-lg border border-slate-200 bg-white text-slate-800 font-semibold"
+                    className="min-h-7 px-2 rounded-lg border border-slate-200 bg-white text-slate-800 font-semibold"
                   >
-                    <option value={25}>25</option>
+                    <option value={20}>20</option>
                     <option value={50}>50</option>
                     <option value={100}>100</option>
-                    <option value={250}>250</option>
                   </select>
                 </label>
               </div>
@@ -3612,20 +3469,20 @@ export function LeadsWorkspace() {
                   type="button"
                   disabled={safePage <= 1}
                   onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 disabled:opacity-40"
+                  className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 font-semibold text-slate-700 disabled:opacity-40"
                 >
-                  ← Trang trước
+                  Trang trước
                 </button>
-                <span className="px-3 py-1 text-xs font-semibold text-slate-700">
+                <span className="px-2.5 py-1 font-semibold text-slate-700 tabular-nums">
                   Trang {safePage} / {totalPages}
                 </span>
                 <button
                   type="button"
                   disabled={safePage >= totalPages}
                   onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-                  className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 disabled:opacity-40"
+                  className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 font-semibold text-slate-700 disabled:opacity-40"
                 >
-                  Trang sau →
+                  Trang sau
                 </button>
               </div>
             </div>
@@ -4558,6 +4415,36 @@ export function LeadsWorkspace() {
                   </div>
                 )}
 
+                {investigativeLead.hasMissingSubjectContent && (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 space-y-1">
+                    <strong className="font-bold block text-xs">
+                      Biểu mẫu thiếu nội dung tiêu đề (chứa biến mẫu chưa điền)
+                    </strong>
+                    <p className="text-xs leading-relaxed">
+                      Hệ thống đã ẩn biến mẫu khỏi bảng danh sách chính và giữ nguyên giá trị gốc trong nhật ký để kiểm tra:{' '}
+                      <code className="px-1.5 py-0.5 rounded bg-white border border-amber-200 font-mono text-[11px]">
+                        {investigativeLead.rawProjectName || '—'}
+                      </code>
+                    </p>
+                  </div>
+                )}
+
+                {user && ['ADMIN', 'BOD', 'SALES_LEAD', 'MKT_LEAD'].includes(user.roleCode) && (
+                  <details className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs text-slate-700">
+                    <summary className="font-semibold cursor-pointer select-none">
+                      Chi tiết nguồn kỹ thuật (dành cho quản lý &amp; kiểm tra)
+                    </summary>
+                    <div className="mt-2 space-y-1 text-[11px] text-slate-600">
+                      <div>Website nguồn: <strong>{investigativeLead.sourceWebsite || 'Chưa xác định'}</strong></div>
+                      <div>Phương thức trích xuất kỹ thuật: <code className="font-mono">{investigativeLead.technicalSourceMethod || 'unknown'}</code></div>
+                      <div>Kênh marketing chuẩn hóa: <strong>{investigativeLead.tracking?.marketingSource || 'Chưa xác định'}</strong></div>
+                      {investigativeLead.tracking?.landingPageUrl && (
+                        <div className="break-all">Landing URL: {investigativeLead.tracking.landingPageUrl}</div>
+                      )}
+                    </div>
+                  </details>
+                )}
+
                 {evalResult.hasBlacklistedOrSpam && investigativeLead.spamStatus !== 'NONE' && (
                   <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-950 space-y-1">
                     <strong className="font-bold block text-sm">
@@ -4688,7 +4575,7 @@ export function LeadsWorkspace() {
                     )}
                     <button
                       type="button"
-                      onClick={() => setSelectedLeadId(null)}
+                      onClick={() => closeLeadDetail()}
                       aria-label="Đóng chi tiết Lead"
                       className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
                     >

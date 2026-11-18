@@ -177,7 +177,7 @@ export function AiDesignWorkspace() {
   const [ledBrightnessNits, setLedBrightnessNits] = useState<number>(4500);
 
   // Dual-AI Chat Consultant Model State
-  const [consultantModelName, setConsultantModelName] = useState<string>('Google Gemini 3.5 Flash (Gmail Free)');
+  const [consultantModelName, setConsultantModelName] = useState<string>('Chưa kết nối khóa AI (Dựng nội bộ)');
   const [consultantModelId, setConsultantModelId] = useState<string>('gemini-3.5-flash-lite');
   const [pendingUserPrompt, setPendingUserPrompt] = useState<string | null>(null);
   const chatThreadRef = useRef<HTMLDivElement>(null);
@@ -696,9 +696,13 @@ export function AiDesignWorkspace() {
           setConfigModalProviderId(defPid);
           const defModel = data.providerStatus.defaultModelId || data.providerStatus.activeModel || 'imagen-3.0-generate-002';
           setSelectedModelId(defModel);
-          if (defModel.startsWith('gemini-')) {
+          if (!data.providerStatus.isConfigured) {
+            setConsultantModelName('Chưa kết nối khóa AI (Dựng nội bộ)');
+          } else if (defModel.startsWith('gemini-')) {
             setConsultantModelId(defModel);
-            setConsultantModelName(`Google ${defModel} (Gmail Free)`);
+            setConsultantModelName(`Google ${defModel}`);
+          } else {
+            setConsultantModelName(data.providerStatus.providerName || defModel);
           }
           setAutoFallbackToLocal(data.providerStatus.autoFallbackToLocal ?? true);
           const activeCat = data.providerStatus.availableProviders?.find((p) => p.providerId === defPid);
@@ -861,9 +865,10 @@ export function AiDesignWorkspace() {
 
   // Resolve distinct URLs for Original input photo vs Output design version
   const sitePhotoUrl = resolveAssetUrl(selectedPhoto?.url || currentProject?.sitePhotoDownloadUrl);
-  const versionImageUrl = currentVersion
-    ? `/api/v1/design/asset/${currentVersion.id}`
-    : resolveAssetUrl(currentProject?.aiDraftDownloadUrl || sitePhotoUrl);
+  const versionImageUrl =
+    currentVersion && currentVersion.fileAvailable !== false
+      ? `/api/v1/design/asset/${currentVersion.id}`
+      : sitePhotoUrl;
 
   // Auto-estimated LED Cabinet dimensions directly from the 4 blue corner dots (when customer has no measurements yet)
   const quadEstimatedSpecs = useMemo(() => {
@@ -4077,9 +4082,19 @@ export function AiDesignWorkspace() {
           <button
             type="button"
             onClick={() => handleDownloadProjectZip('all')}
-            disabled={!currentProject}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#D8E2F0] bg-white px-3 py-1.5 text-xs font-bold text-[#17253F] shadow-2xs transition hover:bg-slate-50 disabled:opacity-50"
-            title="Tải gói ZIP trọn bộ hồ sơ dự án (Ảnh hiện trạng + Các phiên bản AI)"
+            disabled={
+              !currentProject ||
+              ((currentProject.photos || []).length === 0 &&
+                !(currentProject.assetVersions || []).some((v) => v.fileAvailable !== false))
+            }
+            className="inline-flex items-center gap-1.5 rounded-lg border border-[#D8E2F0] bg-white px-3 py-1.5 text-xs font-bold text-[#17253F] shadow-2xs transition hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed"
+            title={
+              !currentProject ||
+              ((currentProject.photos || []).length === 0 &&
+                !(currentProject.assetVersions || []).some((v) => v.fileAvailable !== false))
+                ? 'Dự án chưa có tệp ảnh đầu ra hoặc ảnh hiện trạng thực tế để xuất gói ZIP'
+                : 'Tải gói ZIP trọn bộ hồ sơ dự án (chỉ đóng gói tệp thực tế tồn tại)'
+            }
           >
             <FileArchive className="h-3.5 w-3.5 text-amber-600" />
             <span>Xuất .ZIP</span>
@@ -4836,19 +4851,31 @@ export function AiDesignWorkspace() {
                     )}
 
                     {(selectedPhoto || currentVersion) && viewMode !== 'bom' && (
-                      <a
-                        href={
-                          showHandles || viewMode === 'original' || !currentVersion
-                            ? sitePhotoUrl
-                            : versionImageUrl
-                        }
-                        download={`ToanTrung-AI-v${currentVersion?.versionNumber || 1}-${paramForm.pixelPitch}.jpg`}
-                        className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-2xs hover:bg-slate-50"
-                        title="Tải nhanh ảnh đang xem về máy để gửi Zalo cho khách hàng"
-                      >
-                        <Download className="h-3.5 w-3.5 text-slate-600" />
-                        <span>Tải ảnh HD</span>
-                      </a>
+                      !showHandles && viewMode !== 'original' && currentVersion && currentVersion.fileAvailable === false ? (
+                        <button
+                          type="button"
+                          disabled
+                          className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-1.5 text-xs font-semibold text-slate-400 cursor-not-allowed"
+                          title="Tệp đầu ra của phiên bản này chưa tồn tại trên kho lưu trữ"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          <span>Chưa có tệp đầu ra</span>
+                        </button>
+                      ) : (
+                        <a
+                          href={
+                            showHandles || viewMode === 'original' || !currentVersion
+                              ? sitePhotoUrl
+                              : versionImageUrl
+                          }
+                          download={`ToanTrung-AI-v${currentVersion?.versionNumber || 1}-${paramForm.pixelPitch}.jpg`}
+                          className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-2xs hover:bg-slate-50"
+                          title="Tải ảnh đang xem về máy"
+                        >
+                          <Download className="h-3.5 w-3.5 text-slate-600" />
+                          <span>Tải ảnh HD</span>
+                        </a>
+                      )
                     )}
 
                     <button
@@ -5305,15 +5332,46 @@ export function AiDesignWorkspace() {
                   )}
                 </div>
 
+                {/* C11: Dải đối chiếu nguồn tham chiếu của phiên bản đang xem */}
+                {currentVersion && (
+                  <div className="mt-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span>
+                        <strong className="text-slate-800">Phiên bản:</strong> v{currentVersion.versionNumber} (
+                        {currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD' ? 'Designer hoàn thiện' : 'Nháp phối cảnh'})
+                      </span>
+                      <span>
+                        <strong className="text-slate-800">Ảnh tham chiếu:</strong>{' '}
+                        {currentVersion.referenceSitePhotoId || selectedPhoto?.name || 'Ảnh công trình hiện tại'}
+                      </span>
+                      {currentVersion.sourceVersionId && (
+                        <span>
+                          <strong className="text-slate-800">Kế thừa từ:</strong> ID #{currentVersion.sourceVersionId}
+                        </span>
+                      )}
+                      <span>
+                        <strong className="text-slate-800">Tệp đầu ra:</strong>{' '}
+                        {currentVersion.fileAvailable === false
+                          ? 'Chưa có tệp trên kho lưu trữ'
+                          : 'Đã lưu trữ bảo mật'}
+                      </span>
+                    </div>
+                    {currentVersion.effectivePrompt && (
+                      <span className="truncate max-w-[360px] text-slate-500" title={currentVersion.effectivePrompt}>
+                        Lệnh: {currentVersion.effectivePrompt}
+                      </span>
+                    )}
+                  </div>
+                )}
+
                 {/* BOTTOM STRIP: AI-EDITED VERSIONS WITH RENAME (✎) & DELETE (×) ACTIONS */}
                 <div className="mt-3 shrink-0">
                   <div className="mb-1.5 flex items-center justify-between text-[11px] font-bold text-slate-600">
                     <span>
-                      CÁC PHIÊN BẢN ẢNH SAU KHI AI SỬA ({currentProject?.assetVersions.length || 0}{' '}
-                      phiên bản)
+                      Lịch sử phiên bản thiết kế ({currentProject?.assetVersions.length || 0} phiên bản)
                     </span>
                     <span className="text-slate-400">
-                      Bấm vào phiên bản để xem lại · Di chuột lên thẻ để đổi tên (✎) hoặc xoá (×)
+                      Bấm vào phiên bản để xem · Di chuột lên thẻ để đổi tên (✎) hoặc xoá (×)
                     </span>
                   </div>
                   <div className="flex gap-2.5 overflow-x-auto pb-1">
@@ -5351,11 +5409,17 @@ export function AiDesignWorkspace() {
                                 : 'border-slate-200 hover:border-purple-300'
                             }`}
                           >
-                            <img
-                              src={`/api/v1/design/asset/${ver.id}`}
-                              alt={`Phiên bản AI v${ver.versionNumber}`}
-                              className="h-full w-full object-cover"
-                            />
+                            {ver.fileAvailable === false ? (
+                              <div className="h-full w-full flex items-center justify-center bg-slate-800 px-2 text-center text-[10px] font-medium text-slate-300">
+                                Chưa có tệp đầu ra
+                              </div>
+                            ) : (
+                              <img
+                                src={`/api/v1/design/asset/${ver.id}`}
+                                alt={`Phiên bản v${ver.versionNumber}`}
+                                className="h-full w-full object-cover"
+                              />
+                            )}
                             {ver.isApprovedFinal && (
                               <span className="absolute right-1.5 top-1.5 rounded bg-emerald-600 px-1.5 py-0.5 text-[9px] font-extrabold text-white shadow">
                                 Đã chốt

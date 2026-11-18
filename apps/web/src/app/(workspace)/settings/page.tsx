@@ -56,7 +56,15 @@ export default function SettingsPage() {
   // Sub-tab navigation: 'system_health' | 'branding_identity' | 'google_integrations'
   const [activeSettingsTab, setActiveSettingsTab] = useState<
     'system_health' | 'branding_identity' | 'google_integrations'
-  >('branding_identity');
+  >('google_integrations');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const t = new URLSearchParams(window.location.search).get('tab');
+    if (t === 'branding' || t === 'branding_identity') setActiveSettingsTab('branding_identity');
+    else if (t === 'health' || t === 'system_health') setActiveSettingsTab('system_health');
+    else if (t === 'sync' || t === 'google_integrations') setActiveSettingsTab('google_integrations');
+  }, []);
 
   // Human-Friendly System Health & 1-Click Backup State (Enhancement 8)
   const [backingUp, setBackingUp] = useState(false);

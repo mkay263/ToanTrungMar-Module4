@@ -313,7 +313,7 @@ export async function listKeywordsAndArticlesForUser(user: SessionUserDto): Prom
       cachedAdsClicks: k.cachedAdsClicks ?? 0,
       cachedOrganicClicks: k.cachedOrganicClicks ?? 0,
       cachedAvgPosition: k.cachedAvgPosition,
-      trendScore: k.trendDirection === 'rising' ? 88 : k.trendDirection === 'declining' ? 42 : 68,
+      trendScore: k.cachedOrganicClicks ?? 0,
       trendDirection:
         k.trendDirection === 'rising'
           ? 'UP'
@@ -383,7 +383,16 @@ export async function listKeywordsAndArticlesForUser(user: SessionUserDto): Prom
       headingStructureJson: a.aiSuggestedOutline,
       contentHtml: a.contentHtml,
       featuredImageUrl: null,
-      keywordDensityPct: 1.8,
+      keywordDensityPct: (() => {
+        const plain = (a.contentHtml || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+        const kw = (a.keyword?.keyword || a.topic || '').trim().toLowerCase();
+        if (!plain || !kw) return 0;
+        const totalWords = plain.split(' ').filter(Boolean).length;
+        if (totalWords === 0) return 0;
+        const kwWords = kw.split(/\s+/).filter(Boolean).length;
+        const matches = plain.split(kw).length - 1;
+        return Number((((matches * kwWords) / totalWords) * 100).toFixed(2));
+      })(),
       status: mapArticleStatusToDto(a.status, Boolean(a.lastPublishError)),
       currentRevisionId: a.currentRevisionId,
       approvedRevisionId: a.approvedRevisionId,

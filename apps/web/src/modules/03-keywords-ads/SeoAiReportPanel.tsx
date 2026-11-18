@@ -3,25 +3,40 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiRequest } from '@/core/http/client';
 import {
-  AlignCenter,
-  AlignLeft,
-  AlignRight,
+  ArrowUpRight,
   Bold,
+  CheckCircle2,
+  FilePlus2,
   FileSpreadsheet,
   FileText,
   Heading2,
   History,
   Italic,
   List,
-  ListOrdered,
+  PenLine,
   Printer,
-  Redo2,
   RotateCcw,
   Save,
   Sparkles,
   Underline,
-  Undo2,
+  X,
 } from 'lucide-react';
+
+interface SeoTopicRecommendationRow {
+  keyword: string;
+  targetWebsite: string;
+  suggestedTopicTitle: string;
+  priorityCategory:
+    | 'HIGH_IMPRESSION_LOW_CTR'
+    | 'STRIKE_DISTANCE_POS_4_15'
+    | 'RISING_DEMAND_LEAD_FIT';
+  impressions: number;
+  clicks: number;
+  ctrPct: number;
+  avgPosition: number | null;
+  leadsFromWebsiteCount: number;
+  dataEvidenceReason: string;
+}
 
 interface SeoAiReportRecord {
   id: string;
@@ -59,6 +74,7 @@ interface SeoAiReportRecord {
       warnings: string[];
     };
     leadsFromWebsiteCount: number;
+    recommendedTopics?: SeoTopicRecommendationRow[];
   };
   aiOriginalContent: string;
   editedContent: string;
@@ -78,13 +94,23 @@ export function SeoAiReportPanel({
   csrfToken,
   initialWebsite,
   initialPeriodDays,
+  canEditContent = true,
+  onSelectKeyword,
+  onContentCreated,
+  onClose,
 }: {
   csrfToken?: string;
   initialWebsite?: string;
   initialPeriodDays?: number;
+  canEditContent?: boolean;
+  onSelectKeyword?: (keyword: string) => void;
+  onContentCreated?: () => void;
+  onClose?: () => void;
 }) {
   const [website, setWebsite] = useState(initialWebsite || 'all');
   const [periodDays, setPeriodDays] = useState(initialPeriodDays || 30);
+  const [activeViewTab, setActiveViewTab] = useState<'document' | 'topics'>('document');
+  const [isEditingDoc, setIsEditingDoc] = useState(false);
 
   useEffect(() => {
     if (initialWebsite) setWebsite(initialWebsite);
@@ -93,108 +119,95 @@ export function SeoAiReportPanel({
   useEffect(() => {
     if (initialPeriodDays) setPeriodDays(initialPeriodDays);
   }, [initialPeriodDays]);
+
   const [reports, setReports] = useState<SeoAiReportRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draftContent, setDraftContent] = useState('');
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [planningKeyword, setPlanningKeyword] = useState<string | null>(null);
+  const [plannedKeywords, setPlannedKeywords] = useState<Record<string, boolean>>({});
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [editorFont, setEditorFont] = useState<'Segoe UI' | 'Times New Roman' | 'Arial'>('Segoe UI');
-  const [editorFontSize, setEditorFontSize] = useState<'13px' | '14px' | '15px'>('14px');
   const [editorSyncKey, setEditorSyncKey] = useState(0);
   const editorRef = useRef<HTMLDivElement | null>(null);
 
-  const textToWordHtml = useCallback((text: string, snap?: SeoAiReportRecord['snapshot']) => {
+  const textToCleanReportHtml = useCallback((text: string, snap?: SeoAiReportRecord['snapshot']) => {
     const lines = (text || '').split('\n');
-    const bodyHtml = lines
-      .map((line) => {
-        const trimmed = line.trim();
-        if (!trimmed) return '<div style="height:6px;"></div>';
-        const escaped = trimmed
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;');
-        if (trimmed.startsWith('BÁO CÁO ')) {
-          return `<div style="border-bottom:2px solid #0B1D48;padding-bottom:10px;margin-bottom:12px;text-align:center;">
-            <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;color:#475569;text-transform:uppercase;margin-bottom:4px;">CÔNG TY CỔ PHẦN ĐIỆN TỬ VIỄN THÔNG TOÀN TRUNG</div>
-            <h1 style="font-size:17px;font-weight:800;color:#0B1D48;margin:0;">${escaped}</h1>
-          </div>`;
-        }
-        if (trimmed.startsWith('Kỳ báo cáo:')) {
-          return `<p style="text-align:center;font-size:12px;color:#475569;font-style:italic;margin:0 0 14px 0;">${escaped}</p>`;
-        }
-        if (/^(I|II|III|IV|V)\.\s/.test(trimmed) || /^#+\s/.test(trimmed)) {
-          return `<h2 style="font-size:14px;font-weight:800;color:#0B1D48;border-bottom:1px solid #E2E8F0;padding-bottom:3px;margin:16px 0 8px 0;">${escaped.replace(/^#+\s*/, '')}</h2>`;
-        }
-        if (/^[0-9]+\.\s/.test(trimmed)) {
-          return `<p style="font-weight:600;color:#0F172A;margin:6px 0 3px 0;line-height:1.65;">${escaped}</p>`;
-        }
-        if (trimmed.startsWith('Kính gửi:') || trimmed.startsWith('Trân trọng')) {
-          return `<p style="font-weight:700;color:#0F172A;margin:10px 0 6px 0;">${escaped}</p>`;
-        }
-        return `<p style="margin:4px 0;line-height:1.7;color:#1E293B;">${escaped}</p>`;
-      })
-      .join('');
+    let injectedSummaryTable = false;
 
     const summaryTable = snap
-      ? `<table style="width:100%;border-collapse:collapse;margin:14px 0;font-size:12.5px;">
+      ? `<table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:13px;border-radius:8px;overflow:hidden;">
           <thead>
-            <tr style="background:#F1F5F9;color:#0B1D48;">
-              <th style="border:1px solid #CBD5E1;padding:7px 10px;text-align:left;">Chỉ số đo lường</th>
-              <th style="border:1px solid #CBD5E1;padding:7px 10px;text-align:right;">Kỳ hiện tại</th>
-              <th style="border:1px solid #CBD5E1;padding:7px 10px;text-align:right;">Kỳ trước</th>
-              <th style="border:1px solid #CBD5E1;padding:7px 10px;text-align:right;">Biến động</th>
+            <tr style="background:#F8FAFC;color:#0F275C;">
+              <th style="border:1px solid #E2E8F0;padding:8px 12px;text-align:left;">Chỉ số đo lường</th>
+              <th style="border:1px solid #E2E8F0;padding:8px 12px;text-align:right;">Kỳ này</th>
+              <th style="border:1px solid #E2E8F0;padding:8px 12px;text-align:right;">Kỳ trước</th>
+              <th style="border:1px solid #E2E8F0;padding:8px 12px;text-align:right;">So sánh</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;font-weight:600;">Lượt nhấp tìm kiếm (Clicks)</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:700;">${snap.current.totalClicks.toLocaleString('vi-VN')}</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;">${snap.previous.totalClicks.toLocaleString('vi-VN')}</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:600;">${snap.comparison.clicksDeltaLabel}</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;font-weight:600;">Lượt nhấp từ Google (Clicks)</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:700;">${snap.current.totalClicks.toLocaleString('vi-VN')}</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;color:#64748B;">${snap.previous.totalClicks.toLocaleString('vi-VN')}</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:600;color:#0F275C;">${snap.comparison.clicksDeltaLabel}</td>
             </tr>
             <tr>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;font-weight:600;">Lượt hiển thị (Impressions)</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:700;">${snap.current.totalImpressions.toLocaleString('vi-VN')}</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;">${snap.previous.totalImpressions.toLocaleString('vi-VN')}</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:600;">${snap.comparison.impressionsDeltaLabel}</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;font-weight:600;">Lượt xuất hiện trên Google</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:700;">${snap.current.totalImpressions.toLocaleString('vi-VN')}</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;color:#64748B;">${snap.previous.totalImpressions.toLocaleString('vi-VN')}</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:600;color:#0F275C;">${snap.comparison.impressionsDeltaLabel}</td>
             </tr>
             <tr>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;font-weight:600;">Tỷ lệ nhấp trung bình (CTR)</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:700;">${snap.current.overallCtrPct}%</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;">${snap.previous.overallCtrPct}%</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:600;">${snap.comparison.ctrDeltaPctPoints >= 0 ? '+' : ''}${snap.comparison.ctrDeltaPctPoints} điểm %</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;font-weight:600;">Tỷ lệ nhấp trung bình (CTR)</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:700;">${snap.current.overallCtrPct}%</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;color:#64748B;">${snap.previous.overallCtrPct}%</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:600;">${snap.comparison.ctrDeltaPctPoints >= 0 ? '+' : ''}${snap.comparison.ctrDeltaPctPoints} điểm %</td>
             </tr>
             <tr>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;font-weight:600;">Lead hợp lệ từ website</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;font-weight:700;color:#059669;">${snap.leadsFromWebsiteCount} Lead</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;">—</td>
-              <td style="border:1px solid #CBD5E1;padding:6px 10px;text-align:right;">Trong kỳ</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;font-weight:600;">Lead hợp lệ từ Website</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;font-weight:700;color:#059669;">${snap.leadsFromWebsiteCount} Lead</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;color:#64748B;">—</td>
+              <td style="border:1px solid #E2E8F0;padding:7px 12px;text-align:right;color:#475569;">Ghi nhận CRM</td>
             </tr>
           </tbody>
         </table>`
       : '';
 
-    return bodyHtml.replace(
-      'I. TỔNG QUAN KẾT QUẢ ĐẠT ĐƯỢC</h2>',
-      `I. TỔNG QUAN KẾT QUẢ ĐẠT ĐƯỢC</h2>${summaryTable}`,
-    );
+    return lines
+      .map((line) => {
+        const trimmed = line.replace(/\s*\[Tham chiếu:[^\]]*\]/gi, '').trim();
+        if (!trimmed) return '<div style="height:6px;"></div>';
+        if (/^\[Tham chiếu/i.test(trimmed)) return '';
+        const escaped = trimmed
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        if (trimmed.startsWith('BÁO CÁO ')) {
+          return `<div style="border-bottom:2px solid #0F275C;padding-bottom:12px;margin-bottom:14px;">
+            <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;color:#64748B;text-transform:uppercase;margin-bottom:4px;">CÔNG TY CỔ PHẦN ĐIỆN TỬ VIỄN THÔNG TOÀN TRUNG</div>
+            <h1 style="font-size:18px;font-weight:800;color:#0F275C;margin:0;line-height:1.35;">${escaped}</h1>
+          </div>`;
+        }
+        if (trimmed.startsWith('Kỳ báo cáo:')) {
+          return `<p style="font-size:12.5px;color:#475569;margin:0 0 14px 0;">${escaped}</p>`;
+        }
+        if (/^(I|II|III|IV|V)\.\s/.test(trimmed) || /^#+\s/.test(trimmed)) {
+          const headingHtml = `<h2 style="font-size:14.5px;font-weight:700;color:#0F275C;background:#F8FAFC;border-left:3.5px solid #1E3A8A;padding:6px 10px;border-radius:0 6px 6px 0;margin:18px 0 8px 0;">${escaped.replace(/^#+\s*/, '')}</h2>`;
+          if (!injectedSummaryTable && /^I\.\s/.test(trimmed)) {
+            injectedSummaryTable = true;
+            return `${headingHtml}${summaryTable}`;
+          }
+          return headingHtml;
+        }
+        if (/^[0-9]+\.\s/.test(trimmed)) {
+          return `<p style="font-weight:600;color:#0F172A;margin:8px 0 4px 0;line-height:1.6;">${escaped}</p>`;
+        }
+        return `<p style="margin:4px 0;line-height:1.68;color:#334155;">${escaped}</p>`;
+      })
+      .join('');
   }, []);
-
-  useEffect(() => {
-    const rec = reports.find((r) => r.id === selectedId);
-    if (editorRef.current) {
-      editorRef.current.innerHTML = textToWordHtml(draftContent, rec?.snapshot);
-    }
-  }, [selectedId, editorSyncKey, textToWordHtml]);
-
-  const execWordCmd = (cmd: string, value?: string) => {
-    if (!editorRef.current) return;
-    editorRef.current.focus();
-    document.execCommand(cmd, false, value);
-    setDraftContent(editorRef.current.innerText || '');
-  };
 
   const cleanContent = (r: SeoAiReportRecord) => {
     const raw = (r.editedContent || '').trim();
@@ -206,9 +219,7 @@ export function SeoAiReportPanel({
 
   const loadReports = useCallback(async () => {
     try {
-      const res = await apiRequest<{ reports: SeoAiReportRecord[] }>('/api/v1/ads/seo-reports', {
-        skipCache: true,
-      });
+      const res = await apiRequest<{ reports: SeoAiReportRecord[] }>('/api/v1/ads/seo-reports');
       const list = (res.reports || []).filter(
         (r) => !(r.editedContent || '').includes('Ghi chú nghiệm thu R02'),
       );
@@ -218,7 +229,7 @@ export function SeoAiReportPanel({
         setDraftContent(cleanContent(list[0]));
       }
     } catch {
-      // Ignore silent load errors
+      // ignore
     }
   }, [selectedId]);
 
@@ -227,6 +238,19 @@ export function SeoAiReportPanel({
   }, [loadReports]);
 
   const activeReport = reports.find((r) => r.id === selectedId) || null;
+
+  useEffect(() => {
+    if (editorRef.current && activeReport) {
+      editorRef.current.innerHTML = textToCleanReportHtml(draftContent, activeReport.snapshot);
+    }
+  }, [selectedId, editorSyncKey, draftContent, activeReport, textToCleanReportHtml, activeViewTab]);
+
+  const execFormat = (cmd: string, value?: string) => {
+    if (!editorRef.current) return;
+    editorRef.current.focus();
+    document.execCommand(cmd, false, value);
+    setDraftContent(editorRef.current.innerText || '');
+  };
 
   const handleGenerate = async () => {
     if (generating) return;
@@ -242,9 +266,14 @@ export function SeoAiReportPanel({
       setReports((prev) => [res.report, ...prev]);
       setSelectedId(res.report.id);
       setDraftContent(cleanContent(res.report));
-      setStatusMsg(`Đã tạo báo cáo SEO AI (${res.report.website === 'all' ? 'Tất cả website' : res.report.website}, ${res.report.periodDays} ngày).`);
+      setActiveViewTab('document');
+      setIsEditingDoc(false);
+      setEditorSyncKey((k) => k + 1);
+      setStatusMsg(
+        `Đã lập báo cáo AI (${res.report.website === 'all' ? 'Tất cả website' : res.report.website} · ${res.report.periodDays} ngày).`,
+      );
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo báo cáo SEO AI.');
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo báo cáo AI lúc này.');
     } finally {
       setGenerating(false);
     }
@@ -262,7 +291,8 @@ export function SeoAiReportPanel({
         body: { reportId: activeReport.id, editedContent: draftContent },
       });
       setReports((prev) => prev.map((r) => (r.id === res.report.id ? res.report : r)));
-      setStatusMsg('Đã lưu phiên bản chỉnh sửa (bản AI gốc và Snapshot vẫn được giữ nguyên).');
+      setIsEditingDoc(false);
+      setStatusMsg('Đã lưu nội dung biên tập.');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể lưu chỉnh sửa.');
     } finally {
@@ -270,287 +300,436 @@ export function SeoAiReportPanel({
     }
   };
 
+  const handlePlanTopic = async (topic: SeoTopicRecommendationRow) => {
+    if (!canEditContent || planningKeyword) return;
+    setPlanningKeyword(topic.keyword);
+    setErrorMsg(null);
+    setStatusMsg(null);
+    try {
+      const targetDomain =
+        topic.targetWebsite === 'bangled.vn' || topic.targetWebsite === 'manhinhled.net.vn'
+          ? topic.targetWebsite
+          : 'toantrung.com.vn';
+      const kwRes = await apiRequest<{ id: number; keyword: string }>('/api/v1/ads', {
+        method: 'POST',
+        csrfToken,
+        body: {
+          action: 'create_keyword',
+          keywordText: topic.keyword,
+          targetWebsite: targetDomain,
+          cachedOrganicClicks: topic.clicks,
+          cachedAvgPosition: topic.avgPosition ?? undefined,
+        },
+      });
+      await apiRequest<{ id: number; title: string }>('/api/v1/ads', {
+        method: 'POST',
+        csrfToken,
+        body: {
+          action: 'generate_ai_draft',
+          keywordId: kwRes.id,
+          targetWebsite: targetDomain,
+          topicFocus: topic.suggestedTopicTitle,
+          customPromptInstruction: `Dữ liệu đối chiếu Search Console: ${topic.dataEvidenceReason}`,
+        },
+      });
+      setPlannedKeywords((prev) => ({ ...prev, [topic.keyword]: true }));
+      setStatusMsg(`Đã tạo bản nháp bài viết "${topic.suggestedTopicTitle}" trong mục Nội dung.`);
+      onContentCreated?.();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo bài nháp.');
+    } finally {
+      setPlanningKeyword(null);
+    }
+  };
+
+  const topicsList = activeReport?.snapshot.recommendedTopics || [];
+
   return (
-    <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-card space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="font-display text-base font-bold text-ink flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-[#1E3A8A]" />
-            Viết Báo cáo Phân tích SEO bằng AI
-          </h2>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Hệ thống tổng hợp toàn bộ chỉ số tìm kiếm &amp; so sánh 2 kỳ trước khi tạo báo cáo chi tiết.
-          </p>
+    <section
+      aria-label="Studio Báo cáo Phân tích SEO bằng AI"
+      className="rounded-2xl bg-white border border-slate-200/90 shadow-lg overflow-hidden"
+    >
+      {/* 1. Thanh điều khiển gọn gàng trên 1 hàng duy nhất */}
+      <div className="px-5 py-3 bg-gradient-to-r from-[#081533] via-[#0F275C] to-[#1E3A8A] text-white flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className="w-8 h-8 rounded-xl bg-white/15 backdrop-blur-xs grid place-items-center shrink-0">
+            <Sparkles className="w-4 h-4 text-sky-300" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-sm sm:text-base font-bold leading-tight truncate">
+              Báo cáo Phân tích SEO bằng AI
+            </h2>
+            <p className="text-[11px] text-sky-200/90 truncate">
+              Tổng hợp tự động từ số liệu thật của Search Console &amp; gợi ý bài viết kéo khách
+            </p>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <select
+            aria-label="Chọn website phân tích"
             value={website}
             onChange={(e) => setWebsite(e.target.value)}
-            className="h-9 px-3 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 bg-white"
+            className="h-8 px-2.5 rounded-lg bg-white/15 hover:bg-white/20 border border-white/25 text-white text-xs font-semibold outline-none [&>option]:text-slate-900"
           >
             <option value="all">Tất cả website</option>
             <option value="toantrung.com.vn">toantrung.com.vn</option>
-            <option value="bangled.vn">bangled.vn</option>
             <option value="manhinhled.net.vn">manhinhled.net.vn</option>
+            <option value="bangled.vn">bangled.vn</option>
           </select>
 
           <select
+            aria-label="Chọn kỳ so sánh"
             value={periodDays}
             onChange={(e) => setPeriodDays(Number(e.target.value))}
-            className="h-9 px-3 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 bg-white"
+            className="h-8 px-2.5 rounded-lg bg-white/15 hover:bg-white/20 border border-white/25 text-white text-xs font-semibold outline-none [&>option]:text-slate-900"
           >
-            <option value={7}>7 ngày vs 7 ngày trước</option>
-            <option value={14}>14 ngày vs 14 ngày trước</option>
-            <option value={30}>30 ngày vs 30 ngày trước</option>
-            <option value={60}>60 ngày vs 60 ngày trước</option>
+            <option value={7}>7 ngày gần nhất</option>
+            <option value={14}>14 ngày gần nhất</option>
+            <option value={30}>30 ngày gần nhất</option>
+            <option value={60}>60 ngày gần nhất</option>
           </select>
 
           <button
             type="button"
             disabled={generating}
             onClick={() => void handleGenerate()}
-            className="h-9 px-4 rounded-xl bg-[#1E3A8A] text-white text-xs font-bold hover:bg-[#172D6E] disabled:opacity-50 transition inline-flex items-center gap-1.5"
+            className="h-8 px-3.5 rounded-lg bg-sky-400 hover:bg-sky-300 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5 shadow-xs transition disabled:opacity-50"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            {generating ? 'Đang tính Snapshot & Phân tích...' : 'Tạo Báo cáo SEO AI'}
+            <span>{generating ? 'Đang phân tích...' : 'Phân tích kỳ mới'}</span>
           </button>
+
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Đóng bảng báo cáo AI"
+              className="w-8 h-8 rounded-lg bg-white/10 hover:bg-white/20 text-white grid place-items-center transition"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
         </div>
       </div>
 
+      {/* 2. Thanh phụ: Lịch sử bản lưu dạng Dropdown gọn + Tab chuyển đổi + Xuất Word/Excel */}
+      <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+        <div className="flex flex-wrap items-center gap-2">
+          {reports.length > 0 && (
+            <div className="inline-flex items-center gap-1.5">
+              <History className="w-3.5 h-3.5 text-slate-500" />
+              <select
+                aria-label="Chọn bản báo cáo đã lưu"
+                value={selectedId || ''}
+                onChange={(e) => {
+                  const next = reports.find((r) => r.id === e.target.value);
+                  if (next) {
+                    setSelectedId(next.id);
+                    setDraftContent(cleanContent(next));
+                    setIsEditingDoc(false);
+                    setEditorSyncKey((k) => k + 1);
+                  }
+                }}
+                className="h-8 max-w-[300px] px-2.5 rounded-lg border border-slate-200 bg-white text-slate-800 font-semibold truncate"
+              >
+                {reports.map((r, idx) => (
+                  <option key={r.id} value={r.id}>
+                    {idx === 0 ? '★ Mới nhất: ' : ''}
+                    {r.website === 'all' ? 'Tất cả web' : r.website} ({r.periodDays} ngày) ·{' '}
+                    {new Date(r.createdAt).toLocaleDateString('vi-VN')}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {activeReport && (
+            <div className="inline-flex rounded-xl bg-slate-200/70 p-0.5">
+              <button
+                type="button"
+                onClick={() => setActiveViewTab('document')}
+                className={`px-3 py-1 rounded-lg font-semibold transition ${
+                  activeViewTab === 'document'
+                    ? 'bg-white text-[#0F275C] shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Bản phân tích ({activeReport.periodDays} ngày)
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveViewTab('topics')}
+                className={`px-3 py-1 rounded-lg font-semibold transition ${
+                  activeViewTab === 'topics'
+                    ? 'bg-white text-[#0F275C] shadow-2xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Chủ đề gợi ý viết bài ({topicsList.length})
+              </button>
+            </div>
+          )}
+        </div>
+
+        {activeReport && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {activeViewTab === 'document' && (
+              <button
+                type="button"
+                onClick={() => setIsEditingDoc((prev) => !prev)}
+                className={`h-8 px-2.5 rounded-lg border font-semibold inline-flex items-center gap-1 transition ${
+                  isEditingDoc
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                }`}
+              >
+                <PenLine className="w-3.5 h-3.5" />
+                <span>{isEditingDoc ? 'Đang sửa văn bản' : 'Sửa văn bản'}</span>
+              </button>
+            )}
+            <a
+              href={`/api/v1/ads/seo-reports/${encodeURIComponent(activeReport.id)}/export?format=docx`}
+              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-blue-50 text-slate-700 hover:text-[#1E3A8A] font-semibold inline-flex items-center gap-1 transition"
+            >
+              <FileText className="w-3.5 h-3.5 text-blue-600" />
+              <span>Tải Word</span>
+            </a>
+            <a
+              href={`/api/v1/ads/seo-reports/${encodeURIComponent(activeReport.id)}/export?format=xlsx`}
+              className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 font-semibold inline-flex items-center gap-1 transition"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Tải Excel</span>
+            </a>
+          </div>
+        )}
+      </div>
+
       {statusMsg && (
-        <div className="px-3 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium">
+        <div className="mx-5 mt-3 px-3.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 font-medium">
           {statusMsg}
         </div>
       )}
       {errorMsg && (
-        <div className="px-3 py-2 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
+        <div className="mx-5 mt-3 px-3.5 py-2 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium">
           {errorMsg}
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        <div className="border border-slate-200 rounded-xl p-3 bg-slate-50/70 space-y-2">
-          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700">
-            <History className="w-3.5 h-3.5" />
-            Lịch sử Báo cáo ({reports.length})
+      {/* 3. Nội dung chính: Gọn, thoáng, có trật tự rõ ràng */}
+      {!activeReport ? (
+        <div className="p-10 text-center space-y-3">
+          <div className="w-11 h-11 rounded-2xl bg-blue-50 text-[#1E3A8A] grid place-items-center mx-auto">
+            <Sparkles className="w-5 h-5" />
           </div>
-          {reports.length === 0 ? (
-            <p className="text-xs text-slate-500">Chưa có báo cáo SEO AI nào được lưu.</p>
-          ) : (
-            <div className="space-y-1.5 max-h-[340px] overflow-y-auto">
-              {reports.map((r) => (
+          <div className="text-sm font-bold text-slate-900">
+            Chưa có bản báo cáo phân tích SEO nào được tạo
+          </div>
+          <p className="text-xs text-slate-500 max-w-md mx-auto">
+            Chọn website và khoảng ngày ở góc trên bên phải rồi bấm <strong>Phân tích kỳ mới</strong> để AI tổng hợp kết quả và đề xuất bài viết.
+          </p>
+        </div>
+      ) : activeViewTab === 'document' ? (
+        <div className="p-5 space-y-4">
+          {/* Dải 4 chỉ số tóm tắt gọn */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="rounded-xl border border-slate-200/80 bg-slate-50/60 px-3.5 py-2.5">
+              <div className="text-[11px] text-slate-500">Click tìm kiếm Google</div>
+              <div className="flex items-baseline justify-between gap-2 mt-0.5">
+                <span className="text-lg font-extrabold text-slate-900 tabular-nums">
+                  {activeReport.snapshot.current.totalClicks.toLocaleString('vi-VN')}
+                </span>
+                <span className="text-[11px] font-semibold text-[#1E3A8A]">
+                  {activeReport.snapshot.comparison.clicksDeltaLabel}
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 bg-slate-50/60 px-3.5 py-2.5">
+              <div className="text-[11px] text-slate-500">Lượt xuất hiện (Impressions)</div>
+              <div className="flex items-baseline justify-between gap-2 mt-0.5">
+                <span className="text-lg font-extrabold text-slate-900 tabular-nums">
+                  {activeReport.snapshot.current.totalImpressions.toLocaleString('vi-VN')}
+                </span>
+                <span className="text-[11px] font-semibold text-slate-600">
+                  {activeReport.snapshot.comparison.impressionsDeltaLabel}
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 bg-slate-50/60 px-3.5 py-2.5">
+              <div className="text-[11px] text-slate-500">Tỷ lệ khách nhấp (CTR)</div>
+              <div className="flex items-baseline justify-between gap-2 mt-0.5">
+                <span className="text-lg font-extrabold text-slate-900 tabular-nums">
+                  {activeReport.snapshot.current.overallCtrPct}%
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  Kỳ trước: {activeReport.snapshot.previous.overallCtrPct}%
+                </span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200/80 bg-slate-50/60 px-3.5 py-2.5">
+              <div className="text-[11px] text-slate-500">Lead hợp lệ từ Website</div>
+              <div className="flex items-baseline justify-between gap-2 mt-0.5">
+                <span className="text-lg font-extrabold text-emerald-700 tabular-nums">
+                  {activeReport.snapshot.leadsFromWebsiteCount} Lead
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {activeReport.generationMode === 'LIVE_AI' ? 'Gemini AI' : 'Đối soát chuẩn'}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Thanh định dạng CHỈ hiện khi bấm "Sửa văn bản" (không bầy bừa mặc định) */}
+          {isEditingDoc && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-amber-50/70 border border-amber-200 px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center gap-1">
+                <button type="button" onClick={() => execFormat('formatBlock', 'H2')} className="p-1.5 rounded hover:bg-white text-slate-700" title="Tiêu đề mục">
+                  <Heading2 className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={() => execFormat('bold')} className="p-1.5 rounded hover:bg-white text-slate-700" title="In đậm">
+                  <Bold className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={() => execFormat('italic')} className="p-1.5 rounded hover:bg-white text-slate-700" title="In nghiêng">
+                  <Italic className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={() => execFormat('underline')} className="p-1.5 rounded hover:bg-white text-slate-700" title="Gạch chân">
+                  <Underline className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={() => execFormat('insertUnorderedList')} className="p-1.5 rounded hover:bg-white text-slate-700" title="Danh sách">
+                  <List className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={() => window.print()} className="p-1.5 rounded hover:bg-white text-slate-700 inline-flex items-center gap-1">
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>In</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
                 <button
-                  key={r.id}
                   type="button"
                   onClick={() => {
-                    setSelectedId(r.id);
-                    setDraftContent(r.editedContent);
-                    setStatusMsg(null);
+                    setDraftContent(activeReport.aiOriginalContent);
+                    setEditorSyncKey((k) => k + 1);
                   }}
-                  className={`w-full text-left p-2.5 rounded-lg border text-xs transition ${
-                    r.id === selectedId
-                      ? 'bg-white border-[#1E3A8A] shadow-2xs'
-                      : 'bg-white/70 border-slate-200 hover:bg-white'
-                  }`}
+                  className="h-7 px-2.5 rounded-lg bg-white border border-slate-200 text-slate-700 font-semibold inline-flex items-center gap-1"
                 >
-                  <div className="font-bold text-slate-900 truncate">{r.website}</div>
-                  <div className="text-[11px] text-slate-500">
-                    {r.periodDays} ngày · {new Date(r.createdAt).toLocaleString('vi-VN')}
-                  </div>
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Khôi phục gốc</span>
                 </button>
-              ))}
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void handleSaveEdit()}
+                  className="h-7 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold inline-flex items-center gap-1"
+                >
+                  <Save className="w-3 h-3" />
+                  <span>{saving ? 'Đang lưu...' : 'Lưu bản sửa'}</span>
+                </button>
+              </div>
             </div>
           )}
+
+          {/* Trang văn bản báo cáo sạch đẹp */}
+          <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4 sm:p-6 max-h-[460px] overflow-y-auto [scrollbar-gutter:stable]">
+            <div
+              ref={editorRef}
+              contentEditable={isEditingDoc}
+              suppressContentEditableWarning
+              onBlur={(e) => {
+                if (isEditingDoc) setDraftContent(e.currentTarget.innerText || '');
+              }}
+              className={`mx-auto max-w-3xl bg-white rounded-xl border px-6 py-6 sm:px-8 sm:py-7 text-sm shadow-2xs transition ${
+                isEditingDoc
+                  ? 'border-amber-400 ring-2 ring-amber-400/20 focus:outline-none'
+                  : 'border-slate-200/90'
+              }`}
+            />
+          </div>
         </div>
-
-        <div className="lg:col-span-3 space-y-3">
-          {activeReport ? (
-            <>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="text-slate-500 block">Clicks (Kỳ này / Trước)</span>
-                  <strong className="text-slate-900 text-sm">
-                    {activeReport.snapshot.current.totalClicks} / {activeReport.snapshot.previous.totalClicks}
-                  </strong>
-                  <span className="block text-[11px] text-[#1E3A8A] font-semibold">
-                    {activeReport.snapshot.comparison.clicksDeltaLabel}
-                  </span>
-                </div>
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="text-slate-500 block">Impressions</span>
-                  <strong className="text-slate-900 text-sm">
-                    {activeReport.snapshot.current.totalImpressions}
-                  </strong>
-                  <span className="block text-[11px] text-slate-600">
-                    {activeReport.snapshot.comparison.impressionsDeltaLabel}
-                  </span>
-                </div>
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="text-slate-500 block">CTR tổng hợp</span>
-                  <strong className="text-slate-900 text-sm">
-                    {activeReport.snapshot.current.overallCtrPct}%
-                  </strong>
-                  <span className="block text-[11px] text-slate-600">
-                    Kỳ trước: {activeReport.snapshot.previous.overallCtrPct}%
-                  </span>
-                </div>
-                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
-                  <span className="text-slate-500 block">Lead từ Website</span>
-                  <strong className="text-emerald-700 text-sm">
-                    {activeReport.snapshot.leadsFromWebsiteCount} Lead
-                  </strong>
-                  <span className="block text-[11px] text-slate-500">
-                    {activeReport.generationMode === 'LIVE_AI'
-                      ? `AI Thật (${activeReport.modelUsed})`
-                      : 'Tổng hợp tự động từ số liệu thực tế'}
-                  </span>
-                </div>
-              </div>
-
-              {activeReport.validationResult && !activeReport.validationResult.valid && (
-                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 space-y-0.5">
-                  <div className="font-bold">Cảnh báo đối chứng số liệu với Snapshot:</div>
-                  {activeReport.validationResult.violations.map((v, i) => (
-                    <div key={i}>• {v}</div>
-                  ))}
-                </div>
-              )}
-
-              {activeReport.snapshot.dataCompleteness.warnings.length > 0 && (
-                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-0.5">
-                  {activeReport.snapshot.dataCompleteness.warnings.map((w, i) => (
-                    <div key={i}>• {w}</div>
-                  ))}
-                </div>
-              )}
-
-              {/* Giao diện soạn thảo giống Microsoft Word */}
-              <div className="rounded-2xl border border-slate-200 bg-slate-100/80 overflow-hidden">
-                <div className="flex flex-wrap items-center gap-1 bg-white border-b border-slate-200 px-2.5 py-1.5 text-slate-700">
-                  <select
-                    value={editorFont}
-                    onChange={(e) => setEditorFont(e.target.value as typeof editorFont)}
-                    className="h-7 rounded border border-slate-200 bg-slate-50 px-1.5 text-[11px] font-medium text-slate-700"
-                    title="Phông chữ"
-                  >
-                    <option value="Segoe UI">Segoe UI</option>
-                    <option value="Times New Roman">Times New Roman</option>
-                    <option value="Arial">Arial</option>
-                  </select>
-                  <select
-                    value={editorFontSize}
-                    onChange={(e) => setEditorFontSize(e.target.value as typeof editorFontSize)}
-                    className="h-7 rounded border border-slate-200 bg-slate-50 px-1.5 text-[11px] font-medium text-slate-700"
-                    title="Cỡ chữ"
-                  >
-                    <option value="13px">13</option>
-                    <option value="14px">14</option>
-                    <option value="15px">15</option>
-                  </select>
-                  <span className="h-4 w-px bg-slate-200 mx-1" />
-                  <button type="button" onClick={() => execWordCmd('undo')} title="Hoàn tác" className="p-1.5 rounded hover:bg-slate-100">
-                    <Undo2 className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('redo')} title="Làm lại" className="p-1.5 rounded hover:bg-slate-100">
-                    <Redo2 className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="h-4 w-px bg-slate-200 mx-1" />
-                  <button type="button" onClick={() => execWordCmd('bold')} title="In đậm (Ctrl+B)" className="p-1.5 rounded hover:bg-slate-100">
-                    <Bold className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('italic')} title="In nghiêng (Ctrl+I)" className="p-1.5 rounded hover:bg-slate-100">
-                    <Italic className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('underline')} title="Gạch chân (Ctrl+U)" className="p-1.5 rounded hover:bg-slate-100">
-                    <Underline className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('formatBlock', 'H2')} title="Tiêu đề mục" className="p-1.5 rounded hover:bg-slate-100">
-                    <Heading2 className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="h-4 w-px bg-slate-200 mx-1" />
-                  <button type="button" onClick={() => execWordCmd('insertUnorderedList')} title="Danh sách chấm" className="p-1.5 rounded hover:bg-slate-100">
-                    <List className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('insertOrderedList')} title="Danh sách số" className="p-1.5 rounded hover:bg-slate-100">
-                    <ListOrdered className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="h-4 w-px bg-slate-200 mx-1" />
-                  <button type="button" onClick={() => execWordCmd('justifyLeft')} title="Căn trái" className="p-1.5 rounded hover:bg-slate-100">
-                    <AlignLeft className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('justifyCenter')} title="Căn giữa" className="p-1.5 rounded hover:bg-slate-100">
-                    <AlignCenter className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => execWordCmd('justifyRight')} title="Căn phải" className="p-1.5 rounded hover:bg-slate-100">
-                    <AlignRight className="w-3.5 h-3.5" />
-                  </button>
-                  <span className="h-4 w-px bg-slate-200 mx-1" />
-                  <button type="button" onClick={() => window.print()} title="In / Xuất PDF" className="p-1.5 rounded hover:bg-slate-100 inline-flex items-center gap-1 text-[11px] font-semibold">
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>In</span>
-                  </button>
-                </div>
-
-                <div className="p-5 max-h-[520px] overflow-y-auto bg-slate-200/60">
-                  <div
-                    ref={editorRef}
-                    contentEditable
-                    suppressContentEditableWarning
-                    style={{ fontFamily: editorFont, fontSize: editorFontSize }}
-                    onInput={(e) => setDraftContent(e.currentTarget.innerText || '')}
-                    className="mx-auto max-w-[800px] min-h-[340px] bg-white px-10 py-8 rounded shadow-md border border-slate-300/80 text-slate-800 leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-500/20"
-                  />
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={saving}
-                    onClick={() => void handleSaveEdit()}
-                    className="h-9 px-3.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50 inline-flex items-center gap-1.5"
-                  >
-                    <Save className="w-3.5 h-3.5" />
-                    {saving ? 'Đang lưu...' : 'Lưu chỉnh sửa'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDraftContent(activeReport.aiOriginalContent)}
-                    className="h-9 px-3 rounded-xl border border-slate-200 text-xs font-semibold text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    Khôi phục bản AI gốc
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <a
-                    href={`/api/v1/ads/seo-reports/${encodeURIComponent(activeReport.id)}/export?format=docx`}
-                    className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-                  >
-                    <FileText className="w-3.5 h-3.5 text-blue-700" />
-                    Xuất Word (.docx)
-                  </a>
-                  <a
-                    href={`/api/v1/ads/seo-reports/${encodeURIComponent(activeReport.id)}/export?format=xlsx`}
-                    className="h-9 px-3 rounded-xl border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 inline-flex items-center gap-1.5"
-                  >
-                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
-                    Xuất Excel (.xlsx)
-                  </a>
-                </div>
-              </div>
-            </>
+      ) : (
+        /* Tab 2: Danh sách chủ đề gợi ý viết bài gọn gàng */
+        <div className="p-5">
+          {topicsList.length === 0 ? (
+            <div className="py-8 text-center text-xs text-slate-500">
+              Bản báo cáo này chưa có chủ đề từ khóa gợi ý riêng.
+            </div>
           ) : (
-            <div className="p-6 rounded-xl border border-dashed border-slate-200 text-center text-xs text-slate-500">
-              Chọn Website và Kỳ so sánh rồi bấm <strong>Tạo Báo cáo SEO AI</strong> để tạo snapshot và phân tích có dẫn chứng.
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {topicsList.map((topic) => {
+                const isPlanned = Boolean(plannedKeywords[topic.keyword]);
+                const isBusy = planningKeyword === topic.keyword;
+                return (
+                  <div
+                    key={`${topic.keyword}-${topic.targetWebsite}`}
+                    className="rounded-xl border border-slate-200 p-3.5 flex flex-col justify-between gap-3 hover:border-[#1E3A8A]/40 transition"
+                  >
+                    <div>
+                      <div className="flex items-start justify-between gap-2">
+                        <h3 className="text-xs sm:text-sm font-bold text-slate-900">
+                          {topic.suggestedTopicTitle}
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-md bg-blue-50 text-[#1E3A8A] text-[11px] font-semibold shrink-0">
+                          {topic.targetWebsite}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-600 mt-1.5">
+                        Từ khóa gốc: <strong className="text-slate-900">{topic.keyword}</strong> ·{' '}
+                        {topic.impressions.toLocaleString('vi-VN')} lượt thấy · Tỷ lệ nhấp {topic.ctrPct}%
+                        {topic.avgPosition ? ` · Hạng #${topic.avgPosition}` : ''}
+                      </p>
+                      <p className="text-[11px] text-slate-500 mt-1">{topic.dataEvidenceReason}</p>
+                    </div>
+
+                    <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+                      {onSelectKeyword ? (
+                        <button
+                          type="button"
+                          onClick={() => onSelectKeyword(topic.keyword)}
+                          className="text-xs font-semibold text-slate-600 hover:text-[#1E3A8A] inline-flex items-center gap-1"
+                        >
+                          <span>Xem số liệu từ khóa</span>
+                          <ArrowUpRight className="w-3.5 h-3.5" />
+                        </button>
+                      ) : (
+                        <span />
+                      )}
+
+                      {canEditContent && (
+                        <button
+                          type="button"
+                          disabled={isPlanned || isBusy}
+                          onClick={() => void handlePlanTopic(topic)}
+                          className={`h-8 px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                            isPlanned
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                              : 'bg-[#0F275C] hover:bg-[#1E3A8A] text-white disabled:opacity-50'
+                          }`}
+                        >
+                          {isPlanned ? (
+                            <>
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>Đã đưa vào bài nháp</span>
+                            </>
+                          ) : (
+                            <>
+                              <FilePlus2 className="w-3.5 h-3.5" />
+                              <span>{isBusy ? 'Đang tạo bài...' : 'Tạo bài nháp ngay'}</span>
+                            </>
+                          )}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
-      </div>
-    </div>
+      )}
+    </section>
   );
 }
-

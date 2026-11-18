@@ -3,7 +3,10 @@ import { requireAuthenticatedSession } from '../../../../../../core/permissions'
 import {
   getGoogleOAuthStatusDto,
   getGoogleClientConfigDto,
+  getGoogleAdsApiConfigDto,
   saveGoogleClientConfig,
+  saveGoogleAdsApiConfig,
+  syncAllGoogleDataAcrossModules,
   connectSandboxDemo,
   disconnectGoogleOAuth,
 } from '../../../../../../modules/02-tracking-sync/google-oauth.service';
@@ -12,11 +15,12 @@ export const dynamic = 'force-dynamic';
 
 export async function GET() {
   try {
-    const [status, clientConfig] = await Promise.all([
+    const [status, clientConfig, adsConfig] = await Promise.all([
       getGoogleOAuthStatusDto(),
       getGoogleClientConfigDto(),
+      getGoogleAdsApiConfigDto(),
     ]);
-    return jsonSuccess({ status, clientConfig });
+    return jsonSuccess({ status, clientConfig, adsConfig });
   } catch (err) {
     return jsonError(
       'GET_GOOGLE_STATUS_ERROR',
@@ -33,10 +37,43 @@ export async function POST(req: Request) {
     const user = auth.user;
 
     const body = (await req.json().catch(() => ({}))) as {
-      action?: 'save_client_config' | 'demo_connect' | 'disconnect';
+      action?: 'save_client_config' | 'save_ads_config' | 'demo_connect' | 'disconnect';
       clientId?: string;
       clientSecret?: string;
+      developerToken?: string;
+      customerId?: string;
+      loginCustomerId?: string;
     };
+
+    if (body.action === 'save_ads_config') {
+      if (user.roleCode !== 'ADMIN' && user.roleCode !== 'MKT_LEAD') {
+        return jsonError(
+          'FORBIDDEN',
+          'Chỉ Quản trị viên hoặc Trưởng phòng Marketing mới được cấu hình Google Ads API.',
+          403,
+        );
+      }
+      if (!body.developerToken?.trim()) {
+        return jsonError('INVALID_INPUT', 'Vui lòng nhập Developer Token của Google Ads.', 400);
+      }
+      await saveGoogleAdsApiConfig({
+        developerToken: body.developerToken.trim(),
+        customerId: body.customerId?.trim() || null,
+        loginCustomerId: body.loginCustomerId?.trim() || null,
+      });
+      await syncAllGoogleDataAcrossModules('MANUAL_RETRY').catch(() => null);
+      const [status, clientConfig, adsConfig] = await Promise.all([
+        getGoogleOAuthStatusDto(),
+        getGoogleClientConfigDto(),
+        getGoogleAdsApiConfigDto(),
+      ]);
+      return jsonSuccess({
+        message: 'Đã lưu Developer Token & đồng bộ chỉ số Google Ads thành công.',
+        status,
+        clientConfig,
+        adsConfig,
+      });
+    }
 
     if (body.action === 'save_client_config') {
       if (user.roleCode !== 'ADMIN' && user.roleCode !== 'MKT_LEAD') {

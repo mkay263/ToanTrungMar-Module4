@@ -145,6 +145,11 @@ export interface DesignAssetVersionItemDto {
   isApprovedFinal: boolean;
   uploadedByName: string;
   createdAt: string;
+  fileAvailable?: boolean;
+  referenceSitePhotoId?: string | null;
+  referenceProductPhotoIds?: string[];
+  sourceVersionId?: number | null;
+  effectivePrompt?: string | null;
 }
 
 export interface DesignRequestItemDto {

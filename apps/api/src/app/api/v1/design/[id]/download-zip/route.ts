@@ -6,7 +6,6 @@ import { jsonError } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import { ZipArchive } from '../../../../../../core/export/xlsx-builder';
 import { readPrivateBusinessFile } from '../../../../../../core/storage/private-files.service';
-import { renderSyntheticLedPngBuffer } from '../../../../../../modules/05-ai-design/providers';
 import {
   assertCanAccessDesignProject,
   ForbiddenDesignProjectAccessError,
@@ -61,7 +60,7 @@ export async function GET(
   }
 
   const url = new URL(req.url);
-  const folderFilter = url.searchParams.get('folder') || 'all'; // 'all' | 'technical' | 'designs'
+  const folderFilter = url.searchParams.get('folder') || 'all';
   const idsParam = url.searchParams.get('ids') || '';
   const selectedIds = idsParam
     ? new Set(idsParam.split(',').map((s) => s.trim()).filter(Boolean))
@@ -85,40 +84,12 @@ export async function GET(
     .replace(/[^\w.-]/g, '_')
     .slice(0, 40);
 
-  // 1. Add project technical summary JSON
-  zip.addFile(
-    'Thong_So_Du_An.json',
-    JSON.stringify(
-      {
-        projectId: row.id,
-        projectName: meta.projectName || `Dự án #${row.id}`,
-        leadCode: row.lead?.leadCode || null,
-        requestType: row.requestType,
-        ledCategory: row.ledCategory,
-        screenDimensions: row.screenDimensions,
-        aspectRatio: row.aspectRatio,
-        status: row.designStatus,
-        productSpec: meta.productSpec || null,
-        exportedBy: auth.user.fullName,
-        exportedAt: new Date().toISOString(),
-      },
-      null,
-      2
-    )
-  );
+  let realFilesIncluded = 0;
+  const skippedMissingEntries: string[] = [];
 
-  // 2. Include Ảnh kỹ thuật (input photos)
+  // 1. Include real input photos only (never fabricate synthetic images)
   if (folderFilter === 'all' || folderFilter === 'technical') {
-    const photos = meta.photos && meta.photos.length > 0
-      ? meta.photos
-      : [
-          {
-            id: 'photo-default-1',
-            name: 'Anh_chinh_dien_showroom.webp',
-            url: '/brand/showroom-toan-trung.webp',
-          },
-        ];
-
+    const photos = Array.isArray(meta.photos) ? meta.photos : [];
     for (let i = 0; i < photos.length; i++) {
       const p = photos[i];
       if (selectedIds && !selectedIds.has(p.id)) continue;
@@ -128,7 +99,7 @@ export async function GET(
 
       if (p.storageObjectKey) {
         const priv = readPrivateBusinessFile(p.storageObjectKey);
-        if (priv) {
+        if (priv && priv.buffer.length > 0) {
           fileBuf = priv.buffer;
           ext = path.extname(priv.fileName) || '.png';
         }
@@ -149,20 +120,17 @@ export async function GET(
       }
 
       if (!fileBuf) {
-        fileBuf = renderSyntheticLedPngBuffer({
-          mode: 'perspective_3d',
-          prompt: `Ảnh kỹ thuật: ${p.name}`,
-          seedKey: `tech-${row.id}-${p.id}`,
-        });
-        ext = '.png';
+        skippedMissingEntries.push(`Anh_Ky_Thuat: ${p.name} (tệp vật lý chưa tồn tại)`);
+        continue;
       }
 
       const cleanName = p.name.replace(/[^\w.-]/g, '_').replace(/\.(png|jpe?g|webp)$/i, '');
       zip.addFile(`Anh_Ky_Thuat/${String(i + 1).padStart(2, '0')}_${cleanName}${ext}`, fileBuf);
+      realFilesIncluded += 1;
     }
   }
 
-  // 3. Include Bản thiết kế (AI drafts & approved final renders)
+  // 2. Include real design asset versions only
   if (folderFilter === 'all' || folderFilter === 'designs') {
     for (const ver of row.assetVersions) {
       if (selectedIds && !selectedIds.has(`ver-${ver.id}`) && !selectedIds.has(String(ver.id))) {
@@ -170,15 +138,9 @@ export async function GET(
       }
 
       const priv = readPrivateBusinessFile(ver.storageObjectKey);
-      let fileBuf: Buffer;
-      if (priv && priv.buffer.length > 200) {
-        fileBuf = priv.buffer;
-      } else {
-        fileBuf = renderSyntheticLedPngBuffer({
-          mode: row.requestType === 'banner' ? 'banner' : 'perspective_3d',
-          prompt: ver.promptUsed || `Bản thiết kế v${ver.versionNumber}`,
-          seedKey: `ver-${ver.id}-v${ver.versionNumber}`,
-        });
+      if (!priv || priv.buffer.length === 0) {
+        skippedMissingEntries.push(`Ban_Thiet_Ke: v${ver.versionNumber} (tệp đầu ra chưa tồn tại)`);
+        continue;
       }
 
       const tag = ver.isApprovedFinal
@@ -186,9 +148,42 @@ export async function GET(
         : ver.versionType === 'final_render'
           ? 'DESIGNER_FINAL'
           : 'AI_DRAFT';
-      zip.addFile(`Ban_Thiet_Ke/v${ver.versionNumber}_${tag}_req${row.id}.png`, fileBuf);
+      const ext = path.extname(priv.fileName) || '.png';
+      zip.addFile(`Ban_Thiet_Ke/v${ver.versionNumber}_${tag}_req${row.id}${ext}`, priv.buffer);
+      realFilesIncluded += 1;
     }
   }
+
+  if (realFilesIncluded === 0) {
+    return jsonError(
+      'NO_EXPORTABLE_FILES',
+      'Dự án chưa có tệp ảnh đầu ra hoặc ảnh hiện trạng thực tế trên kho lưu trữ để tải gói ZIP.',
+      404
+    );
+  }
+
+  zip.addFile(
+    'Thong_So_Du_An.json',
+    JSON.stringify(
+      {
+        projectId: row.id,
+        projectName: meta.projectName || `Dự án #${row.id}`,
+        leadCode: row.lead?.leadCode || null,
+        requestType: row.requestType,
+        ledCategory: row.ledCategory,
+        screenDimensions: row.screenDimensions,
+        aspectRatio: row.aspectRatio,
+        status: row.designStatus,
+        productSpec: meta.productSpec || null,
+        realFilesIncluded,
+        skippedMissingEntries,
+        exportedBy: auth.user.fullName,
+        exportedAt: new Date().toISOString(),
+      },
+      null,
+      2
+    )
+  );
 
   await prisma.auditLog.create({
     data: {
@@ -198,7 +193,8 @@ export async function GET(
       targetId: String(row.id),
       detailsJson: JSON.stringify({
         folderFilter,
-        versionCount: row.assetVersions.length,
+        realFilesIncluded,
+        skippedCount: skippedMissingEntries.length,
       }),
     },
   });
@@ -213,4 +209,3 @@ export async function GET(
     },
   });
 }
-

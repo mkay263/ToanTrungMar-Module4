@@ -237,7 +237,7 @@ function buildGenuineDocxArchive(params: {
         spacingAfter: 120,
       }),
       makeDocxTable(
-        ['Nguồn Marketing', 'Lead hợp lệ (L2)', 'Lead hiệu quả (L3)', 'Đã gửi báo giá', 'Chốt Won', 'Tỷ lệ chốt'],
+        ['Kênh marketing', 'Lead hợp lệ (L2)', 'Lead hiệu quả (L3)', 'Chuyển đổi quảng cáo', 'Chốt thành công', 'Tỷ lệ chốt'],
         params.sourceRows
       )
     );
@@ -245,14 +245,14 @@ function buildGenuineDocxArchive(params: {
 
   if (params.salesRows.length > 0) {
     bodyParts.push(
-      makeDocxParagraph('III. HIỆU SUẤT ĐỘI NGŨ KINH DOANH (SALES PIPELINE)', {
+      makeDocxParagraph('III. ĐỐI SOÁT KẾT QUẢ THEO NHÂN SỰ PHỤ TRÁCH', {
         bold: true,
         sizeHalfPt: 24,
         colorHex: '1E3A8A',
         spacingAfter: 120,
       }),
       makeDocxTable(
-        ['Nhân sự Kinh doanh', 'Tổng Lead', 'Đang xử lý', 'Đã gửi BG', 'Quá hạn >7 ngày', 'Chốt Won'],
+        ['Nhân sự phụ trách', 'Lead hợp lệ', 'Đang xử lý', 'Đã gửi báo giá', 'Quá hạn >7 ngày', 'Chốt thành công'],
         params.salesRows
       )
     );
@@ -311,6 +311,9 @@ async function handleGenerateDocx(
     reportingPeriod?: string;
     contentHtml?: string;
     preset?: string;
+    websiteId?: string;
+    from?: string;
+    to?: string;
   }
 ) {
   const auth = await requirePermissionSession(request, 'EXPORT_DATA');
@@ -318,42 +321,43 @@ async function handleGenerateDocx(
 
   try {
     const url = new URL(request.url);
+    const websiteId = customPayload?.websiteId || url.searchParams.get('websiteId') || 'all';
     const preset = customPayload?.preset || url.searchParams.get('preset') || '30d';
-    const fromDate = url.searchParams.get('fromDate') || undefined;
-    const toDate = url.searchParams.get('toDate') || undefined;
+    const fromDate = customPayload?.from || url.searchParams.get('from') || url.searchParams.get('fromDate') || undefined;
+    const toDate = customPayload?.to || url.searchParams.get('to') || url.searchParams.get('toDate') || undefined;
 
-    const dash = await getScopedReportsDashboard(auth.user, { preset, fromDate, toDate });
+    const dash = await getScopedReportsDashboard(auth.user, { websiteId, preset, fromDate, toDate });
     const dateStamp = new Date().toISOString().slice(0, 10);
     const docCode = customPayload?.docCode || `TT-BC-${dateStamp.replace(/-/g, '')}`;
     const reportTitle =
       customPayload?.title ||
-      `Báo cáo Điều hành Tổng hợp Toàn Trung (${dash.fromDate} đến ${dash.toDate})`;
+      `Báo cáo kết quả Toàn Trung (${dash.fromDate} đến ${dash.toDate})`;
 
     const kpiRows: string[][] = [
       [
-        'Tổng Lead thu nhận (L1)',
+        'Lead tiếp nhận (L1)',
         String(dash.overview.totalLeadsL1),
-        'Toàn bộ Lead phát sinh trong kỳ báo cáo',
+        'Toàn bộ Lead phát sinh trong phạm vi kỳ và website đang chọn',
       ],
       [
         'Lead hợp lệ (L2)',
         String(dash.overview.validLeadsL2),
-        'Lead hợp lệ (!isSpam) đưa vào Pipeline tư vấn',
+        'Lead sau khi trừ bản ghi đã xác minh là spam',
       ],
       [
-        'Lead hiệu quả tính CPL (L3)',
+        'Lead hiệu quả (L3)',
         String(dash.overview.effectiveLeadsL3),
-        'Đã trừ Spam tự động & Spam đã xác nhận (UC03 BR6)',
+        'Đã trừ spam loại trừ quảng cáo & yêu cầu lặp ngắn hạn theo BA',
       ],
       [
-        'Đang làm việc / Báo giá chờ phản hồi',
+        'Đang xử lý / Báo giá chờ phản hồi',
         `${dash.overview.activeLeadsCount ?? dash.overview.quotingCount} / ${dash.overview.quoteSentCount}`,
-        `Quá hạn báo giá >7 ngày: ${dash.overview.overdue7DaysQuoteCount}`,
+        `Báo giá quá hạn >7 ngày: ${dash.overview.overdue7DaysQuoteCount}`,
       ],
       [
-        'Hợp đồng thành công (Won) & Tỷ lệ chốt',
+        'Chốt thành công & Tỷ lệ chốt',
         `${dash.overview.wonCount} (${dash.overview.winRateText})`,
-        'Tính trên tổng số Lead hợp lệ (L2)',
+        'Tính trên tổng số Lead hợp lệ (L2) cùng phạm vi',
       ],
     ];
 

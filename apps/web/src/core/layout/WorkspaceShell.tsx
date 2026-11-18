@@ -26,24 +26,23 @@ import {
   X,
 } from 'lucide-react';
 import {
+  UI_VOCABULARY,
   hasBaPermission,
   type BaPermissionKey,
   type NotificationDto,
 } from '@toantrung/contracts';
 import { apiRequest } from '../http/client';
 import { useSession } from '../session/SessionContext';
-import { SystemUpgradeSplash } from '@/components/common/SystemUpgradeSplash';
+import { resolveCoverBackgroundStyle } from '../components/UserCoverStyle';
 
 interface NavItem {
   href: string;
   label: string;
   shortLabel?: string;
-  icon: React.ComponentType<{ className?: string }>;
+  icon: React.ComponentType<{ className?: string; 'aria-hidden'?: boolean | 'true' | 'false' }>;
   badge?: number;
   adminOnly?: boolean;
   requiredPermission?: BaPermissionKey;
-  accentColor?: string;
-  activeBg?: string;
 }
 
 const ROUTE_REQUIRED_PERMISSION: Record<string, BaPermissionKey> = {
@@ -58,16 +57,16 @@ const ROUTE_REQUIRED_PERMISSION: Record<string, BaPermissionKey> = {
 };
 
 const BREADCRUMB_LABELS: Record<string, string> = {
-  '/dashboard': 'Tổng quan',
-  '/leads': 'Leads',
-  '/tracking': 'Chiến dịch',
-  '/ads': 'Từ khóa SEO',
-  '/reports': 'Báo cáo',
-  '/design': 'Thiết kế 3D',
-  '/notifications': 'Thông báo',
-  '/profile': 'Tài khoản',
-  '/admin/users': 'Nhân sự',
-  '/settings': 'Cài đặt',
+  '/dashboard': UI_VOCABULARY.menu.dashboard,
+  '/leads': UI_VOCABULARY.menu.leads,
+  '/tracking': UI_VOCABULARY.menu.campaigns,
+  '/ads': UI_VOCABULARY.menu.seo,
+  '/reports': UI_VOCABULARY.menu.reports,
+  '/design': UI_VOCABULARY.menu.design,
+  '/notifications': UI_VOCABULARY.menu.notifications,
+  '/profile': UI_VOCABULARY.menu.profile,
+  '/admin/users': UI_VOCABULARY.menu.users,
+  '/settings': UI_VOCABULARY.menu.settings,
 };
 
 export function getInitials(name: string): string {
@@ -80,20 +79,18 @@ export function getInitials(name: string): string {
 export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() || '/dashboard';
   const router = useRouter();
-  const { user, loading, branding, unreadCount, setUnreadCountState, logout } = useSession();
+  const { user, loading, unreadCount, setUnreadCountState, logout } = useSession();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     pathname === '/design' || pathname === '/ai-design',
   );
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [globalSearchText, setGlobalSearchText] = useState('');
-  const [activeSearchScope, setActiveSearchScope] = useState<string>(
-    BREADCRUMB_LABELS[pathname] || 'Leads',
-  );
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
 
+  const currentBreadcrumb = BREADCRUMB_LABELS[pathname] || UI_VOCABULARY.menu.dashboard;
+
   useEffect(() => {
-    setActiveSearchScope(BREADCRUMB_LABELS[pathname] || 'Toàn hệ thống');
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
     const q = params.get('search');
@@ -106,24 +103,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     }
   }, [pathname]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const handleScopeChange = (e: Event) => {
-      const custom = e as CustomEvent<{ label?: string } | string>;
-      const label =
-        typeof custom.detail === 'string'
-          ? custom.detail
-          : custom.detail?.label || '';
-      if (label.trim()) {
-        setActiveSearchScope(label.trim());
-      }
-    };
-    window.addEventListener('tt-search-scope-change', handleScopeChange as EventListener);
-    return () =>
-      window.removeEventListener('tt-search-scope-change', handleScopeChange as EventListener);
-  }, []);
-
-  // Guard against browser password manager autofilling user email (e.g. admin@toantrung.vn) into search bar
+  // Guard against browser password manager autofilling user email into search input
   useEffect(() => {
     if (
       user?.email &&
@@ -156,13 +136,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
-  // Bell Notification Popover state (Step 1 & Step 4.1)
   const [bellOpen, setBellOpen] = useState(false);
   const [recentNotifications, setRecentNotifications] = useState<NotificationDto[]>([]);
   const [loadingBell, setLoadingBell] = useState(false);
   const bellRef = useRef<HTMLDivElement | null>(null);
 
-  // Smart Auto-Collapse Sidebar: auto-collapse on /design, auto-expand on standard routes
   useEffect(() => {
     setSidebarCollapsed(pathname === '/design' || pathname === '/ai-design');
   }, [pathname]);
@@ -172,8 +150,9 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     try {
       const res = await apiRequest<{ items: NotificationDto[]; unreadCount: number }>(
         '/api/v1/notifications',
+        { skipCache: true },
       );
-      setRecentNotifications((res.items || []).slice(0, 5));
+      setRecentNotifications((res.items || []).slice(0, 6));
       setUnreadCountState(res.unreadCount ?? 0);
     } catch {
       // ignore
@@ -194,10 +173,17 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
         setBellOpen(false);
       }
     };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setBellOpen(false);
+    };
     if (bellOpen) {
       document.addEventListener('mousedown', handleClickOutside);
+      document.addEventListener('keydown', handleEsc);
     }
-    return () => document.removeEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
   }, [bellOpen]);
 
   const handleMarkAllReadQuick = async () => {
@@ -211,7 +197,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           body: { markAll: true },
         },
       );
-      setRecentNotifications((res.items || []).slice(0, 5));
+      setRecentNotifications((res.items || []).slice(0, 6));
       setUnreadCountState(res.unreadCount ?? 0);
     } catch {
       // ignore
@@ -219,12 +205,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   };
 
   const isFullBleed = pathname === '/design';
-
   const requiredPermForCurrentRoute = ROUTE_REQUIRED_PERMISSION[pathname];
   const isRouteUnauthorized = Boolean(
     user &&
-    requiredPermForCurrentRoute &&
-    !hasBaPermission(user.roleCode, requiredPermForCurrentRoute),
+      requiredPermForCurrentRoute &&
+      !hasBaPermission(user.roleCode, requiredPermForCurrentRoute),
   );
 
   useEffect(() => {
@@ -233,46 +218,47 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     }
   }, [loading, isRouteUnauthorized, router]);
 
+  // C03: Menu chuẩn thống nhất: Tổng quan · Lead · Chiến dịch · Từ khóa & SEO · Báo cáo · Thiết kế AI
   const workNav: NavItem[] = [
     {
       href: '/dashboard',
-      label: 'Tổng quan',
-      shortLabel: 'Tổng quan',
+      label: UI_VOCABULARY.menu.dashboard,
+      shortLabel: UI_VOCABULARY.menu.dashboard,
       icon: LayoutGrid,
       requiredPermission: 'DASHBOARD_VIEW',
     },
     {
       href: '/leads',
-      label: 'Leads',
-      shortLabel: 'Leads',
+      label: UI_VOCABULARY.menu.leads,
+      shortLabel: UI_VOCABULARY.menu.leads,
       icon: FileSpreadsheet,
       requiredPermission: 'LEAD_VIEW_OWN',
     },
     {
       href: '/tracking',
-      label: 'Chiến dịch',
-      shortLabel: 'Chiến dịch',
+      label: UI_VOCABULARY.menu.campaigns,
+      shortLabel: UI_VOCABULARY.menu.campaigns,
       icon: Crosshair,
       requiredPermission: 'TRACKING_ADS_OPTIMIZE',
     },
     {
       href: '/ads',
-      label: 'Từ khóa SEO',
-      shortLabel: 'Từ khóa SEO',
+      label: UI_VOCABULARY.menu.seo,
+      shortLabel: UI_VOCABULARY.menu.seo,
       icon: Megaphone,
       requiredPermission: 'AI_MARKETING_SEO',
     },
     {
       href: '/reports',
-      label: 'Báo cáo',
-      shortLabel: 'Báo cáo',
+      label: UI_VOCABULARY.menu.reports,
+      shortLabel: UI_VOCABULARY.menu.reports,
       icon: BarChart3,
       requiredPermission: 'DASHBOARD_VIEW',
     },
     {
       href: '/design',
-      label: 'Thiết kế 3D',
-      shortLabel: 'Thiết kế 3D',
+      label: UI_VOCABULARY.menu.design,
+      shortLabel: UI_VOCABULARY.menu.design,
       icon: Sparkles,
       requiredPermission: 'AI_DESIGN',
     },
@@ -281,42 +267,57 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const personalNav: NavItem[] = [
     {
       href: '/notifications',
-      label: 'Thông báo',
-      shortLabel: 'Thông báo',
+      label: UI_VOCABULARY.menu.notifications,
+      shortLabel: UI_VOCABULARY.menu.notifications,
       icon: Bell,
       badge: unreadCount,
     },
-    { href: '/profile', label: 'Tài khoản', shortLabel: 'Tài khoản', icon: UserCircle2 },
+    {
+      href: '/profile',
+      label: UI_VOCABULARY.menu.profile,
+      shortLabel: UI_VOCABULARY.menu.profile,
+      icon: UserCircle2,
+    },
   ];
 
   const systemNav: NavItem[] = [
     {
       href: '/admin/users',
-      label: 'Nhân sự',
-      shortLabel: 'Nhân sự',
+      label: UI_VOCABULARY.menu.users,
+      shortLabel: UI_VOCABULARY.menu.users,
       icon: Users,
       adminOnly: true,
       requiredPermission: 'SYSTEM_USER_ADMIN',
     },
     {
       href: '/settings',
-      label: 'Cài đặt',
-      shortLabel: 'Cài đặt',
+      label: UI_VOCABULARY.menu.settings,
+      shortLabel: UI_VOCABULARY.menu.settings,
       icon: Settings,
       adminOnly: true,
       requiredPermission: 'SYSTEM_USER_ADMIN',
     },
   ];
 
-  const currentBreadcrumb = BREADCRUMB_LABELS[pathname] || 'Tổng quan';
-
   if (loading) {
+    // Khung skeleton nhẹ tức thì thay vì màn hình splash chặn toàn trang (content-first-noise-reduction & C02)
     return (
-      <SystemUpgradeSplash
-        title="Hệ thống Toàn Trung CRM đang nâng cấp & khởi tạo"
-        subtitle="Đang đồng bộ phiên làm việc, dữ liệu thời gian thực và cấu hình phân hệ mới nhất. Vui lòng đợi trong giây lát..."
-        badgeText="ĐANG NÂNG CẤP & ĐỒNG BỘ HỆ THỐNG"
-      />
+      <div className="min-h-screen bg-slate-50 flex w-full">
+        <div className="hidden lg:block w-[232px] bg-[#0B1426] shrink-0" />
+        <div className="flex-1 flex flex-col">
+          <div className="h-[60px] bg-white border-b border-slate-200 px-6 flex items-center">
+            <div className="h-4 w-32 rounded bg-slate-200 animate-pulse" />
+          </div>
+          <div className="p-6 space-y-4">
+            <div className="h-20 rounded-[12px] bg-white border border-slate-200 animate-pulse" />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="h-[108px] rounded-[12px] bg-white border border-slate-200 animate-pulse" />
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
     );
   }
 
@@ -336,67 +337,88 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       (!item.requiredPermission || hasBaPermission(user.roleCode, item.requiredPermission)),
   );
 
-  const renderNavGroup = (items: NavItem[], withTopBorder = false) => {
+  const renderNavGroup = (items: NavItem[], groupLabel?: string, withTopBorder = false) => {
     if (items.length === 0) return null;
     return (
-      <div className={withTopBorder ? 'mt-3 pt-3 border-t border-white/[0.08]' : ''}>
-        <div className="space-y-1">
+      <div className={withTopBorder ? 'mt-3.5 pt-3 border-t border-white/[0.08]' : ''}>
+        {groupLabel && !sidebarCollapsed && (
+          <div className="px-3 pb-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400/80 select-none">
+            {groupLabel}
+          </div>
+        )}
+        <ul role="list" className="space-y-1">
           {items.map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
-              <Link
-                key={item.href}
-                href={item.href}
-                prefetch={true}
-                onClick={() => setMobileOpen(false)}
-                title={item.label}
-                className={`group relative flex items-center gap-3.5 h-11 rounded-xl px-3.5 text-sm transition-all ${sidebarCollapsed
-                    ? 'lg:justify-center lg:px-0'
-                    : 'lg:justify-start lg:px-3.5'
-                  } ${active
-                    ? 'bg-[#1B2B48] text-white font-bold shadow-xs'
-                    : 'text-[#94A3B8] font-medium hover:bg-white/[0.05] hover:text-white'
+              <li key={item.href}>
+                <Link
+                  href={item.href}
+                  prefetch={true}
+                  aria-current={active ? 'page' : undefined}
+                  onClick={() => setMobileOpen(false)}
+                  className={`group relative flex items-center gap-3 min-h-10 py-2 rounded-xl px-3 text-sm transition-all duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${
+                    sidebarCollapsed ? 'lg:justify-center lg:px-0' : 'lg:justify-start lg:px-3'
+                  } ${
+                    active
+                      ? 'bg-gradient-to-r from-blue-600/35 via-indigo-600/20 to-white/[0.04] text-white font-semibold border border-sky-400/25 shadow-xs before:content-[""] before:absolute before:inset-y-1.5 before:start-0 before:border-s-[3.5px] before:border-sky-300 before:rounded-e'
+                      : 'text-slate-300/90 font-medium hover:bg-white/[0.07] hover:text-white'
                   }`}
-              >
-                <Icon
-                  className={`w-5 h-5 shrink-0 transition-colors ${active ? 'text-white' : 'text-[#64748B] group-hover:text-slate-200'
-                    }`}
-                />
-                <span
-                  className={`truncate flex-1 text-[14px] ${sidebarCollapsed ? 'lg:hidden' : 'lg:inline'
-                    }`}
                 >
-                  {item.label}
-                </span>
-                {item.badge !== undefined && item.badge > 0 && (
                   <span
-                    className={`inline-flex items-center justify-center min-w-[22px] h-5 px-1.5 rounded-full bg-[#2563EB] text-white text-[11px] font-bold ${sidebarCollapsed
-                        ? 'lg:absolute lg:top-1 lg:right-1 lg:min-w-[16px] lg:h-4 lg:text-[9px] lg:px-1'
-                        : 'lg:static'
-                      }`}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-                {/* Hover Tooltip when Sidebar is Collapsed */}
-                <span
-                  className={`pointer-events-none fixed left-16 z-50 ml-2 hidden rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white shadow-lg opacity-0 transition-opacity group-hover:opacity-100 ${sidebarCollapsed ? 'lg:block' : 'lg:hidden'
+                    className={`w-7 h-7 rounded-lg grid place-items-center shrink-0 transition-colors ${
+                      active
+                        ? 'bg-sky-400/20 text-sky-200'
+                        : 'bg-transparent text-slate-400 group-hover:text-white group-hover:bg-white/[0.06]'
                     }`}
-                >
-                  {item.label}
-                </span>
-              </Link>
+                  >
+                    <Icon aria-hidden="true" className="w-[17px] h-[17px]" />
+                  </span>
+                  <span
+                    className={`truncate flex-1 text-sm ${
+                      sidebarCollapsed ? 'lg:hidden' : 'lg:inline'
+                    }`}
+                  >
+                    {item.label}
+                  </span>
+                  {item.badge !== undefined && item.badge > 0 && (
+                    <span
+                      className={`inline-flex items-center justify-center min-w-[20px] min-h-5 px-1.5 rounded-full bg-gradient-to-r from-sky-500 to-blue-600 text-white text-[11px] font-bold shadow-2xs ${
+                        sidebarCollapsed
+                          ? 'lg:absolute lg:top-1 lg:right-1 lg:min-w-[16px] lg:min-h-4 lg:text-[9px] lg:px-1'
+                          : 'lg:static'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
+                  <span
+                    aria-hidden="true"
+                    className={`pointer-events-none fixed left-16 z-50 ml-2 hidden rounded-lg bg-slate-900 px-2.5 py-1 text-xs font-semibold text-white shadow-lg opacity-0 transition-opacity group-hover:opacity-100 ${
+                      sidebarCollapsed ? 'lg:block' : 'lg:hidden'
+                    }`}
+                  >
+                    {item.label}
+                  </span>
+                </Link>
+              </li>
             );
           })}
-        </div>
+        </ul>
       </div>
     );
   };
 
   return (
-    <div className="min-h-screen bg-slate-50/60 text-slate-800 flex w-full overflow-hidden">
-      {/* Tablet / Mobile Slide-over Drawer Scrim */}
+    <div className="min-h-screen bg-[#F8FAFC] text-slate-800 flex w-full overflow-hidden">
+      <a
+        href="#main-workspace-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[100] focus:rounded-[10px] focus:bg-[#0B1D48] focus:px-4 focus:py-2 focus:text-xs focus:font-semibold focus:text-white focus:shadow-lg"
+      >
+        Chuyển đến nội dung chính
+      </a>
+
+      {/* Scrim khi mở menu trên tablet / mobile */}
       {mobileOpen && (
         <button
           type="button"
@@ -406,60 +428,60 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
         />
       )}
 
-      {/* Main Left Sidebar — Dark Navy Theme matching reference screenshot */}
+      {/* Sidebar Desktop 236px hiện đại, dễ nhìn */}
       <aside
-        className={`group/sidebar fixed inset-y-0 left-0 z-50 lg:sticky lg:top-0 lg:h-screen bg-[#0B1426] text-white border-r border-slate-800/80 flex flex-col transition-all duration-200 shadow-xl ${sidebarCollapsed ? 'lg:w-16' : 'lg:w-[248px]'
-          } w-[264px] ${mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'
-          }`}
+        aria-label="Thanh điều hướng hệ thống"
+        className={`group/sidebar fixed inset-y-0 left-0 z-50 lg:sticky lg:top-0 lg:h-screen bg-gradient-to-b from-[#071128] via-[#0B1938] to-[#0E224A] text-white border-r border-slate-800/90 flex flex-col transition-[width,transform] duration-200 ${
+          sidebarCollapsed ? 'lg:w-16' : 'lg:w-[236px]'
+        } w-[240px] ${mobileOpen ? 'translate-x-0 shadow-2xl' : '-translate-x-full lg:translate-x-0'}`}
       >
-        {/* Brand Header with TOÀN TRUNG Logo & Top Collapse/Expand Button */}
+        {/* Header thương hiệu nổi bật */}
         <div
-          className={`relative h-16 flex items-center justify-between border-b border-white/[0.08] ${sidebarCollapsed ? 'px-2 lg:justify-center' : 'px-5'
-            }`}
+          className={`relative h-[60px] flex items-center justify-between border-b border-white/[0.08] ${
+            sidebarCollapsed ? 'px-2 lg:justify-center' : 'px-4'
+          }`}
         >
           {sidebarCollapsed ? (
             <div className="relative w-9 h-9 flex items-center justify-center">
-              {/* Default TT Logo when not hovered */}
               <Link
                 href="/dashboard"
-                className="w-9 h-9 rounded-xl bg-[#1E3A8A] flex items-center justify-center text-white font-black text-sm shadow-sm transition-opacity duration-150 group-hover/sidebar:opacity-0 group-hover/sidebar:pointer-events-none"
+                aria-label="Trang Tổng quan Toàn Trung"
+                className="w-9 h-9 rounded-xl bg-gradient-to-br from-sky-500 to-blue-700 flex items-center justify-center text-white font-extrabold text-sm shadow-md shadow-blue-950/50 ring-1 ring-white/20 transition-opacity duration-150 group-hover/sidebar:opacity-0 group-hover/sidebar:pointer-events-none"
               >
                 TT
               </Link>
-              {/* Expand Button ONLY appears on hover when collapsed */}
               <button
                 type="button"
                 onClick={() => setSidebarCollapsed(false)}
-                title="Mở rộng menu"
-                className="hidden lg:flex absolute inset-0 w-9 h-9 rounded-xl bg-[#2563EB] hover:bg-blue-500 text-white items-center justify-center shadow-md opacity-0 pointer-events-none group-hover/sidebar:opacity-100 group-hover/sidebar:pointer-events-auto transition-all duration-150"
+                aria-label="Mở rộng thanh điều hướng"
+                className="hidden lg:flex absolute inset-0 w-9 h-9 rounded-xl bg-[#2563EB] hover:bg-blue-500 text-white items-center justify-center shadow-md opacity-0 pointer-events-none group-hover/sidebar:opacity-100 group-hover/sidebar:pointer-events-auto transition-opacity duration-150"
               >
-                <ChevronRight className="w-5 h-5" />
+                <ChevronRight aria-hidden="true" className="w-5 h-5" />
               </button>
             </div>
           ) : (
             <>
               <Link href="/dashboard" className="flex items-center gap-2.5 min-w-0">
-                <div className="min-w-0 flex flex-col">
-                  <span className="font-display font-black italic tracking-wider text-lg text-white leading-none block truncate">
-                    TOÀN TRUNG
+                <span className="w-9 h-9 rounded-xl bg-gradient-to-br from-sky-500 to-blue-700 text-white font-extrabold text-xs grid place-items-center shrink-0 shadow-md shadow-blue-950/50 ring-1 ring-white/20">
+                  TT
+                </span>
+                <div className="min-w-0">
+                  <span className="block font-display font-bold tracking-tight text-base text-white truncate leading-tight">
+                    Toàn Trung
                   </span>
-                  <div className="flex items-center gap-1.5 mt-1">
-                    <span className="h-[1.5px] flex-1 bg-amber-500/80 rounded-full" />
-                    <span className="text-[9px] font-extrabold tracking-widest text-[#38BDF8] uppercase">
-                      SINCE 2006
-                    </span>
-                  </div>
+                  <span className="block text-[10px] font-medium text-sky-300/80 truncate">
+                    Điều hành Kinh doanh &amp; MKT
+                  </span>
                 </div>
               </Link>
 
-              {/* Collapse Button when expanded */}
               <button
                 type="button"
                 onClick={() => setSidebarCollapsed(true)}
-                title="Thu gọn menu"
+                aria-label="Thu gọn thanh điều hướng"
                 className="hidden lg:grid w-7 h-7 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 place-items-center shrink-0 transition"
               >
-                <ChevronLeft className="w-4 h-4" />
+                <ChevronLeft aria-hidden="true" className="w-4 h-4" />
               </button>
             </>
           )}
@@ -470,91 +492,103 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
             aria-label="Đóng menu"
             className="lg:hidden p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/10"
           >
-            <X className="w-5 h-5" />
+            <X aria-hidden="true" className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Navigation Links */}
-        <nav className="flex-1 overflow-y-auto px-3 py-4">
-          {renderNavGroup(visibleWorkNav, false)}
-          {renderNavGroup(personalNav, true)}
-          {renderNavGroup(visibleSystemNav, true)}
+        <nav aria-label="Chính" className="flex-1 overflow-y-auto px-2.5 py-3">
+          {renderNavGroup(visibleWorkNav, 'Điều hành nghiệp vụ', false)}
+          {renderNavGroup(personalNav, 'Cá nhân', true)}
+          {renderNavGroup(visibleSystemNav, 'Quản trị hệ thống', true)}
         </nav>
 
-        {/* Bottom User Account Summary */}
-        <div className="p-3.5 border-t border-white/[0.08]">
+        {/* Tài khoản ở cuối sidebar — đồng bộ hiển thị hình nền cá nhân */}
+        <div className="p-2.5 border-t border-white/[0.08]">
           <Link
             href="/profile"
-            title={`${user.fullName} (${user.email})`}
-            className={`flex items-center gap-3 rounded-xl p-1.5 hover:bg-white/[0.05] transition-colors ${sidebarCollapsed ? 'lg:justify-center' : 'lg:justify-start'
-              }`}
+            style={user.coverUrl ? resolveCoverBackgroundStyle(user.coverUrl) : undefined}
+            className={`relative overflow-hidden flex items-center gap-2.5 rounded-xl p-2 border border-white/15 hover:border-sky-400/50 transition-all ${
+              user.coverUrl ? '' : 'bg-white/[0.05] hover:bg-white/[0.09]'
+            } ${sidebarCollapsed ? 'lg:justify-center' : 'lg:justify-start'}`}
           >
-            {user.avatarUrl ? (
-              <img
-                src={user.avatarUrl}
-                alt={user.fullName}
-                className="w-9 h-9 rounded-full object-cover border border-white/20 shrink-0"
-              />
-            ) : (
-              <div className="w-9 h-9 rounded-full bg-[#3B66F5] text-white font-extrabold text-xs grid place-items-center shrink-0 shadow-sm">
-                {getInitials(user.fullName)}
-              </div>
+            {user.coverUrl && (
+              <span aria-hidden="true" className="absolute inset-0 bg-slate-950/45 backdrop-blur-[1px]" />
             )}
-            <div
-              className={`min-w-0 flex-1 ${sidebarCollapsed ? 'lg:hidden' : 'lg:block'
-                }`}
-            >
-              <p className="text-[13px] font-bold text-white truncate">{user.fullName}</p>
-              <p className="text-[11px] text-[#94A3B8] truncate">{user.roleName}</p>
+            <div className="relative z-10 shrink-0">
+              {user.avatarUrl ? (
+                <img
+                  src={user.avatarUrl}
+                  alt=""
+                  className="w-8 h-8 rounded-full object-cover ring-2 ring-white/40"
+                />
+              ) : (
+                <div className="w-8 h-8 rounded-full bg-[#2563EB] text-white font-bold text-xs grid place-items-center ring-2 ring-white/30">
+                  {getInitials(user.fullName)}
+                </div>
+              )}
+            </div>
+            <div className={`relative z-10 min-w-0 flex-1 ${sidebarCollapsed ? 'lg:hidden' : 'lg:block'}`}>
+              <p className="text-xs font-semibold text-white truncate drop-shadow-2xs">{user.fullName}</p>
+              <p className="text-[11px] text-sky-200/90 truncate">{user.roleName}</p>
             </div>
           </Link>
         </div>
       </aside>
 
-      {/* Main Right Content Area */}
+      {/* Vùng nội dung chính bên phải (một vùng cuộn dọc chính duy nhất — C03) */}
       <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
-        {/* Top Header Bar */}
-        <header className="sticky top-0 z-30 h-16 shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-3 sm:px-6 flex items-center justify-between gap-3 sm:gap-5">
-          <div className="flex items-center gap-2.5 shrink-0 min-w-0">
+        {/* Topbar 58px hiện đại: Điều hướng nhanh · Tìm kiếm thông minh · Thông báo · Hồ sơ */}
+        <header className="sticky top-0 z-30 h-[58px] shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/80 px-4 lg:px-5 flex items-center justify-between gap-3 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+          <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
               onClick={() => setMobileOpen(true)}
               aria-label="Mở menu điều hướng"
-              className="lg:hidden w-11 h-11 -ml-1 rounded-xl text-slate-600 hover:text-[#2563EB] hover:bg-slate-100 grid place-items-center"
+              className="lg:hidden min-w-9 min-h-9 -ml-1 rounded-xl text-slate-600 hover:text-[#1E3A8A] hover:bg-slate-100 grid place-items-center"
             >
-              <Menu className="w-5 h-5" />
+              <Menu aria-hidden="true" className="w-5 h-5" />
             </button>
 
-            {/* Mobile TT Logo Badge */}
-            <Link
-              href="/dashboard"
-              className="lg:hidden w-8 h-8 rounded-lg bg-[#1E3A8A] text-white font-black text-xs grid place-items-center shrink-0"
-            >
-              TT
-            </Link>
-
-            {/* Breadcrumb Title */}
-            <nav aria-label="Breadcrumb" className="flex items-center min-w-0 space-x-2">
-              <span className="text-xs font-semibold text-slate-400 hidden sm:inline">
-                {branding.organizationName || 'Toàn Trung CRM'}
+            <nav aria-label="Vị trí trang" className="flex items-center gap-2 min-w-0">
+              <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-md bg-blue-50 text-[#1E3A8A] text-[11px] font-bold border border-blue-200/70">
+                Toàn Trung
               </span>
-              <span className="text-slate-300 hidden sm:inline">/</span>
-              <strong className="text-slate-900 font-bold text-sm sm:text-base truncate">
+              <span className="hidden sm:inline text-slate-300">/</span>
+              <span className="text-slate-900 font-bold text-sm sm:text-base truncate">
                 {currentBreadcrumb}
-              </strong>
+              </span>
+            </nav>
+
+            {/* Lối tắt chuyển nhanh Module trên thanh trên cùng */}
+            <nav aria-label="Chuyển nhanh phân hệ" className="hidden 2xl:flex items-center gap-1 ml-3 pl-3 border-l border-slate-200">
+              {visibleWorkNav.map((nav) => {
+                const active = pathname === nav.href || pathname.startsWith(`${nav.href}/`);
+                return (
+                  <Link
+                    key={`top-${nav.href}`}
+                    href={nav.href}
+                    aria-current={active ? 'page' : undefined}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition-colors ${
+                      active
+                        ? 'bg-[#0F275C] text-white shadow-2xs'
+                        : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                    }`}
+                  >
+                    {nav.label}
+                  </Link>
+                );
+              })}
             </nav>
           </div>
 
-          {/* Desktop Context-Aware Scoped Search Bar (Expanded & Prominent) */}
-          <div className="hidden md:flex flex-1 max-w-xl lg:max-w-2xl items-center gap-2.5 h-10 sm:h-11 px-3.5 rounded-2xl bg-slate-50/90 hover:bg-slate-100/70 focus-within:bg-white border border-slate-200/90 focus-within:border-[#1553A2] focus-within:ring-4 focus-within:ring-blue-500/10 text-sm text-slate-800 shadow-2xs transition-all">
-            <Search className="w-4 h-4 text-[#1553A2] shrink-0" />
-            <span
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200/80 text-[#1553A2] text-[11px] font-bold shrink-0 max-w-[230px] truncate"
-              title={`Phạm vi tìm kiếm hiện tại: ${activeSearchScope}`}
-            >
-              <span>📍 {activeSearchScope}</span>
-            </span>
+          {/* Tìm kiếm gọn */}
+          <div className="hidden md:flex flex-1 max-w-md items-center gap-2 min-h-9 px-3 rounded-[10px] bg-slate-50 hover:bg-slate-100/70 focus-within:bg-white border border-slate-200 focus-within:border-[#1E3A8A] focus-within:ring-2 focus-within:ring-blue-500/15 text-sm text-slate-800 transition-colors">
+            <Search aria-hidden="true" className="w-4 h-4 text-slate-400 shrink-0" />
+            <label htmlFor="tt-global-search-input" className="sr-only">
+              Tìm kiếm nhanh trong {currentBreadcrumb}
+            </label>
             <input
+              id="tt-global-search-input"
               ref={globalSearchInputRef}
               type="search"
               name="tt-crm-scoped-search"
@@ -578,12 +612,13 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   }
                 }
               }}
-              placeholder={`Nhập từ khóa để lọc ngay trong mục "${activeSearchScope}"...`}
-              className="flex-1 bg-transparent outline-none text-sm font-medium text-slate-900 placeholder:text-slate-400 placeholder:font-normal min-w-0"
+              placeholder={`Tìm kiếm trong ${currentBreadcrumb}...`}
+              className="flex-1 bg-transparent outline-none text-sm text-slate-900 placeholder:text-slate-400 min-w-0"
             />
             {globalSearchText ? (
               <button
                 type="button"
+                aria-label="Xóa từ khóa tìm kiếm"
                 onClick={() => {
                   setGlobalSearchText('');
                   if (typeof window !== 'undefined') {
@@ -591,117 +626,125 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
                   }
                 }}
-                className="w-6 h-6 rounded-full bg-slate-200/80 hover:bg-slate-300 text-slate-600 hover:text-slate-900 text-xs font-bold grid place-items-center shrink-0 transition"
-                title="Xóa từ khóa tìm kiếm"
+                className="min-w-6 min-h-6 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-900 text-xs font-bold grid place-items-center shrink-0"
               >
                 ×
               </button>
             ) : (
-              <kbd className="ml-auto text-[11px] font-mono bg-white px-2 py-0.5 rounded-md border border-slate-200 text-slate-400 shrink-0 shadow-2xs">
+              <kbd className="text-[11px] font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-slate-400 shrink-0">
                 /
               </kbd>
             )}
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            {/* Mobile Search Toggle */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
               onClick={() => setMobileSearchOpen(!mobileSearchOpen)}
-              aria-label="Tìm kiếm nhanh"
-              className="md:hidden w-10 h-10 rounded-xl border border-slate-200 bg-white text-slate-600 grid place-items-center"
+              aria-label="Mở ô tìm kiếm"
+              aria-expanded={mobileSearchOpen}
+              className="md:hidden min-w-9 min-h-9 rounded-[10px] border border-slate-200 bg-white text-slate-600 grid place-items-center"
             >
-              <Search className="w-4 h-4" />
+              <Search aria-hidden="true" className="w-4 h-4" />
             </button>
 
-            {/* Notification Bell + Quick Popover (Step 4.1) */}
+            {/* Thông báo */}
             <div ref={bellRef} className="relative">
               <button
                 type="button"
                 onClick={() => setBellOpen((prev) => !prev)}
-                aria-label="Thông báo"
-                className="relative w-10 h-10 sm:w-9 sm:h-9 rounded-xl border border-slate-200 bg-white hover:bg-blue-50 hover:border-blue-300 text-slate-600 hover:text-[#2563EB] grid place-items-center transition-colors"
+                aria-label={unreadCount > 0 ? `Thông báo (${unreadCount} chưa đọc)` : 'Thông báo'}
+                aria-expanded={bellOpen}
+                aria-haspopup="dialog"
+                className="relative min-w-9 min-h-9 rounded-[10px] border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-[#1E3A8A] grid place-items-center transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
               >
-                <Bell className="w-4 h-4" />
+                <Bell aria-hidden="true" className="w-4 h-4" />
                 {unreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-[#2563EB] text-white text-[10px] font-bold grid place-items-center shadow-xs">
+                  <span className="absolute -top-1 -right-1 min-w-[18px] min-h-[18px] px-1 rounded-full bg-[#2563EB] text-white text-[10px] font-bold grid place-items-center">
                     {unreadCount}
                   </span>
                 )}
               </button>
 
               {bellOpen && (
-                <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-white border border-slate-200 shadow-2xl z-50 overflow-hidden">
-                  <div className="px-4 py-3 bg-slate-50/80 border-b border-slate-200 flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-extrabold text-slate-900">
-                        Thông báo mới nhất
-                      </span>
-                      <span className="ml-2 px-2 py-0.5 rounded-full bg-blue-100 text-[#1E3A8A] text-[10px] font-bold">
-                        {unreadCount} chưa đọc
-                      </span>
+                <div
+                  role="dialog"
+                  aria-label="Thông báo gần đây"
+                  className="absolute right-0 mt-2 w-80 sm:w-96 rounded-[12px] bg-white border border-slate-200 shadow-xl z-50 overflow-hidden"
+                >
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-slate-900">Thông báo cần xử lý</span>
+                      {unreadCount > 0 && (
+                        <span className="px-2 py-0.5 rounded-full bg-blue-100 text-[#1E3A8A] text-[11px] font-semibold">
+                          {unreadCount} chưa đọc
+                        </span>
+                      )}
                     </div>
                     {unreadCount > 0 && (
                       <button
                         type="button"
                         onClick={() => void handleMarkAllReadQuick()}
-                        className="text-[11px] font-bold text-[#2563EB] hover:underline inline-flex items-center gap-1"
+                        className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
                       >
-                        <CheckCheck className="w-3.5 h-3.5" />
-                        <span>Đọc tất cả</span>
+                        <CheckCheck aria-hidden="true" className="w-3.5 h-3.5" />
+                        <span>Đánh dấu đã đọc</span>
                       </button>
                     )}
                   </div>
 
                   <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
                     {loadingBell ? (
-                      <div className="p-6 text-center text-xs text-slate-400">
+                      <div className="p-6 text-center text-xs text-slate-500">
                         Đang tải thông báo...
                       </div>
                     ) : recentNotifications.length === 0 ? (
-                      <div className="p-6 text-center text-xs text-slate-400">
-                        Chưa có thông báo mới.
+                      <div className="p-6 text-center text-xs text-slate-500">
+                        Chưa có thông báo cần xử lý.
                       </div>
                     ) : (
                       recentNotifications.map((item) => {
                         const isWarn =
                           item.category.toLowerCase().includes('cảnh báo') ||
-                          item.category.toLowerCase().includes('dò giá');
+                          item.category.toLowerCase().includes('quá hạn') ||
+                          item.category.toLowerCase().includes('nhắc');
                         return (
                           <Link
                             key={item.id}
                             href={item.actionUrl || '/notifications'}
                             onClick={() => setBellOpen(false)}
-                            className={`block px-4 py-3 hover:bg-slate-50 transition ${!item.isRead ? 'bg-blue-50/40' : ''
-                              }`}
+                            className={`block px-4 py-3 hover:bg-slate-50 transition ${
+                              !item.isRead ? 'bg-blue-50/40' : ''
+                            }`}
                           >
                             <div className="flex items-start gap-2.5">
                               <div
-                                className={`mt-0.5 w-7 h-7 rounded-lg grid place-items-center shrink-0 ${isWarn
-                                    ? 'bg-amber-100 text-amber-700'
+                                className={`mt-0.5 w-7 h-7 rounded-lg grid place-items-center shrink-0 ${
+                                  isWarn
+                                    ? 'bg-amber-100 text-amber-800'
                                     : 'bg-blue-100 text-[#1E3A8A]'
-                                  }`}
+                                }`}
                               >
                                 {isWarn ? (
-                                  <AlertTriangle className="w-3.5 h-3.5" />
+                                  <AlertTriangle aria-hidden="true" className="w-3.5 h-3.5" />
                                 ) : (
-                                  <Bell className="w-3.5 h-3.5" />
+                                  <Bell aria-hidden="true" className="w-3.5 h-3.5" />
                                 )}
                               </div>
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center justify-between gap-2">
-                                  <p className="text-xs font-bold text-slate-900 truncate">
+                                  <p className="text-xs font-semibold text-slate-900 truncate">
                                     {item.title}
                                   </p>
                                   {!item.isRead && (
                                     <span className="w-2 h-2 rounded-full bg-[#2563EB] shrink-0" />
                                   )}
                                 </div>
-                                <p className="text-[11px] text-slate-600 line-clamp-2 mt-0.5">
+                                <p className="text-xs text-slate-600 line-clamp-2 mt-0.5">
                                   {item.summary}
                                 </p>
-                                <span className="text-[10px] text-slate-400 flex items-center gap-1 mt-1">
-                                  <Clock className="w-3 h-3" />
+                                <span className="text-[11px] text-slate-400 flex items-center gap-1 mt-1">
+                                  <Clock aria-hidden="true" className="w-3 h-3" />
                                   {new Date(item.createdAt).toLocaleString('vi-VN')}
                                 </span>
                               </div>
@@ -716,26 +759,25 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     <Link
                       href="/notifications"
                       onClick={() => setBellOpen(false)}
-                      className="w-full py-1.5 rounded-xl bg-[#1E3A8A] hover:bg-[#2563EB] text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 transition"
+                      className="w-full min-h-8 py-1.5 rounded-[10px] bg-[#1E3A8A] hover:bg-[#153075] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
                     >
                       <span>Xem tất cả thông báo</span>
-                      <ArrowUpRight className="w-3.5 h-3.5" />
+                      <ArrowUpRight aria-hidden="true" className="w-3.5 h-3.5" />
                     </Link>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* User Profile Pill */}
+            {/* Tài khoản gọn (không lặp lại tên công ty & vai trò ở topbar) */}
             <Link
               href="/profile"
-              title={`${user.fullName} (${user.email})`}
-              className="hidden sm:flex items-center gap-2 h-9 pl-1.5 pr-3 rounded-full border border-slate-200 bg-white hover:border-blue-300 transition-colors"
+              className="hidden sm:flex items-center gap-2 min-h-9 pl-1.5 pr-3 rounded-full border border-slate-200 bg-white hover:border-slate-300 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
             >
               {user.avatarUrl ? (
                 <img
                   src={user.avatarUrl}
-                  alt={user.fullName}
+                  alt=""
                   className="w-6 h-6 rounded-full object-cover border border-slate-200 shrink-0"
                 />
               ) : (
@@ -743,34 +785,32 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   {getInitials(user.fullName)}
                 </span>
               )}
-              <span className="hidden md:inline text-xs font-semibold text-slate-700 max-w-[130px] truncate">
+              <span className="hidden md:inline text-xs font-medium text-slate-700 max-w-[130px] truncate">
                 {user.fullName}
               </span>
             </Link>
 
-            {/* Logout Button */}
             <button
               type="button"
               onClick={() => void logout()}
-              title="Đăng xuất"
-              className="h-9 px-2.5 sm:px-3 rounded-xl border border-slate-200 bg-white hover:bg-red-50 hover:border-red-200 text-slate-600 hover:text-red-600 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+              aria-label="Đăng xuất"
+              className="min-h-9 px-2.5 rounded-[10px] border border-slate-200 bg-white hover:bg-red-50 hover:border-red-200 text-slate-600 hover:text-red-700 text-xs font-medium inline-flex items-center gap-1.5 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
             >
-              <LogOut className="w-3.5 h-3.5" />
+              <LogOut aria-hidden="true" className="w-3.5 h-3.5" />
               <span className="hidden xl:inline">Đăng xuất</span>
             </button>
           </div>
         </header>
 
-        {/* Mobile Quick Search Bar Collapse */}
         {mobileSearchOpen && (
           <div className="md:hidden bg-white border-b border-slate-200 px-4 py-2.5 flex items-center gap-2">
-            <Search className="w-4 h-4 text-[#1553A2] shrink-0" />
-            <span className="px-2 py-0.5 rounded-md bg-blue-50 border border-blue-200 text-[#1553A2] text-[10px] font-bold shrink-0 max-w-[140px] truncate">
-              📍 {activeSearchScope}
-            </span>
+            <Search aria-hidden="true" className="w-4 h-4 text-slate-400 shrink-0" />
+            <label htmlFor="tt-mobile-search-input" className="sr-only">
+              Tìm kiếm trong {currentBreadcrumb}
+            </label>
             <input
+              id="tt-mobile-search-input"
               type="search"
-              name="tt-crm-scoped-search-mobile"
               autoComplete="off"
               value={globalSearchText}
               onChange={(e) => {
@@ -781,47 +821,45 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: val }));
                 }
               }}
-              placeholder={`Tìm trong ${activeSearchScope}...`}
+              placeholder={`Tìm kiếm trong ${currentBreadcrumb}...`}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  setMobileSearchOpen(false);
-                }
+                if (e.key === 'Enter') setMobileSearchOpen(false);
               }}
               className="flex-1 text-xs bg-transparent outline-none text-slate-800"
             />
             <button
               type="button"
               onClick={() => setMobileSearchOpen(false)}
-              className="text-xs text-slate-400 px-2 py-1"
+              className="text-xs text-slate-500 px-2 py-1"
             >
               Đóng
             </button>
           </div>
         )}
 
-        {/* Page Container */}
+        {/* Padding desktop 24px (lg:p-6), tablet 16px (sm:p-4), mobile 12px (p-3) */}
         <main
+          id="main-workspace-content"
+          tabIndex={-1}
           className={
             isFullBleed
-              ? 'flex-1 w-full h-[calc(100vh-64px)] overflow-hidden flex flex-col p-0 pb-16 md:pb-0 bg-slate-100/70'
-              : 'flex-1 w-full max-w-[1920px] mx-auto px-3 sm:px-4 lg:px-5 py-3 sm:py-3.5 pb-20 md:pb-5 overflow-y-auto bg-slate-100/60'
+              ? 'flex-1 w-full h-[calc(100vh-60px)] overflow-y-auto flex flex-col p-0 pb-16 md:pb-0 bg-[#F8FAFC] focus:outline-none'
+              : 'flex-1 w-full p-3 sm:p-4 lg:px-5 lg:py-4 pb-20 md:pb-5 overflow-y-auto bg-[#F8FAFC] focus:outline-none'
           }
         >
           {children}
         </main>
 
-        {/* Mobile Bottom Navigation Bar (< 768px) with Glassmorphism & 44x44px touch targets */}
+        {/* Thanh điều hướng di động (< 768px) */}
         <nav
           aria-label="Điều hướng di động"
-          className="md:hidden fixed bottom-0 inset-x-0 z-30 h-16 backdrop-blur-md bg-white/90 border-t border-slate-200/90 px-2 flex items-center justify-around shadow-lg"
+          className="md:hidden fixed bottom-0 inset-x-0 z-30 min-h-14 backdrop-blur-md bg-white/95 border-t border-slate-200 px-2 flex items-center justify-around shadow-md"
         >
           {[
-            { href: '/leads', label: 'Leads', icon: FileSpreadsheet },
-            ...(hasBaPermission(user.roleCode, 'AI_DESIGN')
-              ? [{ href: '/design', label: 'AI Studio', icon: Sparkles }]
-              : []),
-            { href: '/reports', label: 'Báo cáo', icon: BarChart3 },
-            { href: '/notifications', label: 'Thông báo', icon: Bell, badge: unreadCount },
+            { href: '/dashboard', label: UI_VOCABULARY.menu.dashboard, icon: LayoutGrid },
+            { href: '/leads', label: UI_VOCABULARY.menu.leads, icon: FileSpreadsheet },
+            { href: '/reports', label: UI_VOCABULARY.menu.reports, icon: BarChart3 },
+            { href: '/notifications', label: UI_VOCABULARY.menu.notifications, icon: Bell, badge: unreadCount },
           ].map((item) => {
             const Icon = item.icon;
             const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
@@ -829,13 +867,15 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               <Link
                 key={item.href}
                 href={item.href}
-                className={`relative min-w-[60px] min-h-[44px] px-2 py-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold transition-colors ${active ? 'text-[#2563EB]' : 'text-slate-500 hover:text-slate-900'
-                  }`}
+                aria-current={active ? 'page' : undefined}
+                className={`relative min-w-[60px] min-h-[44px] px-2 py-1 rounded-[10px] flex flex-col items-center justify-center gap-0.5 text-[11px] transition-colors ${
+                  active ? 'text-[#1E3A8A] font-bold bg-blue-50/80' : 'text-slate-600 font-medium'
+                }`}
               >
-                <Icon className="w-5 h-5" />
+                <Icon aria-hidden="true" className="w-4 h-4" />
                 <span>{item.label}</span>
                 {item.badge !== undefined && item.badge > 0 && (
-                  <span className="absolute top-0.5 right-2 min-w-[16px] h-4 px-1 rounded-full bg-[#2563EB] text-white text-[9px] font-bold grid place-items-center">
+                  <span className="absolute top-0.5 right-2 min-w-[16px] min-h-4 px-1 rounded-full bg-[#2563EB] text-white text-[9px] font-bold grid place-items-center">
                     {item.badge}
                   </span>
                 )}
@@ -845,10 +885,10 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           <button
             type="button"
             onClick={() => setMobileOpen(true)}
-            className="min-w-[60px] min-h-[44px] px-2 py-1 rounded-xl flex flex-col items-center justify-center gap-0.5 text-[11px] font-bold text-slate-500 hover:text-slate-900"
+            className="min-w-[60px] min-h-[44px] px-2 py-1 rounded-[10px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium text-slate-600"
           >
-            <Menu className="w-5 h-5" />
-            <span>Thêm</span>
+            <Menu aria-hidden="true" className="w-4 h-4" />
+            <span>Menu</span>
           </button>
         </nav>
       </div>

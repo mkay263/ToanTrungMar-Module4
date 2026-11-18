@@ -1,9 +1,10 @@
 import { prisma } from '@toantrung/database';
 import {
-  CONTACT_CHANNEL_LABELS,
+  PIPELINE_STATUS_LABELS,
   isL2Valid,
   isL3Effective,
-  type ContactChannel,
+  normalizeMarketingChannelDisplay,
+  sanitizeWebsiteSourceDisplay,
   type M04ResultsReportDto,
   type SessionUserDto,
 } from '@toantrung/contracts';
@@ -13,7 +14,7 @@ import {
   resolveDashboardScope,
 } from '../../core/website-catalog';
 import { shouldAnonymizeLeadForRole } from '../01-leads/service';
-import { computeCostPerValidAdLead, getM03AdsSeoDashboardSpec } from '../03-keywords-ads/m03-spec.service';
+import { computeCostPerValidAdLead } from '../03-keywords-ads/m03-spec.service';
 
 export async function getM04ResultsReportSpec(
   user: SessionUserDto,
@@ -28,22 +29,29 @@ export async function getM04ResultsReportSpec(
 ): Promise<M04ResultsReportDto> {
   const scope = await resolveDashboardScope(params);
   const anonymized = shouldAnonymizeLeadForRole(user.roleCode) || user.roleCode === 'DESIGNER';
+  const hasAdsToken = Boolean(process.env.GOOGLE_ADS_DEVELOPER_TOKEN?.trim());
 
-  const leadWhere: Record<string, unknown> = {
-    createdAt: {
-      gte: scope.startDateTime,
-      lte: scope.endDateTime,
-    },
-  };
-  if (user.roleCode === 'SALES') {
-    leadWhere.assignedSalesId = user.id;
-  }
+  const roleLeadFilter =
+    user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
 
-  const [rawLeads, m03Spec, latestSync] = await Promise.all([
+  const [rawLeads, prevRawLeads, adsCampaignMetrics, latestSync] = await Promise.all([
     prisma.lead.findMany({
-      where: leadWhere,
+      where: {
+        createdAt: {
+          gte: scope.startDateTime,
+          lte: scope.endDateTime,
+        },
+        ...roleLeadFilter,
+      },
       include: {
-        assignedSales: { select: { id: true, fullName: true } },
+        assignedSales: {
+          select: {
+            id: true,
+            fullName: true,
+            isActive: true,
+            role: { select: { roleCode: true, roleName: true } },
+          },
+        },
         tracking: true,
         leadProducts: { include: { product: { select: { id: true, productName: true } } } },
         activities: {
@@ -53,20 +61,56 @@ export async function getM04ResultsReportSpec(
       },
       orderBy: { createdAt: 'desc' },
     }),
-    getM03AdsSeoDashboardSpec({
-      websiteId: scope.websiteId,
-      preset: scope.preset,
-      from: scope.startDateStr,
-      to: scope.endDateStr,
+    prisma.lead.findMany({
+      where: {
+        createdAt: {
+          gte: scope.prevStartDateTime,
+          lte: scope.prevEndDateTime,
+        },
+        ...roleLeadFilter,
+      },
+      select: {
+        id: true,
+        isSpam: true,
+        pipelineStatus: true,
+        sourceWebsite: true,
+      },
     }),
-    prisma.platformSyncLog.findFirst({ orderBy: { id: 'desc' } }),
+    prisma.platformDailyMetric.findMany({
+      where: {
+        platform: { in: ['google_ads', 'facebook_ads', 'facebook'] },
+        grain: 'campaign',
+        metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
+        NOT: [
+          { accountPropertyId: { startsWith: 'GA4-' } },
+          { campaignExternalId: { startsWith: 'ga4_' } },
+        ],
+      },
+      select: {
+        spendMicros: true,
+        pageUrlRaw: true,
+      },
+    }),
+    prisma.platformSyncLog.findFirst({
+      where: { status: 'success' },
+      orderBy: { id: 'desc' },
+    }),
   ]);
 
   const leads = rawLeads.filter((l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite));
-  const totalLeadCount = leads.length;
+  const prevLeads = prevRawLeads.filter((l) =>
+    matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite),
+  );
+
+  const receivedLeadCount = leads.length;
   const validLeads = leads.filter((l) => isL2Valid(l));
-  const l2Count = validLeads.length;
-  const l3Count = leads.filter((l) => isL3Effective(l)).length;
+  const validLeadCount = validLeads.length;
+  const effectiveLeadCount = leads.filter((l) => isL3Effective(l)).length;
+  const spamCount = receivedLeadCount - validLeadCount;
+
+  const prevReceivedCount = prevLeads.length;
+  const prevValidCount = prevLeads.filter((l) => isL2Valid(l)).length;
+  const prevWonCount = prevLeads.filter((l) => isL2Valid(l) && l.pipelineStatus === 'won').length;
 
   const hasQuoteEvidence = (l: (typeof leads)[number]) =>
     Boolean(l.firstQuoteSentAt) ||
@@ -74,51 +118,174 @@ export async function getM04ResultsReportSpec(
     l.pipelineStatus === 'won' ||
     l.activities.some((a: { actionType: string }) => a.actionType === 'quote_sent');
 
+  const pendingAcceptanceCount = validLeads.filter(
+    (l) => l.pipelineStatus === 'new_lead' && !l.receivedAt,
+  ).length;
+  const newLeadStageCount = validLeads.filter((l) => l.pipelineStatus === 'new_lead').length;
+  const draftingQuoteCount = validLeads.filter((l) => l.pipelineStatus === 'quoting').length;
+  const waitingQuoteLeads = validLeads.filter((l) => l.pipelineStatus === 'quote_sent');
+  const waitingQuoteCount = waitingQuoteLeads.length;
+  const wonLeads = validLeads.filter((l) => l.pipelineStatus === 'won');
+  const wonLeadCount = wonLeads.length;
+  const lostLeadCount = validLeads.filter((l) => l.pipelineStatus === 'lost').length;
   const quotedLeads = validLeads.filter(hasQuoteEvidence);
-  const waitingQuoteLeads = leads.filter((l) => l.pipelineStatus === 'quote_sent');
-  const wonLeads = leads.filter((l) => l.pipelineStatus === 'won');
 
   const nowMs = Date.now();
   const overdueQuotes = waitingQuoteLeads.filter((l) => {
     const refMs = (l.firstQuoteSentAt || l.updatedAt || l.createdAt).getTime();
-    return (nowMs - refMs) / (1000 * 60 * 60 * 24) > 7;
+    return (nowMs - refMs) / (1000 * 60 * 60 * 24) >= 7;
   });
 
-  const winRateDenominator = l2Count;
-  const winRateNumerator = wonLeads.length;
+  const winRateDenominator = validLeadCount;
+  const winRateNumerator = wonLeadCount;
   const winRatePct =
     winRateDenominator > 0
       ? Number(((winRateNumerator / winRateDenominator) * 100).toFixed(1))
       : null;
 
-  const adLeads = validLeads.filter(
-    (l) =>
-      Boolean(l.tracking?.gclid) ||
-      (l.tracking?.marketingSource || '').toLowerCase().includes('google ads'),
-  );
-  const costPerValidAdLead = computeCostPerValidAdLead(m03Spec.ads.metrics.adCost, adLeads.length);
+  // Đối soát chi phí quảng cáo và Lead quảng cáo hợp lệ (C04 & C09)
+  const validAdLeads = validLeads.filter((l) => {
+    const ch = normalizeMarketingChannelDisplay({
+      marketingSource: l.tracking?.marketingSource,
+      utmSource: l.tracking?.utmSource,
+      utmMedium: l.tracking?.utmMedium,
+      gclid: l.tracking?.gclid,
+      contactChannel: l.contactChannel,
+    });
+    return ch === 'Google Ads' || ch === 'Quảng cáo Facebook';
+  });
 
-  // Funnel strictly on the same Lead cohort
-  const leadFunnel = [
-    { stageKey: 'received', label: 'Tiếp nhận', distinctLeadCount: totalLeadCount },
-    { stageKey: 'valid', label: 'Hợp lệ', distinctLeadCount: l2Count },
-    { stageKey: 'quoted', label: 'Đã báo giá', distinctLeadCount: quotedLeads.length },
-    { stageKey: 'won', label: 'Đã chốt', distinctLeadCount: wonLeads.length },
+  let attributedAdCost: number | null = null;
+  let adReconciliationNote = '';
+  if (adsCampaignMetrics.length > 0) {
+    if (!scope.selectedWebsite) {
+      const totalMicros = adsCampaignMetrics.reduce((s, r) => s + (r.spendMicros ?? 0n), 0n);
+      attributedAdCost = Number((Number(totalMicros) / 1_000_000).toFixed(0));
+      adReconciliationNote = 'Đã đối soát tổng chi phí quảng cáo cấp tài khoản với Lead quảng cáo hợp lệ.';
+    } else {
+      const siteMatched = adsCampaignMetrics.filter(
+        (r) => r.pageUrlRaw && r.pageUrlRaw.toLowerCase().includes(scope.selectedWebsite!.domain.toLowerCase()),
+      );
+      if (siteMatched.length > 0) {
+        const siteMicros = siteMatched.reduce((s, r) => s + (r.spendMicros ?? 0n), 0n);
+        attributedAdCost = Number((Number(siteMicros) / 1_000_000).toFixed(0));
+        adReconciliationNote = `Chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}.`;
+      } else {
+        attributedAdCost = null;
+        adReconciliationNote = `Chưa có dữ liệu phân bổ chi phí chiến dịch riêng cho ${scope.selectedWebsite.domain} (không tự chia đều chi phí tài khoản).`;
+      }
+    }
+  } else {
+    attributedAdCost = null;
+    adReconciliationNote = hasAdsToken
+      ? 'Chưa phát sinh dữ liệu chi phí quảng cáo trong kỳ đang chọn.'
+      : `Chưa kết nối chi phí Google Ads API (ghi nhận ${validAdLeads.length} Lead quảng cáo hợp lệ trong CRM).`;
+  }
+
+  const costPerValidAdLead = computeCostPerValidAdLead(attributedAdCost, validAdLeads.length);
+
+  // C09: Dùng phân bố trạng thái hiện tại đúng bản chất dữ liệu (không giả làm phễu tích lũy nhiều bước)
+  const pctOf = (count: number) =>
+    receivedLeadCount > 0 ? Number(((count / receivedLeadCount) * 100).toFixed(1)) : 0;
+
+  const statusDistribution = [
+    {
+      statusKey: 'new_lead',
+      label: PIPELINE_STATUS_LABELS.new_lead,
+      count: newLeadStageCount,
+      pctOfTotal: pctOf(newLeadStageCount),
+    },
+    {
+      statusKey: 'quoting',
+      label: PIPELINE_STATUS_LABELS.quoting,
+      count: draftingQuoteCount,
+      pctOfTotal: pctOf(draftingQuoteCount),
+    },
+    {
+      statusKey: 'quote_sent',
+      label: PIPELINE_STATUS_LABELS.quote_sent,
+      count: waitingQuoteCount,
+      pctOfTotal: pctOf(waitingQuoteCount),
+    },
+    {
+      statusKey: 'won',
+      label: PIPELINE_STATUS_LABELS.won,
+      count: wonLeadCount,
+      pctOfTotal: pctOf(wonLeadCount),
+    },
+    {
+      statusKey: 'lost',
+      label: PIPELINE_STATUS_LABELS.lost,
+      count: lostLeadCount,
+      pctOfTotal: pctOf(lostLeadCount),
+    },
+    ...(spamCount > 0
+      ? [
+          {
+            statusKey: 'spam',
+            label: 'Đã xác minh spam (loại trừ)',
+            count: spamCount,
+            pctOfTotal: pctOf(spamCount),
+          },
+        ]
+      : []),
   ];
 
-  // Product breakdown (a Lead interested in multiple products can appear in multiple rows)
+  // Giữ leadFunnel tương thích ngược với các bài test cũ trên cùng cohort
+  const leadFunnel = [
+    { stageKey: 'received', label: 'Lead tiếp nhận', distinctLeadCount: receivedLeadCount },
+    { stageKey: 'valid', label: 'Lead hợp lệ', distinctLeadCount: validLeadCount },
+    { stageKey: 'quoted', label: 'Có gửi báo giá', distinctLeadCount: quotedLeads.length },
+    { stageKey: 'won', label: 'Chốt thành công', distinctLeadCount: wonLeadCount },
+  ];
+
+  // Phân tích nhu cầu sản phẩm + phần chưa phân loại sản phẩm (C09)
+  let unclassifiedProductLeadCount = 0;
+  let multiProductLeadCount = 0;
   const prodMap = new Map<
     number,
-    { productId: number; productName: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number }
+    {
+      productId: number;
+      productName: string;
+      isUnclassifiedProduct?: boolean;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      wonCount: number;
+    }
   >();
+
   for (const l of leads) {
-    const seenProdIds = new Set<number>();
-    for (const lp of l.leadProducts) {
-      if (seenProdIds.has(lp.productId)) continue;
-      seenProdIds.add(lp.productId);
+    const uniqueProds = Array.from(
+      new Map(l.leadProducts.map((lp) => [lp.productId, lp])).values(),
+    );
+    if (uniqueProds.length === 0) {
+      unclassifiedProductLeadCount += 1;
+      const unclass = prodMap.get(0) || {
+        productId: 0,
+        productName: 'Chưa phân loại sản phẩm',
+        isUnclassifiedProduct: true,
+        leadCount: 0,
+        validCount: 0,
+        quotedCount: 0,
+        wonCount: 0,
+      };
+      unclass.leadCount += 1;
+      if (isL2Valid(l)) unclass.validCount += 1;
+      if (isL2Valid(l) && hasQuoteEvidence(l)) unclass.quotedCount += 1;
+      if (isL2Valid(l) && l.pipelineStatus === 'won') unclass.wonCount += 1;
+      prodMap.set(0, unclass);
+      continue;
+    }
+
+    if (uniqueProds.length > 1) {
+      multiProductLeadCount += 1;
+    }
+    for (const lp of uniqueProds) {
       const cur = prodMap.get(lp.productId) || {
         productId: lp.productId,
         productName: lp.product.productName,
+        isUnclassifiedProduct: false,
         leadCount: 0,
         validCount: 0,
         quotedCount: 0,
@@ -127,23 +294,63 @@ export async function getM04ResultsReportSpec(
       cur.leadCount += 1;
       if (isL2Valid(l)) cur.validCount += 1;
       if (isL2Valid(l) && hasQuoteEvidence(l)) cur.quotedCount += 1;
-      if (l.pipelineStatus === 'won') cur.wonCount += 1;
+      if (isL2Valid(l) && l.pipelineStatus === 'won') cur.wonCount += 1;
       prodMap.set(lp.productId, cur);
     }
   }
-  const byProduct = Array.from(prodMap.values()).sort((a, b) => b.leadCount - a.leadCount);
 
-  // Sales breakdown
+  const classifiedProductRows = Array.from(prodMap.values())
+    .filter((p) => !p.isUnclassifiedProduct)
+    .sort((a, b) => b.leadCount - a.leadCount);
+  const unclassifiedProductRow = prodMap.get(0);
+  const byProduct = [
+    ...classifiedProductRows,
+    ...(unclassifiedProductRow ? [unclassifiedProductRow] : []),
+  ];
+
+  // Đối soát đầy đủ theo nhân sự (C04 & C09: cộng khớp 100% với receivedLeadCount, làm rõ giao ngoài nhóm Sales / chưa giao / ngưng hoạt động)
   const salesMap = new Map<
     number,
-    { salesId: number; salesName: string; leadCount: number; validCount: number; quotedCount: number; waitingCount: number; wonCount: number; overdueCount: number }
+    {
+      salesId: number;
+      salesName: string;
+      roleLabel?: string;
+      isReconciliationBucket?: boolean;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      waitingCount: number;
+      wonCount: number;
+      overdueCount: number;
+    }
   >();
+
   for (const l of leads) {
     const sid = l.assignedSalesId || 0;
-    const sname = l.assignedSales?.fullName || 'Chưa phân bổ';
+    const roleCode = l.assignedSales?.role?.roleCode || null;
+    const isStandardSales = roleCode === 'SALES' || roleCode === 'SALES_LEAD';
+    const isInactive = l.assignedSales ? !l.assignedSales.isActive : false;
+    const roleNote = !l.assignedSales
+      ? 'Chưa giao nhân sự'
+      : !isStandardSales
+        ? `Ngoài danh sách Sales (${l.assignedSales.role?.roleName || roleCode})`
+        : isInactive
+          ? 'Nhân sự ngừng hoạt động'
+          : l.assignedSales.role?.roleName || 'Kinh doanh';
+
+    const sname = l.assignedSales
+      ? !isStandardSales
+        ? `${l.assignedSales.fullName} (${l.assignedSales.role?.roleName || roleCode})`
+        : isInactive
+          ? `${l.assignedSales.fullName} (Ngừng hoạt động)`
+          : l.assignedSales.fullName
+      : 'Chưa phân bổ';
+
     const cur = salesMap.get(sid) || {
       salesId: sid,
       salesName: sname,
+      roleLabel: roleNote,
+      isReconciliationBucket: !l.assignedSales || !isStandardSales,
       leadCount: 0,
       validCount: 0,
       quotedCount: 0,
@@ -154,24 +361,44 @@ export async function getM04ResultsReportSpec(
     cur.leadCount += 1;
     if (isL2Valid(l)) cur.validCount += 1;
     if (isL2Valid(l) && hasQuoteEvidence(l)) cur.quotedCount += 1;
-    if (l.pipelineStatus === 'quote_sent') {
+    if (isL2Valid(l) && l.pipelineStatus === 'quote_sent') {
       cur.waitingCount += 1;
       const refMs = (l.firstQuoteSentAt || l.updatedAt || l.createdAt).getTime();
-      if ((nowMs - refMs) / (1000 * 60 * 60 * 24) > 7) cur.overdueCount += 1;
+      if ((nowMs - refMs) / (1000 * 60 * 60 * 24) >= 7) cur.overdueCount += 1;
     }
-    if (l.pipelineStatus === 'won') cur.wonCount += 1;
+    if (isL2Valid(l) && l.pipelineStatus === 'won') cur.wonCount += 1;
     salesMap.set(sid, cur);
   }
 
-  // Website breakdown
+  const bySales = Array.from(salesMap.values()).sort((a, b) => {
+    if (Boolean(a.isReconciliationBucket) !== Boolean(b.isReconciliationBucket)) {
+      return a.isReconciliationBucket ? 1 : -1;
+    }
+    return b.leadCount - a.leadCount;
+  });
+
+  // Phân tích theo Website nguồn (không cộng lặp, làm rõ phần chưa xác định website)
   const webMap = new Map<
     string,
-    { website: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number; adLeadCount: number; cpl: number | null }
+    {
+      website: string;
+      isUnclassifiedWebsite?: boolean;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      wonCount: number;
+      adLeadCount: number;
+      cpl: number | null;
+    }
   >();
+
   for (const l of leads) {
-    const w = l.sourceWebsite || 'Chưa xác định website';
-    const cur = webMap.get(w) || {
-      website: w,
+    const cleanWeb = sanitizeWebsiteSourceDisplay(l.sourceWebsite).cleanLabel;
+    const isUnclassified = !cleanWeb;
+    const wKey = cleanWeb || 'Chưa xác định';
+    const cur = webMap.get(wKey) || {
+      website: wKey,
+      isUnclassifiedWebsite: isUnclassified,
       leadCount: 0,
       validCount: 0,
       quotedCount: 0,
@@ -183,28 +410,41 @@ export async function getM04ResultsReportSpec(
     if (isL2Valid(l)) {
       cur.validCount += 1;
       if (hasQuoteEvidence(l)) cur.quotedCount += 1;
-      if (
-        Boolean(l.tracking?.gclid) ||
-        (l.tracking?.marketingSource || '').toLowerCase().includes('google ads')
-      ) {
+      const ch = normalizeMarketingChannelDisplay({
+        marketingSource: l.tracking?.marketingSource,
+        utmSource: l.tracking?.utmSource,
+        utmMedium: l.tracking?.utmMedium,
+        gclid: l.tracking?.gclid,
+        contactChannel: l.contactChannel,
+      });
+      if (ch === 'Google Ads' || ch === 'Quảng cáo Facebook') {
         cur.adLeadCount += 1;
       }
+      if (l.pipelineStatus === 'won') cur.wonCount += 1;
     }
-    if (l.pipelineStatus === 'won') cur.wonCount += 1;
-    webMap.set(w, cur);
+    webMap.set(wKey, cur);
   }
 
-  // Marketing channel breakdown
+  const byWebsite = Array.from(webMap.values()).sort((a, b) => {
+    if (Boolean(a.isUnclassifiedWebsite) !== Boolean(b.isUnclassifiedWebsite)) {
+      return a.isUnclassifiedWebsite ? 1 : -1;
+    }
+    return b.leadCount - a.leadCount;
+  });
+
+  // Phân tích theo Kênh marketing chuẩn hóa (C04: tách khỏi hình thức liên hệ, không tự gán Organic/Direct)
   const chMap = new Map<
     string,
     { channel: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number }
   >();
   for (const l of leads) {
-    const ch =
-      l.tracking?.marketingSource ||
-      CONTACT_CHANNEL_LABELS[l.contactChannel as ContactChannel] ||
-      l.contactChannel ||
-      'Chưa xác định';
+    const ch = normalizeMarketingChannelDisplay({
+      marketingSource: l.tracking?.marketingSource,
+      utmSource: l.tracking?.utmSource,
+      utmMedium: l.tracking?.utmMedium,
+      gclid: l.tracking?.gclid,
+      contactChannel: l.contactChannel,
+    });
     const cur = chMap.get(ch) || {
       channel: ch,
       leadCount: 0,
@@ -213,24 +453,36 @@ export async function getM04ResultsReportSpec(
       wonCount: 0,
     };
     cur.leadCount += 1;
-    if (isL2Valid(l)) cur.validCount += 1;
-    if (isL2Valid(l) && hasQuoteEvidence(l)) cur.quotedCount += 1;
-    if (l.pipelineStatus === 'won') cur.wonCount += 1;
+    if (isL2Valid(l)) {
+      cur.validCount += 1;
+      if (hasQuoteEvidence(l)) cur.quotedCount += 1;
+      if (l.pipelineStatus === 'won') cur.wonCount += 1;
+    }
     chMap.set(ch, cur);
   }
+
+  const byChannel = Array.from(chMap.values()).sort((a, b) => {
+    if ((a.channel === 'Chưa xác định') !== (b.channel === 'Chưa xác định')) {
+      return a.channel === 'Chưa xác định' ? 1 : -1;
+    }
+    return b.leadCount - a.leadCount;
+  });
 
   const pendingActionRows = waitingQuoteLeads
     .map((l) => {
       const refDate = l.firstQuoteSentAt || l.updatedAt || l.createdAt;
-      const waitingDays = Math.max(0, Math.floor((nowMs - refDate.getTime()) / (1000 * 60 * 60 * 24)));
+      const waitingDays = Math.max(
+        0,
+        Math.floor((nowMs - refDate.getTime()) / (1000 * 60 * 60 * 24)),
+      );
       return {
         leadId: l.id,
         leadCode: l.leadCode,
         customerLabel: anonymized
           ? 'Khách hàng ẩn danh'
-          : l.companyName || l.contactName || l.phone,
+          : l.companyName || l.contactName || l.phone || l.leadCode,
         assignedSalesName: l.assignedSales?.fullName || 'Chưa phân bổ',
-        website: l.sourceWebsite || 'Chưa xác định website',
+        website: sanitizeWebsiteSourceDisplay(l.sourceWebsite).cleanLabel || 'Chưa xác định',
         quoteSentAt: refDate.toISOString(),
         waitingDays,
       };
@@ -246,7 +498,10 @@ export async function getM04ResultsReportSpec(
       endDate: scope.endDateStr,
       timezone: scope.timezone,
       isTodayIncluded: scope.isTodayIncluded,
-      cohortDefinition: 'Lead được tạo trong kỳ đã chọn, với kết quả xử lý hiện tại.',
+      cohortDefinition:
+        'Cơ sở thống kê: Tập Lead được tạo trong kỳ và phạm vi website đang chọn, phản ánh trạng thái xử lý hiện tại.',
+      previousStartDate: scope.prevStartDateStr,
+      previousEndDate: scope.prevEndDateStr,
     },
     freshness: {
       lastCheckedAt: new Date().toISOString(),
@@ -254,8 +509,8 @@ export async function getM04ResultsReportSpec(
       dataThrough: scope.endDateStr,
       state: scope.isTodayIncluded ? 'PRELIMINARY' : 'FINALIZED',
       statusMessage: scope.isTodayIncluded
-        ? 'Số liệu trong ngày còn sơ bộ.'
-        : `Cập nhật lúc ${new Date().toLocaleString('vi-VN')}`,
+        ? 'Số liệu trong ngày đang tạm tính.'
+        : `Dữ liệu đến ${scope.endDateStr}`,
     },
     coverage: {
       availableWebsites: scope.availableWebsites,
@@ -263,45 +518,73 @@ export async function getM04ResultsReportSpec(
         ? [scope.selectedWebsite.domain]
         : scope.availableWebsites.map((w) => w.domain),
       missingWebsites: [],
-      note: null,
+      note:
+        !scope.selectedWebsite && webMap.has('Chưa xác định')
+          ? `Bao gồm ${webMap.get('Chưa xác định')!.leadCount} Lead chưa xác định website nguồn (từ Hotline, Zalo hoặc nhập tay). Khi lọc 1 website cụ thể, nhóm chưa xác định website được tách riêng.`
+          : null,
     },
-    version: `m04-${scope.websiteId}-${scope.startDateStr}-${scope.endDateStr}-${totalLeadCount}-${wonLeads.length}`,
+    version: `m04-${scope.websiteId}-${scope.startDateStr}-${scope.endDateStr}-${receivedLeadCount}-${wonLeadCount}`,
     scopeRole: user.roleCode,
     scopeDescription:
       user.roleCode === 'SALES'
         ? `Phạm vi cá nhân (${user.fullName})`
         : anonymized
-          ? 'Phạm vi Marketing / Thiết kế (ẩn danh PII khách hàng)'
-          : 'Phạm vi Toàn công ty',
+          ? 'Phạm vi Marketing / Thiết kế (đã che thông tin liên hệ khách hàng)'
+          : 'Phạm vi toàn công ty',
     metrics: {
-      totalLeadCount,
-      validLeadCount: l2Count,
-      l2Count,
-      l3Count,
-      waitingQuoteCount: waitingQuoteLeads.length,
-      wonLeadCount: winRateNumerator,
+      totalLeadCount: receivedLeadCount,
+      receivedLeadCount,
+      validLeadCount,
+      effectiveLeadCount,
+      l2Count: validLeadCount,
+      l3Count: effectiveLeadCount,
+      pendingAcceptanceCount,
+      draftingQuoteCount,
+      waitingQuoteCount,
+      wonLeadCount,
+      lostLeadCount,
       winRatePct,
       winRateNumerator,
       winRateDenominator,
-      winRateDefinition: 'Tỷ lệ chốt = Số Lead đã chốt / Tổng Lead hợp lệ (L2) trong cùng kỳ & website',
+      winRateDefinition:
+        'Tỷ lệ chốt = Chốt thành công / Lead hợp lệ (L2) trong cùng tập Lead tạo trong kỳ và phạm vi website đang chọn.',
+      attributedAdCost,
+      validAdLeadCount: validAdLeads.length,
+      adReconciliationNote,
       costPerValidAdLead,
-      currencyCode: m03Spec.ads.currencyCode,
+      currencyCode: 'VND',
       overdueQuoteCount: overdueQuotes.length,
+      unclassifiedProductLeadCount,
+      previousReceivedLeadCount: prevReceivedCount,
+      previousValidLeadCount: prevValidCount,
+      previousWonLeadCount: prevWonCount,
     },
     charts: {
       leadFunnel,
-      productLeadRows: byProduct.map((p) => ({
+      progressChartMode: 'CURRENT_STATUS_DISTRIBUTION',
+      progressChartTitle: 'Phân bố trạng thái xử lý hiện tại',
+      progressChartSubtitle: `Tổng cộng ${receivedLeadCount} hồ sơ tạo trong kỳ (mỗi hồ sơ thuộc đúng một trạng thái hiện tại)`,
+      statusDistribution,
+      productLeadRows: classifiedProductRows.map((p) => ({
         productId: p.productId,
         productName: p.productName,
         distinctLeadCount: p.leadCount,
       })),
+      multiProductNote:
+        multiProductLeadCount > 0
+          ? `Có ${multiProductLeadCount} Lead quan tâm từ 2 dòng sản phẩm trở lên; bảng Sản phẩm đếm theo lượt quan tâm từng sản phẩm, không cộng gộp thành tổng Lead.`
+          : null,
     },
     tables: {
-      bySales: Array.from(salesMap.values()).sort((a, b) => b.leadCount - a.leadCount),
-      byWebsite: Array.from(webMap.values()).sort((a, b) => b.leadCount - a.leadCount),
-      byChannel: Array.from(chMap.values()).sort((a, b) => b.leadCount - a.leadCount),
+      bySales,
+      byWebsite,
+      byChannel,
       byProduct,
-      pendingActionLeads: paginateArray(pendingActionRows, params?.page || 1, params?.pageSize || 20),
+      pendingActionLeads: paginateArray(
+        pendingActionRows,
+        params?.page || 1,
+        params?.pageSize || 20,
+      ),
     },
   };
 }

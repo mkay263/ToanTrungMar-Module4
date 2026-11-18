@@ -73,11 +73,12 @@ export class GoogleImagenProvider implements AiDesignProvider {
         [
           requestedImgModel,
           'gemini-2.5-flash-image',
+          'gemini-2.0-flash-preview-image-generation',
           'gemini-3.1-flash-image',
           'gemini-3.1-flash-lite-image',
         ].filter(Boolean)
       )
-    ).slice(0, 3);
+    ).slice(0, 4);
 
     const parts: Array<
       | { text: string }
@@ -129,7 +130,7 @@ export class GoogleImagenProvider implements AiDesignProvider {
               responseModalities: ['TEXT', 'IMAGE'],
             },
           }),
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.timeout(35000),
         });
         if (!res.ok) {
           const errTxt = await res.text().catch(() => '');

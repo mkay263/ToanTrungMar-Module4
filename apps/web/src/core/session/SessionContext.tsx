@@ -3,7 +3,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import type { PublicBrandingDto, SessionUserDto } from '@toantrung/contracts';
-import { apiRequest } from '../http/client';
+import { apiRequest, clearAllApiCache, setApiCacheUserScope } from '../http/client';
 
 const DEFAULT_BRANDING: PublicBrandingDto = {
   organizationName: 'Toàn Trung',
@@ -113,10 +113,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const refreshSession = useCallback(async () => {
     try {
-      const res = await apiRequest<{ user: SessionUserDto }>('/api/v1/auth/me');
+      const res = await apiRequest<{ user: SessionUserDto }>('/api/v1/auth/me', {
+        skipCache: true,
+      });
+      setApiCacheUserScope(`${res.user.id}:${res.user.roleCode}`);
       setUser(res.user);
       return res.user;
     } catch {
+      setApiCacheUserScope(null);
+      clearAllApiCache();
       setUser(null);
       return null;
     } finally {
@@ -148,6 +153,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     } catch {
       // Clear local session state regardless
     }
+    setApiCacheUserScope(null);
+    clearAllApiCache();
     setUser(null);
     setUnreadCount(0);
     router.replace('/login');

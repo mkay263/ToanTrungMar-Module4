@@ -25,6 +25,8 @@ export interface DashboardScopeDto {
   timezone: string;
   isTodayIncluded: boolean;
   cohortDefinition: string;
+  previousStartDate?: string;
+  previousEndDate?: string;
 }
 
 export interface DashboardFreshnessDto {
@@ -50,7 +52,7 @@ export interface PaginatedTableDto<T> {
 }
 
 // ============================================================================
-// M02 — TRUY CẬP & TƯƠNG TÁC
+// M02 — CHIẾN DỊCH (TRUY CẬP & QUẢNG CÁO)
 // ============================================================================
 
 export interface M02TrafficSeriesPointDto {
@@ -64,9 +66,12 @@ export interface M02TrafficSeriesPointDto {
 export interface M02ChannelRowDto {
   channelKey: string;
   channelLabel: string;
+  source?: string;
+  medium?: string;
   sessions: number;
   engagedSessions: number | null;
   engagementRatePct: number | null;
+  formEvents?: number | null;
   validLeadCount: number;
 }
 
@@ -86,6 +91,7 @@ export interface M02InteractionRowDto {
   users: number | null;
   meaning: string;
   mappedEventName: string | null;
+  trackingConfigured?: boolean;
 }
 
 export interface M02ProductInterestRowDto {
@@ -105,6 +111,80 @@ export interface M02JourneyStepDto {
   sessionCount: number | null;
 }
 
+export interface M02CampaignRowDto {
+  campaignId: string;
+  campaignName: string;
+  status: string;
+  channelType: string | null;
+  currency: string;
+  cost: number;
+  impressions: number;
+  clicks: number;
+  ctrPct: number | null;
+  avgCpc: number | null;
+  conversions: number;
+  costPerConversion: number | null;
+  attributedLeadCount: number;
+  validAttributedLeadCount: number;
+  wonAttributedLeadCount: number;
+  costPerValidLead: number | null;
+  attributionStatus: 'RECONCILED' | 'UNATTRIBUTED_WEBSITE' | 'NO_CRM_MATCH';
+  attributionNote: string;
+}
+
+export interface M02AdsSectionDto {
+  status: 'CONNECTED' | 'UNCONFIGURED' | 'ERROR';
+  statusMessage: string;
+  currencyCode: string;
+  metrics: {
+    cost: number | null;
+    impressions: number | null;
+    clicks: number | null;
+    ctrPct: number | null;
+    avgCpc: number | null;
+    conversions: number | null;
+    costPerConversion: number | null;
+    attributedLeadCount: number;
+    validAttributedLeadCount: number;
+    wonAttributedLeadCount: number;
+    costPerValidLead: number | null;
+    reconciliationNote: string;
+  };
+  series: Array<{
+    date: string;
+    cost: number | null;
+    conversions: number | null;
+    clicks: number | null;
+  }>;
+  campaigns: PaginatedTableDto<M02CampaignRowDto>;
+  breakdowns: {
+    adGroups: Array<{
+      adGroupId: string;
+      adGroupName: string;
+      campaignName: string;
+      cost: number;
+      impressions: number;
+      clicks: number;
+      conversions: number;
+      cpa: number | null;
+    }>;
+    keywords: Array<{
+      keywordText: string;
+      matchType: string;
+      adGroupName: string;
+      campaignName: string;
+      impressions: number;
+      clicks: number;
+      ctrPct: number | null;
+      cost: number;
+      conversions: number;
+    }>;
+    keywordAvailabilityNote: string | null;
+    devices: Array<{ device: string; cost: number; clicks: number; impressions: number }>;
+    regions: Array<{ region: string; cost: number; clicks: number; impressions: number }>;
+  };
+}
+
 export interface M02TrafficInteractionDto {
   scope: DashboardScopeDto;
   freshness: DashboardFreshnessDto;
@@ -119,7 +199,13 @@ export interface M02TrafficInteractionDto {
     engagedSessions: number | null;
     averageEngagementSeconds: number | null;
     validFormLeadCount: number;
+    formEventCount?: number | null;
     activeUsers30m: number | null;
+    activeWindowCheckedAt?: string | null;
+    previousSessions?: number | null;
+    previousUsers?: number | null;
+    previousPageViews?: number | null;
+    previousFormLeadCount?: number | null;
   };
   realtimeMinutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
   charts: {
@@ -137,10 +223,11 @@ export interface M02TrafficInteractionDto {
     journeyAvailable: boolean;
     journeyNote: string | null;
   };
+  ads?: M02AdsSectionDto;
 }
 
 // ============================================================================
-// M03 — QUẢNG CÁO, TỪ KHÓA & SEO, TÌNH TRẠNG TRANG, XU HƯỚNG
+// M03 — TỪ KHÓA & SEO, NỘI DUNG, XU HƯỚNG
 // ============================================================================
 
 export interface M03AdDailyPointDto {
@@ -183,6 +270,10 @@ export interface M03SeoComparisonRowDto {
   previousClicks: number | null;
   clickChange: number | null;
   clickChangePct: number | null;
+  previousImpressions?: number | null;
+  impressionChange?: number | null;
+  previousCtrPct?: number | null;
+  ctrChangePctPt?: number | null;
   previousPosition: number | null;
   positionImprovement: number | null;
 }
@@ -203,9 +294,36 @@ export interface M03TrendRowDto {
   geoCode: string;
   geoName: string;
   date: string;
-  interestValue: number;
+  interestValue: number | null;
   scaleType: string;
   comparisonGroupId: string;
+  relatedRisingQueries?: string[];
+  sourceType?: 'GOOGLE_TRENDS_INDEX' | 'GOOGLE_TRENDS_RSS' | 'GOOGLE_SUGGEST_VN';
+  approxTrafficLabel?: string | null;
+  newsHeadline?: string | null;
+  newsSource?: string | null;
+}
+
+export interface M03SeoContentRowDto {
+  contentId: number;
+  title: string;
+  targetWebsite: string | null;
+  targetUrl: string | null;
+  targetQuery: string;
+  owner: string;
+  workflowStatus: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  publishError: string | null;
+}
+
+export interface M03SeoDeviceCountryRowDto {
+  dimensionType: 'DEVICE' | 'COUNTRY';
+  dimensionKey: string;
+  clicks: number;
+  impressions: number;
+  ctrPct: number | null;
+  averagePosition: number | null;
 }
 
 export interface M03AdsSeoDashboardDto {
@@ -249,7 +367,10 @@ export interface M03AdsSeoDashboardDto {
       organicSearchCtrPct: number | null;
       averageSearchPosition: number | null;
       organicSessions: number | null;
+      organicEngagementRatePct?: number | null;
+      organicFormEvents?: number | null;
       organicValidLeadCount: number;
+      organicLeadVerificationState?: 'VERIFIED' | 'INSUFFICIENT_EVIDENCE';
     };
     comparison: {
       previousStartDate: string;
@@ -262,10 +383,22 @@ export interface M03AdsSeoDashboardDto {
       seoDailySeries: M03SeoDailyPointDto[];
       opportunityQueries: Array<{ query: string; impressions: number; ctrPct: number | null; averagePosition: number | null }>;
       opportunityThresholdNote: string;
+      pagesDeltaSummary?: {
+        risingPages: M03SeoComparisonRowDto[];
+        decliningPages: M03SeoComparisonRowDto[];
+        comparisonNote: string;
+      };
     };
     tables: {
       queries: PaginatedTableDto<M03SeoComparisonRowDto>;
       pages: PaginatedTableDto<M03SeoComparisonRowDto>;
+      content?: PaginatedTableDto<M03SeoContentRowDto>;
+      deviceCountry?: M03SeoDeviceCountryRowDto[];
+    };
+    opportunityConfig?: {
+      minImpressionsForLowCtr: number;
+      maxCtrPctForOpportunity: number;
+      staleContentDays: number;
     };
   };
   siteStatus: {
@@ -277,11 +410,19 @@ export interface M03AdsSeoDashboardDto {
     status: 'CONNECTED' | 'UNCONFIGURED' | 'ERROR';
     statusMessage: string;
     rows: M03TrendRowDto[];
+    dailyRssTrends?: M03TrendRowDto[];
+    industrySuggestions?: Array<{
+      seedTerm: string;
+      suggestions: string[];
+      checkedAt: string;
+    }>;
+    serpApiConfigured?: boolean;
+    lastSyncedAt?: string | null;
   };
 }
 
 // ============================================================================
-// M04 — BÁO CÁO KẾT QUẢ
+// M04 — BÁO CÁO KẾT QUẢ KINH DOANH & MARKETING
 // ============================================================================
 
 export interface M04ResultsReportDto {
@@ -293,28 +434,73 @@ export interface M04ResultsReportDto {
   scopeDescription: string;
   metrics: {
     totalLeadCount: number;
+    receivedLeadCount?: number;
     validLeadCount: number;
+    effectiveLeadCount?: number;
     l2Count: number;
     l3Count: number;
+    pendingAcceptanceCount?: number;
+    draftingQuoteCount?: number;
     waitingQuoteCount: number;
     wonLeadCount: number;
+    lostLeadCount?: number;
     winRatePct: number | null;
     winRateNumerator: number;
     winRateDenominator: number;
     winRateDefinition: string;
+    attributedAdCost?: number | null;
+    validAdLeadCount?: number;
+    adReconciliationNote?: string;
     costPerValidAdLead: number | null;
     currencyCode: string;
     overdueQuoteCount: number;
+    unclassifiedProductLeadCount?: number;
+    previousReceivedLeadCount?: number | null;
+    previousValidLeadCount?: number | null;
+    previousWonLeadCount?: number | null;
   };
   charts: {
     leadFunnel: Array<{ stageKey: string; label: string; distinctLeadCount: number }>;
+    progressChartMode?: 'CURRENT_STATUS_DISTRIBUTION' | 'CUMULATIVE_COHORT';
+    progressChartTitle?: string;
+    progressChartSubtitle?: string;
+    statusDistribution?: Array<{ statusKey: string; label: string; count: number; pctOfTotal: number }>;
     productLeadRows: Array<{ productId: number; productName: string; distinctLeadCount: number }>;
+    multiProductNote?: string | null;
   };
   tables: {
-    bySales: Array<{ salesId: number; salesName: string; leadCount: number; validCount: number; quotedCount: number; waitingCount: number; wonCount: number; overdueCount: number }>;
-    byWebsite: Array<{ website: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number; adLeadCount: number; cpl: number | null }>;
+    bySales: Array<{
+      salesId: number;
+      salesName: string;
+      roleLabel?: string;
+      isReconciliationBucket?: boolean;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      waitingCount: number;
+      wonCount: number;
+      overdueCount: number;
+    }>;
+    byWebsite: Array<{
+      website: string;
+      isUnclassifiedWebsite?: boolean;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      wonCount: number;
+      adLeadCount: number;
+      cpl: number | null;
+    }>;
     byChannel: Array<{ channel: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number }>;
-    byProduct: Array<{ productId: number; productName: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number }>;
+    byProduct: Array<{
+      productId: number;
+      productName: string;
+      isUnclassifiedProduct?: boolean;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      wonCount: number;
+    }>;
     pendingActionLeads: PaginatedTableDto<{
       leadId: number;
       leadCode: string;

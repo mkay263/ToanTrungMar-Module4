@@ -17,10 +17,12 @@ import {
   deleteDesignAssetVersion,
   deleteDesignProject,
   deleteProjectPhoto,
+  evaluateProjectTechnicalBom,
   ForbiddenDesignProjectAccessError,
   getDesignProjectForUser,
   processChatDesignRequest,
   regenerateDesignDraftByAi,
+  retryLastFailedDesignGeneration,
   saveCompositedDraftVersion,
   updateDesignProject,
   uploadDesignerFinalRender,
@@ -68,6 +70,28 @@ export async function PATCH(
   try {
     const raw = (await req.json()) as Record<string, unknown>;
     const action = String(raw.action || 'regenerate_ai');
+
+    if (action === 'evaluate_technical_bom') {
+      const res = await evaluateProjectTechnicalBom(auth.user, requestId, {
+        widthMm: raw.widthMm !== undefined ? Number(raw.widthMm) : undefined,
+        heightMm: raw.heightMm !== undefined ? Number(raw.heightMm) : undefined,
+        pixelPitch: typeof raw.pixelPitch === 'string' ? raw.pixelPitch : undefined,
+        cabinetModelCode:
+          typeof raw.cabinetModelCode === 'string' ? raw.cabinetModelCode : undefined,
+        screenStyle:
+          raw.screenStyle === 'flat' ||
+          raw.screenStyle === 'curved' ||
+          raw.screenStyle === 'corner_90'
+            ? raw.screenStyle
+            : undefined,
+      });
+      return jsonSuccess(res);
+    }
+
+    if (action === 'retry_last_failed') {
+      const res = await retryLastFailedDesignGeneration(auth.user, requestId);
+      return jsonSuccess(res);
+    }
 
     if (action === 'chat_edit') {
       const parsed = ChatDesignRequestSchema.safeParse(raw);

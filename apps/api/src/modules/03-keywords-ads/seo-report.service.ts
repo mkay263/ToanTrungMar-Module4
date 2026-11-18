@@ -99,7 +99,12 @@ export interface SeoAiReportRecord {
 }
 
 function formatDateYmd(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
 }
 
 function shiftDaysYmd(baseYmd: string, deltaDays: number): string {
@@ -242,8 +247,8 @@ export async function buildSeoComparisonSnapshot(params: {
         where: {
           isSpam: false,
           createdAt: {
-            gte: new Date(`${currentStart}T00:00:00.000Z`),
-            lte: new Date(`${currentEnd}T23:59:59.999Z`),
+            gte: new Date(`${currentStart}T00:00:00.000+07:00`),
+            lte: new Date(`${currentEnd}T23:59:59.999+07:00`),
           },
           ...(website === 'all' ? {} : { sourceWebsite: website }),
         },
@@ -419,7 +424,7 @@ function buildFallbackSeoReportText(snapshot: SeoComparisonSnapshot): string {
     .slice(0, 5)
     .map(
       (k, idx) =>
-        `  ${idx + 1}. Từ khóa "${k.keyword}": đạt ${k.clicks} lượt nhấp (${k.clicksDelta >= 0 ? 'tăng +' : 'giảm '}${k.clicksDelta} so với kỳ trước), ${k.impressions} lượt hiển thị, tỷ lệ nhấp (CTR) đạt ${k.ctrPct}%${k.avgPosition ? `, vị trí trung bình ${k.avgPosition}` : ''}.`,
+        `  ${idx + 1}. Từ khóa "${k.keyword}": đạt ${k.clicks} lượt nhấp (${k.clicksDelta >= 0 ? 'tăng +' : 'giảm '}${k.clicksDelta} so với kỳ trước), ${k.impressions} lượt hiển thị, tỷ lệ nhấp (CTR) đạt ${k.ctrPct}%${k.avgPosition ? `, vị trí trung bình ${k.avgPosition}` : ''} [Tham chiếu: bảng topKeywords].`,
     )
     .join('\n');
 
@@ -427,7 +432,7 @@ function buildFallbackSeoReportText(snapshot: SeoComparisonSnapshot): string {
     .slice(0, 5)
     .map(
       (p, idx) =>
-        `  ${idx + 1}. Trang ${p.pageUrl}: thu hút ${p.clicks} lượt nhấp từ ${p.impressions} lượt hiển thị (CTR ${p.ctrPct}%).`,
+        `  ${idx + 1}. Trang ${p.pageUrl}: thu hút ${p.clicks} lượt nhấp từ ${p.impressions} lượt hiển thị (CTR ${p.ctrPct}%) [Tham chiếu: bảng topPages].`,
     )
     .join('\n');
 
@@ -437,38 +442,35 @@ function buildFallbackSeoReportText(snapshot: SeoComparisonSnapshot): string {
       : `giảm ${Math.abs(snapshot.comparison.clicksDelta)} lượt nhấp (${snapshot.comparison.clicksDeltaLabel})`;
 
   return [
-    `BÁO CÁO HIỆU QUẢ TÌM KIẾM & TỪ KHÓA WEBSITE (${siteLabel.toUpperCase()})`,
+    `BÁO CÁO PHÂN TÍCH TÌM KIẾM TỰ NHIÊN & TỪ KHÓA (${siteLabel})`,
     `Kỳ báo cáo: ${snapshot.current.startDate} đến ${snapshot.current.endDate} (Đối chiếu kỳ trước: ${snapshot.previous.startDate} đến ${snapshot.previous.endDate})`,
     '',
-    'Kính gửi: Ban Giám Đốc / Anh/Chị Quản lý,',
-    `Phòng Marketing xin trân trọng báo cáo tổng hợp tình hình tiếp cận tìm kiếm tự nhiên và hiệu quả chuyển đổi khách hàng trên ${siteLabel} trong kỳ vừa qua như sau:`,
-    '',
-    'I. TỔNG QUAN KẾT QUẢ ĐẠT ĐƯỢC',
-    `• Lượt nhấp từ tìm kiếm tự nhiên: đạt ${snapshot.current.totalClicks} lượt (kỳ trước đạt ${snapshot.previous.totalClicks} lượt, ${clicksTrendText}).`,
-    `• Lượt hiển thị trên trang kết quả tìm kiếm: đạt ${snapshot.current.totalImpressions} lượt (kỳ trước đạt ${snapshot.previous.totalImpressions} lượt, biến động ${snapshot.comparison.impressionsDeltaLabel}).`,
-    `• Tỷ lệ nhấp trung bình (CTR): đạt ${snapshot.current.overallCtrPct}% (kỳ trước đạt ${snapshot.previous.overallCtrPct}%, chênh lệch ${snapshot.comparison.ctrDeltaPctPoints >= 0 ? '+' : ''}${snapshot.comparison.ctrDeltaPctPoints} điểm phần trăm).`,
-    `• Hiệu quả chuyển đổi Lead: ghi nhận ${snapshot.leadsFromWebsiteCount} Lead hợp lệ từ website trong kỳ báo cáo.`,
+    'I. KẾT QUẢ CHÍNH & BIẾN ĐỘNG SO KỲ TRƯỚC',
+    `• Lượt nhấp tìm kiếm (Clicks): đạt ${snapshot.current.totalClicks} lượt (kỳ trước đạt ${snapshot.previous.totalClicks} lượt, ${clicksTrendText}) [Tham chiếu: snapshot.current.totalClicks, snapshot.comparison.clicksDelta].`,
+    `• Lượt hiển thị tìm kiếm (Impressions): đạt ${snapshot.current.totalImpressions} lượt (kỳ trước đạt ${snapshot.previous.totalImpressions} lượt, biến động ${snapshot.comparison.impressionsDeltaLabel}) [Tham chiếu: snapshot.current.totalImpressions].`,
+    `• Tỷ lệ nhấp tổng hợp (CTR): đạt ${snapshot.current.overallCtrPct}% (kỳ trước đạt ${snapshot.previous.overallCtrPct}%, chênh lệch ${snapshot.comparison.ctrDeltaPctPoints >= 0 ? '+' : ''}${snapshot.comparison.ctrDeltaPctPoints} điểm phần trăm) [Tham chiếu: snapshot.current.overallCtrPct].`,
+    `• Lead hợp lệ ghi nhận từ website trong kỳ: ${snapshot.leadsFromWebsiteCount} Lead (lưu ý: chỉ các Lead có tham số UTM/nguồn tìm kiếm mới khẳng định từ kênh Organic; phần thiếu UTM chưa đủ bằng chứng phân bổ kênh) [Tham chiếu: snapshot.leadsFromWebsiteCount].`,
     ...(snapshot.dataCompleteness.warnings.length > 0
-      ? ['', 'Lưu ý về độ đầy đủ dữ liệu:', ...snapshot.dataCompleteness.warnings.map((w) => `• ${w}`)]
+      ? ['', 'Lưu ý về độ mới và phần thiếu dữ liệu:', ...snapshot.dataCompleteness.warnings.map((w) => `• ${w}`)]
       : []),
     '',
-    'II. PHÂN TÍCH TỪ KHÓA & TRANG ĐÍCH NỔI BẬT',
-    '1. Nhóm từ khóa có lượt quan tâm cao nhất:',
-    topKwLines || '• Hiện chưa ghi nhận từ khóa chi tiết phát sinh lượt nhấp trong kỳ này.',
-    ...(topPageLines ? ['', '2. Các trang đích thu hút truy cập tốt nhất:', topPageLines] : []),
+    'II. TRANG ĐÍCH & TỪ KHÓA ĐÓNG GÓP CHÍNH',
+    '1. Nhóm từ khóa đóng góp lượt nhấp / hiển thị cao nhất:',
+    topKwLines || '• Chưa ghi nhận từ khóa chi tiết phát sinh lượt nhấp trong kỳ này [Tham chiếu: bảng topKeywords].',
+    ...(topPageLines ? ['', '2. Các trang đích đóng góp truy cập tìm kiếm cao nhất:', topPageLines] : []),
     '',
-    'III. ĐÁNH GIÁ CHUYÊN MÔN',
-    snapshot.current.overallCtrPct < 2
-      ? `• Tỷ lệ nhấp (CTR) hiện ở mức ${snapshot.current.overallCtrPct}% trên tổng ${snapshot.current.totalImpressions} lượt hiển thị cho thấy website có độ phủ tốt nhưng tiêu đề (Title) và mô tả (Meta Description) cần được tối ưu hấp dẫn hơn để cải thiện thứ hạng${snapshot.current.weightedAvgPosition ? ` (hiện trung bình ở vị trí ${snapshot.current.weightedAvgPosition})` : ''}.`
-      : `• Tỷ lệ nhấp (CTR) đạt ${snapshot.current.overallCtrPct}% cho thấy nội dung và tiêu đề hiện tại đang đáp ứng tốt nhu cầu tìm kiếm của khách hàng mục tiêu.`,
-    `• Tổng lượng Lead tiếp nhận đạt ${snapshot.leadsFromWebsiteCount} Lead trong kỳ, phản ánh mức độ chuyển đổi thực tế từ các trang đích sản phẩm và báo giá.`,
+    'III. GIẢ THUYẾT NGUYÊN NHÂN (CẦN KIỂM CHỨNG)',
+    snapshot.current.overallCtrPct < 3
+      ? `• Giả thuyết 1: CTR tổng hợp đạt ${snapshot.current.overallCtrPct}% trên ${snapshot.current.totalImpressions} lượt hiển thị cho thấy thẻ tiêu đề (Title) hoặc mô tả tìm kiếm (Meta Description) có thể chưa sát ý định tra cứu báo giá thực tế${snapshot.current.weightedAvgPosition ? ` ở vùng vị trí trung bình ${snapshot.current.weightedAvgPosition}` : ''} (chưa đủ bằng chứng khẳng định do thuật toán Google).`
+      : `• Giả thuyết 1: CTR đạt ${snapshot.current.overallCtrPct}% cho thấy thông điệp tiêu đề đang phù hợp nhóm truy vấn thương hiệu và sản phẩm cốt lõi; biến động lượt nhấp chủ yếu phụ thuộc nhu cầu tìm kiếm theo tuần.`,
+    snapshot.comparison.clicksDelta < 0
+      ? `• Giả thuyết 2: Mức giảm ${Math.abs(snapshot.comparison.clicksDelta)} lượt nhấp có thể đến từ độ trễ chốt sổ tự nhiên của Google Search Console ở những ngày cuối kỳ hoặc biến động hiển thị trên nhóm từ khóa ngách.`
+      : `• Giả thuyết 2: Mức tăng hoặc giữ nhịp lượt nhấp phản ánh các URL chủ lực đang giữ ổn định chỉ mục tìm kiếm.`,
     '',
-    'IV. ĐỀ XUẤT KẾ HOẠCH HÀNH ĐỘNG TIẾP THEO',
-    '1. Rà soát và viết lại tiêu đề, mô tả (Meta Description) cho các từ khóa có lượng hiển thị cao nhưng CTR còn thấp nhằm gia tăng lượt nhấp tự nhiên.',
-    '2. Cập nhật thêm hình ảnh công trình thực tế, thông số kỹ thuật và bảng giá tham khảo vào các trang đích top đầu để tăng thời gian xem trang.',
-    '3. Bổ sung nút gọi nhanh, Zalo và form nhận báo giá nổi bật trên các bài viết/trang sản phẩm có lưu lượng truy cập cao để tối đa hóa số Lead chuyển đổi.',
-    '',
-    'Trân trọng báo cáo!',
+    'IV. ƯU TIÊN CÔNG VIỆC & CÁCH KIỂM CHỨNG',
+    '1. Tối ưu Title & Meta Description cho nhóm từ khóa có hiển thị cao nhưng CTR thấp trong bảng Cơ hội; đưa trực tiếp các chủ đề đề xuất bên dưới vào Kế hoạch nội dung SEO.',
+    '2. Rà soát nội dung kỹ thuật, hình ảnh dự án thực tế và biểu mẫu liên hệ có gắn tham số nguồn trên các trang đích top đầu để đủ bằng chứng đối soát Lead.',
+    '3. Cách kiểm chứng: So sánh lại CTR, vị trí trung bình và lượt nhấp của đúng các URL/từ khóa đã chỉnh sửa trên Search Console sau 14 ngày kể từ thời điểm Google thu thập lại dữ liệu.',
   ]
     .filter((s) => s !== undefined)
     .join('\n');

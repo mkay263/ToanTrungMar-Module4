@@ -258,6 +258,10 @@ export interface LeadItemDto {
   contactName: string | null;
   companyName: string | null;
   projectName: string | null;
+  rawProjectName?: string | null;
+  hasMissingSubjectContent?: boolean;
+  technicalSourceMethod?: string | null;
+  needsManagerAttention?: boolean;
   phone: string;
   email: string | null;
   isPhoneNormalized: boolean;

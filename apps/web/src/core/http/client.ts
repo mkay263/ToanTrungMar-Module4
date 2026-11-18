@@ -16,17 +16,41 @@ interface CacheEntry {
   timestamp: number;
 }
 
-const GET_CACHE_FRESH_TTL_MS = 15_000;
-const GET_CACHE_STALE_TTL_MS = 60_000;
+const GET_CACHE_FRESH_TTL_MS = 30_000;
+const GET_CACHE_STALE_TTL_MS = 120_000;
 
 const apiGetCache = new Map<string, CacheEntry>();
 const inflightGetRequests = new Map<string, Promise<unknown>>();
+let currentCacheUserScope = 'anon';
+
+function buildScopedCacheKey(path: string): string {
+  return `${currentCacheUserScope}::${path}`;
+}
+
+/**
+ * C02 & C13 — Gắn phạm vi cache theo phiên người dùng + vai trò hiện tại.
+ * Khi đăng xuất, đổi tài khoản hoặc đổi quyền, toàn bộ cache nhạy cảm bị xóa tức thì.
+ */
+export function setApiCacheUserScope(userScopeKey: string | null): void {
+  const normalized = userScopeKey?.trim() || 'anon';
+  if (normalized !== currentCacheUserScope) {
+    apiGetCache.clear();
+    inflightGetRequests.clear();
+    currentCacheUserScope = normalized;
+  }
+}
+
+export function clearAllApiCache(): void {
+  apiGetCache.clear();
+  inflightGetRequests.clear();
+}
 
 export function peekApiCache<T>(path: string): T | null {
-  const entry = apiGetCache.get(path);
+  const scopedKey = buildScopedCacheKey(path);
+  const entry = apiGetCache.get(scopedKey);
   if (!entry) return null;
   if (Date.now() - entry.timestamp > GET_CACHE_STALE_TTL_MS) {
-    apiGetCache.delete(path);
+    apiGetCache.delete(scopedKey);
     return null;
   }
   return entry.data as T;
@@ -38,8 +62,9 @@ export function invalidateApiCache(pathPrefix?: string): void {
     inflightGetRequests.clear();
     return;
   }
-  for (const key of apiGetCache.keys()) {
-    if (key.startsWith(pathPrefix)) {
+  const scopedPrefix = buildScopedCacheKey(pathPrefix);
+  for (const key of Array.from(apiGetCache.keys())) {
+    if (key.startsWith(scopedPrefix)) {
       apiGetCache.delete(key);
     }
   }
@@ -113,8 +138,6 @@ export async function apiRequest<T>(
 ): Promise<T> {
   const method = options.method || 'GET';
 
-  // Any mutation (POST, PATCH, DELETE) immediately invalidates cached GET responses
-  // so subsequent reload calls always get 100% fresh state from the server.
   if (method !== 'GET') {
     invalidateApiCache();
     const result = await performNetworkFetch<T>(path, options);
@@ -122,49 +145,57 @@ export async function apiRequest<T>(
     return result;
   }
 
+  const scopedKey = buildScopedCacheKey(path);
+  const scopeSnapshot = currentCacheUserScope;
   const now = Date.now();
+
   if (!options.skipCache) {
-    const cached = apiGetCache.get(path);
+    const cached = apiGetCache.get(scopedKey);
     if (cached) {
       const age = now - cached.timestamp;
       if (age <= GET_CACHE_FRESH_TTL_MS) {
         return cached.data as T;
       }
       if (age <= GET_CACHE_STALE_TTL_MS) {
-        // Stale-while-revalidate: return cached data immediately and refresh silently
-        if (!inflightGetRequests.has(path)) {
-          const bgPromise = performNetworkFetch<T>(path, options)
+        if (!inflightGetRequests.has(scopedKey)) {
+          const bgPromise = performNetworkFetch<T>(path, { method: 'GET' })
             .then((freshData) => {
-              apiGetCache.set(path, { data: freshData, timestamp: Date.now() });
+              if (currentCacheUserScope === scopeSnapshot) {
+                apiGetCache.set(scopedKey, { data: freshData, timestamp: Date.now() });
+              }
               return freshData;
             })
             .catch(() => cached.data as T)
             .finally(() => {
-              inflightGetRequests.delete(path);
+              inflightGetRequests.delete(scopedKey);
             });
-          inflightGetRequests.set(path, bgPromise);
+          inflightGetRequests.set(scopedKey, bgPromise);
         }
         return cached.data as T;
       }
     }
   }
 
-  const existingInflight = inflightGetRequests.get(path);
-  if (existingInflight && !options.signal) {
+  const existingInflight = inflightGetRequests.get(scopedKey);
+  if (existingInflight && !options.signal && !options.skipCache) {
     return existingInflight as Promise<T>;
   }
 
   const requestPromise = performNetworkFetch<T>(path, options)
     .then((data) => {
-      apiGetCache.set(path, { data, timestamp: Date.now() });
+      if (currentCacheUserScope === scopeSnapshot && path !== '/api/v1/auth/me') {
+        apiGetCache.set(scopedKey, { data, timestamp: Date.now() });
+      }
       return data;
     })
     .finally(() => {
-      inflightGetRequests.delete(path);
+      if (!options.signal) {
+        inflightGetRequests.delete(scopedKey);
+      }
     });
 
   if (!options.signal) {
-    inflightGetRequests.set(path, requestPromise);
+    inflightGetRequests.set(scopedKey, requestPromise);
   }
 
   return requestPromise;

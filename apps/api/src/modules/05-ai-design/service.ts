@@ -10,6 +10,7 @@ import {
 } from '@toantrung/database';
 import {
   containsCustomerPiiInPrompt,
+  sanitizeProjectOrSubjectText,
   toMonetaryAmountDto,
   type AddProjectPhotoDto,
   type ApproveDesignVersionDto,
@@ -372,7 +373,7 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
   productOptions: Array<{ id: number; code: string; name: string; categoryGroup: string }>;
   providerStatus: ProviderStatusInfo;
 }> {
-  const isAnonymizedLead = ['MKT_STAFF', 'MKT_LEAD', 'ADS'].includes(user.roleCode);
+  const isAnonymizedLead = ['MKT_STAFF', 'MKT_LEAD', 'ADS', 'DESIGNER'].includes(user.roleCode);
   const requestScopeWhere =
     user.roleCode === 'SALES'
       ? {
@@ -426,7 +427,17 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
     const meta = parseProjectMetadata(r.installPositionJson);
 
     const assetVersions: DesignAssetVersionItemDto[] = r.assetVersions.map((v) => {
-      let parsedVerParams: { providerId?: string; modelUsed?: string } = {};
+      let parsedVerParams: {
+        providerId?: string;
+        modelUsed?: string;
+        referenceSitePhotoId?: string | null;
+        sourcePhotoId?: string | null;
+        referenceProductPhotoIds?: string[];
+        sourceVersionId?: number | null;
+        effectivePrompt?: string | null;
+        actualWidthPx?: number | null;
+        actualHeightPx?: number | null;
+      } = {};
       if (v.parametersJson) {
         try {
           parsedVerParams = JSON.parse(v.parametersJson);
@@ -434,6 +445,21 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
           parsedVerParams = {};
         }
       }
+      const storedFile = readPrivateBusinessFile(v.storageObjectKey);
+      const fileAvailable = Boolean(storedFile && storedFile.buffer.length > 0);
+      const measuredImg = fileAvailable && storedFile
+        ? validateGeneratedImageBuffer(storedFile.buffer)
+        : null;
+      const realWidthPx =
+        parsedVerParams.actualWidthPx ??
+        measuredImg?.widthPx ??
+        dims.bannerWidthPx ??
+        null;
+      const realHeightPx =
+        parsedVerParams.actualHeightPx ??
+        measuredImg?.heightPx ??
+        dims.bannerHeightPx ??
+        null;
       return {
         id: v.id,
         designRequestId: v.designRequestId,
@@ -443,11 +469,14 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
         modelUsed: parsedVerParams.modelUsed ?? v.aiUsageLog?.modelName ?? null,
         storageObjectKey: v.storageObjectKey,
         downloadUrl: `/api/v1/design/asset/${v.id}`,
-        mimeType: v.mimeType,
-        fileSizeBytes: v.fileSizeBytes,
-        widthPx: dims.bannerWidthPx ?? 1920,
-        heightPx: dims.bannerHeightPx ?? 1080,
-        aspectRatio: r.aspectRatio,
+        mimeType: measuredImg?.detectedMimeType || v.mimeType,
+        fileSizeBytes: storedFile ? storedFile.buffer.length : v.fileSizeBytes,
+        widthPx: realWidthPx,
+        heightPx: realHeightPx,
+        aspectRatio:
+          realWidthPx && realHeightPx
+            ? `${realWidthPx}×${realHeightPx}px (${r.aspectRatio || '16:9'})`
+            : r.aspectRatio,
         promptUsed: v.promptUsed,
         processingDurationMs: v.aiUsageLog?.durationMs ?? r.processingTimeMs,
         tokenUsed: v.aiUsageLog?.totalTokens ?? r.tokenCost,
@@ -458,6 +487,14 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
         isApprovedFinal: v.isApprovedFinal,
         uploadedByName: v.uploadedBy?.fullName || r.assignedDesigner?.fullName || 'Hệ thống AI',
         createdAt: v.createdAt.toISOString(),
+        fileAvailable,
+        referenceSitePhotoId:
+          parsedVerParams.referenceSitePhotoId ?? parsedVerParams.sourcePhotoId ?? null,
+        referenceProductPhotoIds: Array.isArray(parsedVerParams.referenceProductPhotoIds)
+          ? parsedVerParams.referenceProductPhotoIds
+          : [],
+        sourceVersionId: parsedVerParams.sourceVersionId ?? null,
+        effectivePrompt: parsedVerParams.effectivePrompt ?? v.promptUsed ?? null,
       };
     });
 
@@ -500,10 +537,14 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
             {
               id: `msg-ai-welcome-${r.id}`,
               role: 'assistant',
-              text: `Chào bạn! 👋 Mình là Google Gemini (kết nối trực tiếp từ API Key Gmail của bạn). Bạn có thể trò chuyện, hỏi đáp với mình giống hệt như trên Gemini web nhé!`,
+              text: providerStatus.isConfigured
+                ? 'Chào bạn! Trợ lý thiết kế AI đã kết nối khóa API. Bạn có thể chọn ảnh hiện trạng công trình, kiểm tra cấu hình cabinet LED chuẩn mm hoặc gửi yêu cầu tạo phối cảnh / banner.'
+                : 'Chào bạn! Hiện máy chủ chưa gắn khóa API tạo ảnh đám mây (GEMINI_API_KEY). Bạn vẫn có thể dựng phối cảnh trực tiếp trên ảnh công trình thật, kiểm tra tính toán kỹ thuật cabinet LED độc lập (mm) và lưu lịch sử phiên bản.',
               timestamp: r.createdAt.toISOString(),
               chatMode: 'consultant_free',
-              modelUsed: 'Google gemini-3.5-flash-lite (Gmail Free)',
+              modelUsed: providerStatus.isConfigured
+                ? providerStatus.activeModel
+                : 'Chế độ dựng kỹ thuật nội bộ (chưa kết nối khóa AI)',
               cost: '$0.00',
               status: 'success',
             },
@@ -529,7 +570,14 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       productSpec.productId = meta.productId;
     }
 
-    const projectName = meta.projectName || (r.lead ? r.lead.projectName || r.lead.companyName || 'Dự án LED' : (r.requestType === 'banner' ? 'Banner Quảng cáo LED' : 'Showroom LED'));
+    const cleanLeadProject = r.lead ? sanitizeProjectOrSubjectText(r.lead.projectName) : null;
+    const projectName =
+      meta.projectName ||
+      (r.lead
+        ? cleanLeadProject || r.lead.companyName || 'Dự án LED'
+        : r.requestType === 'banner'
+          ? 'Banner Quảng cáo LED'
+          : 'Showroom LED');
     const selectedPhoto = photos.find((p) => p.selected) || photos[0];
 
     return {
@@ -546,7 +594,7 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       leadProjectLabel: r.lead
         ? `${r.lead.leadCode} — ${
             isAnonymizedLead
-              ? r.lead.projectName || 'Dự án LED (Ẩn danh)'
+              ? cleanLeadProject || 'Dự án LED (Ẩn danh)'
               : r.lead.companyName || r.lead.contactName || 'Dự án LED'
           }`
         : null,
@@ -592,13 +640,16 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
 
   return {
     requests,
-    leadOptions: leads.map((l) => ({
-      id: l.id,
-      leadCode: l.leadCode,
-      label: isAnonymizedLead
-        ? `${l.leadCode} · Khách hàng ẩn danh (${l.projectName || 'Dự án LED'})`
-        : `${l.leadCode} · ${l.companyName || l.contactName || 'Khách hàng'} (${l.projectName || 'Dự án LED'})`,
-    })),
+    leadOptions: leads.map((l) => {
+      const projLabel = sanitizeProjectOrSubjectText(l.projectName) || 'Dự án LED';
+      return {
+        id: l.id,
+        leadCode: l.leadCode,
+        label: isAnonymizedLead
+          ? `${l.leadCode} · Khách hàng ẩn danh (${projLabel})`
+          : `${l.leadCode} · ${l.companyName || l.contactName || 'Khách hàng'} (${projLabel})`,
+      };
+    }),
     productOptions: products.map((p) => ({
       id: p.id,
       code: p.productCode,
@@ -2162,6 +2213,8 @@ export async function processChatDesignRequest(
     status: 'success',
   });
 
+  const savedFileMeta = validateGeneratedImageBuffer(finalBufferToSave);
+
   const createdVersion = await createDesignAssetVersionSafe(requestId, (versionNumber) => ({
     designRequestId: requestId,
     versionNumber,
@@ -2174,7 +2227,13 @@ export async function processChatDesignRequest(
       regeneratedFromVersion: existing.version,
       sourceOrigin: sourceImageOrigin,
       sourcePhotoId: activePhotoObj?.id ?? null,
+      referenceSitePhotoId: activePhotoObj?.id ?? null,
+      referenceProductPhotoIds: productReferencePhotoObjs.map((p) => p.id),
       sourceVersionId: sourceVersionObj?.id ?? null,
+      effectivePrompt: cleanImagePrompt,
+      actualWidthPx: savedFileMeta.widthPx,
+      actualHeightPx: savedFileMeta.heightPx,
+      sha256: savedFile.sha256,
       compositingMode: effectiveCompositingMode,
       placementQuad: effectiveQuad,
       screenDimensionsMm: {
@@ -2970,4 +3029,113 @@ export async function uploadDesignerFinalRender(
     versionId: finalVer.id,
     versionNumber: finalVer.versionNumber,
   };
+}
+
+const activeDesignRetryLocks = new Set<number>();
+
+/**
+ * Đánh giá thông số kỹ thuật LED, cấu hình ghép cabinet chuẩn mm và danh mục vật tư BOM hoàn toàn độc lập ở phía Server.
+ */
+export async function evaluateProjectTechnicalBom(
+  actor: SessionUserDto,
+  requestId: number,
+  overrides?: {
+    widthMm?: number | null;
+    heightMm?: number | null;
+    pixelPitch?: string | null;
+    cabinetModelCode?: string | null;
+    screenStyle?: 'flat' | 'curved' | 'corner_90';
+  }
+) {
+  await assertCanAccessDesignProject(actor, requestId);
+  const existing = await prisma.designRequest.findUnique({ where: { id: requestId } });
+  if (!existing) {
+    throw new Error('Không tìm thấy dự án thiết kế.');
+  }
+  const meta = parseProjectMetadata(existing.installPositionJson);
+  const dims = parseDimensions(existing.screenDimensions);
+  const widthMm =
+    overrides?.widthMm !== undefined
+      ? overrides.widthMm
+      : meta.screenWidthM
+        ? Math.round(meta.screenWidthM * 1000)
+        : dims.screenWidthM
+          ? Math.round(dims.screenWidthM * 1000)
+          : null;
+  const heightMm =
+    overrides?.heightMm !== undefined
+      ? overrides.heightMm
+      : meta.screenHeightM
+        ? Math.round(meta.screenHeightM * 1000)
+        : dims.screenHeightM
+          ? Math.round(dims.screenHeightM * 1000)
+          : null;
+  const pixelPitch =
+    overrides?.pixelPitch ?? meta.pixelPitch ?? meta.productSpec?.pixelPitch ?? 'P2.5';
+  const cabinetModelCode = overrides?.cabinetModelCode ?? meta.cabinetModelCode ?? 'CAB_640_480';
+  const screenStyle = overrides?.screenStyle ?? meta.screenStyle ?? 'flat';
+
+  const evaluation = evaluateLedTechnicalConfig({
+    widthMm,
+    heightMm,
+    pixelPitch,
+    cabinetModelCode,
+    screenStyle,
+  });
+
+  return {
+    requestId,
+    evaluation,
+  };
+}
+
+/**
+ * Thử lại an toàn (Singleflight + Idempotent) lệnh tạo ảnh bị lỗi / quá thời gian gần nhất của dự án.
+ */
+export async function retryLastFailedDesignGeneration(
+  actor: SessionUserDto,
+  requestId: number
+) {
+  await assertCanAccessDesignProject(actor, requestId);
+  if (activeDesignRetryLocks.has(requestId)) {
+    throw new Error('Dự án đang có tiến trình kết xuất chạy nền, vui lòng chờ hoàn tất.');
+  }
+
+  activeDesignRetryLocks.add(requestId);
+  try {
+    const existing = await prisma.designRequest.findUnique({ where: { id: requestId } });
+    if (!existing) {
+      throw new Error('Không tìm thấy dự án thiết kế.');
+    }
+    const meta = parseProjectMetadata(existing.installPositionJson);
+    const messages = meta.chatMessages || [];
+    let promptToRetry: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'assistant' && (m.status === 'failed' || m.status === 'timeout')) {
+        const prevUser = messages
+          .slice(0, i)
+          .reverse()
+          .find((u) => u.role === 'user');
+        if (prevUser?.text) {
+          promptToRetry = prevUser.text;
+          break;
+        }
+      }
+    }
+    if (!promptToRetry) {
+      promptToRetry = existing.prompt?.startsWith('@')
+        ? existing.prompt
+        : `@TaoAnh: ${existing.prompt || 'Ghép phối cảnh màn hình LED theo thông số hiện tại'}`;
+    }
+
+    return await processChatDesignRequest(actor, requestId, {
+      expectedVersion: existing.version,
+      prompt: promptToRetry,
+      quality: 'draft',
+      idempotencyKey: `retry-design-${requestId}-${existing.version}-${Date.now()}`,
+    });
+  } finally {
+    activeDesignRetryLocks.delete(requestId);
+  }
 }

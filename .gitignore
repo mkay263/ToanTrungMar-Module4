@@ -11,6 +11,8 @@ coverage/
 *.db-journal
 *.sqlite
 *.sqlite-journal
+*.dump
+*.sql.bak
 /storage/
 /storage_independent_v2/
 /storage*/

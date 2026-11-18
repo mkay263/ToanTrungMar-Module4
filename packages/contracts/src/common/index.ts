@@ -181,6 +181,7 @@ export interface SessionUserDto {
   email: string;
   phone: string | null;
   avatarUrl: string | null;
+  coverUrl?: string | null;
   roleCode: RoleCode;
   roleName: string;
   department: DepartmentCode;
@@ -206,6 +207,8 @@ export const UpdateProfileSchema = z
       .nullable()
       .optional(),
     removeAvatar: z.boolean().optional(),
+    removeCover: z.boolean().optional(),
+    coverPreset: z.string().trim().max(120).optional(),
   })
   .strict();
 
@@ -259,6 +262,7 @@ export interface AdminUserDto {
   email: string;
   phone: string | null;
   avatarUrl: string | null;
+  coverUrl?: string | null;
   roleId: number;
   roleCode: RoleCode;
   roleName: string;
@@ -266,6 +270,17 @@ export interface AdminUserDto {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TeamDirectoryMemberDto {
+  id: number;
+  fullName: string;
+  roleCode: RoleCode;
+  roleName: string;
+  department: DepartmentCode;
+  avatarUrl: string | null;
+  coverUrl: string | null;
+  isActive: boolean;
 }
 
 export const CreateUserSchema = z.object({
@@ -444,11 +459,13 @@ export function isL2Valid(lead: { isSpam: boolean }): boolean {
 export function isL3Effective(lead: {
   isSpam: boolean;
   spamAdsExclusionStatus?: string | null;
+  tracking?: { isRepeatLead?: boolean | null } | null;
 }): boolean {
   return (
-    !lead.isSpam ||
-    (lead.spamAdsExclusionStatus !== 'auto_excluded' &&
-      lead.spamAdsExclusionStatus !== 'confirmed_excluded')
+    !lead.isSpam &&
+    lead.spamAdsExclusionStatus !== 'auto_excluded' &&
+    lead.spamAdsExclusionStatus !== 'confirmed_excluded' &&
+    !lead.tracking?.isRepeatLead
   );
 }
 
@@ -458,13 +475,13 @@ export function getL2PrismaWhere() {
 
 export function getL3PrismaWhere() {
   return {
+    isSpam: false,
+    spamAdsExclusionStatus: {
+      notIn: ['auto_excluded', 'confirmed_excluded'],
+    },
     OR: [
-      { isSpam: false },
-      {
-        spamAdsExclusionStatus: {
-          notIn: ['auto_excluded', 'confirmed_excluded'],
-        },
-      },
+      { tracking: { is: null } },
+      { tracking: { isRepeatLead: false } },
     ],
   };
 }
@@ -477,4 +494,5 @@ export * from '../05-ai-design';
 
 
 
+export * from './ui-vocabulary';
 export * from './dashboard-spec';
