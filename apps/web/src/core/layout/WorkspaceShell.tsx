@@ -820,7 +820,10 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               }}
               placeholder={`Tìm kiếm trong ${currentBreadcrumb}...`}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') setMobileSearchOpen(false);
+                if (e.key === 'Enter') {
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+                  setMobileSearchOpen(false);
+                }
               }}
               className="flex-1 text-xs bg-transparent outline-none text-slate-800"
             />

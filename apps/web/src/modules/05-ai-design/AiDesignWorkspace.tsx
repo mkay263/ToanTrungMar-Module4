@@ -1703,10 +1703,9 @@ export function AiDesignWorkspace() {
       ctx.restore();
 
       // 2. Clip inside polygon & draw vivid LED screen content
-      const latestPosterVer = (currentProject?.assetVersions || [])
-        .slice()
-        .reverse()
-        .find((v) => /poster|banner|nutifood/i.test(v.promptUsed || ''));
+      const latestPosterVer = (currentProject?.assetVersions || []).findLast((v) =>
+        /poster|banner|nutifood/i.test(v.promptUsed || ''),
+      );
 
       let mappedPosterImg: HTMLImageElement | null = null;
       if (effectiveTheme === 'mapped_poster') {
@@ -6206,7 +6205,11 @@ export function AiDesignWorkspace() {
                 </div>
 
                 <form onSubmit={handleSendChatEdit} className="relative">
+                  <label htmlFor="ai-chat-prompt-input" className="sr-only">
+                    Nhập lệnh hoặc câu hỏi cho trợ lý thiết kế AI
+                  </label>
                   <textarea
+                    id="ai-chat-prompt-input"
                     rows={2}
                     data-testid="ai-chat-prompt-input"
                     value={chatPrompt}
@@ -6214,6 +6217,7 @@ export function AiDesignWorkspace() {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
+                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                         void executeChatSubmit(chatPrompt);
                       }
                     }}

@@ -76,6 +76,39 @@ export function ReportsWorkspace() {
     channel: null,
     campaign: null,
   });
+  const briefDialogRef = useRef<HTMLDialogElement | null>(null);
+
+  useEffect(() => {
+    const dialog = briefDialogRef.current;
+    if (!dialog) return;
+    if (briefModalOpen) {
+      if (!dialog.open) {
+        dialog.showModal();
+      }
+    } else if (dialog.open) {
+      dialog.close();
+    }
+  }, [briefModalOpen]);
+
+  useEffect(() => {
+    const dialog = briefDialogRef.current;
+    if (!dialog || typeof HTMLDialogElement === 'undefined') return;
+    if ('closedBy' in HTMLDialogElement.prototype) return;
+
+    const handleBackdropClick = (event: MouseEvent) => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      const isDialogContent =
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width;
+      if (isDialogContent) return;
+      dialog.close();
+    };
+    dialog.addEventListener('click', handleBackdropClick);
+    return () => dialog.removeEventListener('click', handleBackdropClick);
+  }, []);
 
   const queryUrl = useMemo(() => {
     const params = new URLSearchParams({
@@ -337,7 +370,7 @@ export function ReportsWorkspace() {
       (r) => !searchTerm || r.website.toLowerCase().includes(searchTerm),
     );
     const mult = sortDir === 'asc' ? 1 : -1;
-    return [...list].sort((a, b) => {
+    return list.toSorted((a, b) => {
       if (Boolean(a.isUnclassifiedWebsite) !== Boolean(b.isUnclassifiedWebsite)) {
         return a.isUnclassifiedWebsite ? 1 : -1;
       }
@@ -354,7 +387,7 @@ export function ReportsWorkspace() {
       (r) => !searchTerm || r.channel.toLowerCase().includes(searchTerm),
     );
     const mult = sortDir === 'asc' ? 1 : -1;
-    return [...list].sort((a, b) => {
+    return list.toSorted((a, b) => {
       if (sortCol === 'lead') return mult * (a.leadCount - b.leadCount);
       if (sortCol === 'quoted') return mult * (a.quotedCount - b.quotedCount);
       if (sortCol === 'won') return mult * (a.wonCount - b.wonCount);
@@ -370,7 +403,7 @@ export function ReportsWorkspace() {
         (r.websiteDomain || '').toLowerCase().includes(searchTerm),
     );
     const mult = sortDir === 'asc' ? 1 : -1;
-    return [...list].sort((a, b) => {
+    return list.toSorted((a, b) => {
       if (sortCol === 'lead') return mult * (a.receivedLeadCount - b.receivedLeadCount);
       if (sortCol === 'adCost') return mult * ((a.adCost ?? -1) - (b.adCost ?? -1));
       if (sortCol === 'cpl') return mult * ((a.costPerValidAdLead ?? 9e12) - (b.costPerValidAdLead ?? 9e12));
@@ -381,7 +414,7 @@ export function ReportsWorkspace() {
   }, [data?.tables.byCampaign, searchTerm, sortCol, sortDir]);
 
   const channelChartRows = useMemo(() => {
-    return [...(data?.tables.byChannel || [])].sort((a, b) => b.validCount - a.validCount).slice(0, 6);
+    return (data?.tables.byChannel || []).toSorted((a, b) => b.validCount - a.validCount).slice(0, 6);
   }, [data?.tables.byChannel]);
 
   const maxChannelValid = useMemo(() => {
@@ -1550,125 +1583,143 @@ export function ReportsWorkspace() {
         </>
       ) : null}
 
-      {/* Modal gửi Brief Thiết kế từ /reports dành cho Marketing / Ads */}
-      {briefModalOpen && (
-        <div
-          className="fixed inset-0 z-50 bg-slate-900/45 flex items-center justify-center p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Tạo Brief thiết kế cho team Studio"
-        >
-          <div className="w-full max-w-lg rounded-2xl bg-white border border-slate-200 shadow-xl overflow-hidden">
-            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <div>
-                <h3 className="text-sm font-bold text-[#0F172A]">Tạo Brief Thiết kế gửi Studio</h3>
-                <p className="text-xs text-slate-500">
-                  Kèm snapshot chỉ số hiện tại ({data?.scope.websiteLabel} · {data?.scope.startDate} → {data?.scope.endDate})
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setBriefModalOpen(false)}
-                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/70"
-                aria-label="Đóng"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <form onSubmit={handleSubmitMarketingBrief} className="p-5 space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Tiêu đề dự án / ấn phẩm *</label>
-                <input
-                  type="text"
-                  required
-                  value={briefTitle}
-                  onChange={(e) => setBriefTitle(e.target.value)}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                />
-              </div>
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Mục tiêu chiến dịch</label>
-                <textarea
-                  rows={2}
-                  value={briefObjective}
-                  onChange={(e) => setBriefObjective(e.target.value)}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
-                />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Kênh sử dụng</label>
-                  <input
-                    type="text"
-                    value={briefChannel}
-                    onChange={(e) => setBriefChannel(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Định dạng &amp; kích thước</label>
-                  <input
-                    type="text"
-                    value={briefFormat}
-                    onChange={(e) => setBriefFormat(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
-                  />
-                </div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Headline chính</label>
-                  <input
-                    type="text"
-                    value={briefHeadline}
-                    onChange={(e) => setBriefHeadline(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">CTA</label>
-                  <input
-                    type="text"
-                    value={briefCta}
-                    onChange={(e) => setBriefCta(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
-                  />
-                </div>
-              </div>
-
-              {briefErrorMsg && (
-                <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-700">
-                  {briefErrorMsg}
-                </div>
-              )}
-              {briefResultMsg && (
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-emerald-800 flex items-center gap-2">
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span>{briefResultMsg}</span>
-                </div>
-              )}
-
-              <div className="pt-2 flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setBriefModalOpen(false)}
-                  className="h-9 px-3 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold"
-                >
-                  Đóng
-                </button>
-                <button
-                  type="submit"
-                  disabled={briefSubmitting}
-                  className="h-9 px-4 rounded-lg bg-[#0B1D48] hover:bg-[#172D6E] text-white font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{briefSubmitting ? 'Đang gửi brief...' : 'Gửi brief sang Thiết kế AI'}</span>
-                </button>
-              </div>
-            </form>
+      {/* Modal gửi Brief Thiết kế từ /reports dành cho Marketing / Ads (Native <dialog> với light-dismiss & overscroll containment) */}
+      <dialog
+        ref={briefDialogRef}
+        aria-labelledby="reports-brief-dialog-title"
+        onClose={() => setBriefModalOpen(false)}
+        {...({ closedby: 'any' } as Record<string, unknown>)}
+        className="w-full max-w-lg rounded-2xl bg-white border border-slate-200 shadow-2xl p-0 backdrop:bg-slate-900/45 backdrop:backdrop-blur-xs overscroll-contain"
+      >
+        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+          <div>
+            <h2 id="reports-brief-dialog-title" className="text-sm font-bold text-[#0F172A]">
+              Tạo Brief Thiết kế gửi Studio
+            </h2>
+            <p className="text-xs text-slate-500">
+              Kèm snapshot chỉ số hiện tại ({data?.scope.websiteLabel} · {data?.scope.startDate} → {data?.scope.endDate})
+            </p>
           </div>
+          <button
+            type="button"
+            onClick={() => briefDialogRef.current?.close()}
+            className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/70"
+            aria-label="Đóng"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
-      )}
+        <form onSubmit={handleSubmitMarketingBrief} className="p-5 space-y-3 text-xs">
+          <div>
+            <label htmlFor="reports-brief-title" className="block font-semibold text-slate-700 mb-1">
+              Tiêu đề dự án / ấn phẩm *
+            </label>
+            <input
+              id="reports-brief-title"
+              type="text"
+              required
+              autoFocus
+              value={briefTitle}
+              onChange={(e) => setBriefTitle(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label htmlFor="reports-brief-objective" className="block font-semibold text-slate-700 mb-1">
+              Mục tiêu chiến dịch
+            </label>
+            <textarea
+              id="reports-brief-objective"
+              rows={2}
+              value={briefObjective}
+              onChange={(e) => setBriefObjective(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="reports-brief-channel" className="block font-semibold text-slate-700 mb-1">
+                Kênh sử dụng
+              </label>
+              <input
+                id="reports-brief-channel"
+                type="text"
+                value={briefChannel}
+                onChange={(e) => setBriefChannel(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+              />
+            </div>
+            <div>
+              <label htmlFor="reports-brief-format" className="block font-semibold text-slate-700 mb-1">
+                Định dạng &amp; kích thước
+              </label>
+              <input
+                id="reports-brief-format"
+                type="text"
+                value={briefFormat}
+                onChange={(e) => setBriefFormat(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+              />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label htmlFor="reports-brief-headline" className="block font-semibold text-slate-700 mb-1">
+                Headline chính
+              </label>
+              <input
+                id="reports-brief-headline"
+                type="text"
+                value={briefHeadline}
+                onChange={(e) => setBriefHeadline(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+              />
+            </div>
+            <div>
+              <label htmlFor="reports-brief-cta" className="block font-semibold text-slate-700 mb-1">
+                CTA
+              </label>
+              <input
+                id="reports-brief-cta"
+                type="text"
+                value={briefCta}
+                onChange={(e) => setBriefCta(e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs"
+              />
+            </div>
+          </div>
+
+          {briefErrorMsg && (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-2.5 text-red-700">
+              {briefErrorMsg}
+            </div>
+          )}
+          {briefResultMsg && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-2.5 text-emerald-800 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{briefResultMsg}</span>
+            </div>
+          )}
+
+          <div className="pt-2 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => briefDialogRef.current?.close()}
+              className="h-9 px-3 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold"
+            >
+              Đóng
+            </button>
+            <button
+              type="submit"
+              disabled={briefSubmitting}
+              className="h-9 px-4 rounded-lg bg-[#0B1D48] hover:bg-[#172D6E] text-white font-semibold inline-flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{briefSubmitting ? 'Đang gửi brief...' : 'Gửi brief sang Thiết kế AI'}</span>
+            </button>
+          </div>
+        </form>
+      </dialog>
     </div>
   );
 }

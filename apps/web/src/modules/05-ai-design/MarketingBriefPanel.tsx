@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useId, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   AlertTriangle,
@@ -63,6 +63,7 @@ export function MarketingBriefPanel({
   onComposePromptFromBrief,
 }: MarketingBriefPanelProps) {
   const [expandedBrief, setExpandedBrief] = useState<boolean>(false);
+  const fieldPrefixId = useId();
 
   const recommendedForTask = modelRegistry?.defaultModelByTask?.[activeTaskCode];
 
@@ -134,7 +135,7 @@ export function MarketingBriefPanel({
               onClick={() => onChangeTaskCode(code)}
               className={`text-left rounded-xl border px-2.5 py-2 transition ${
                 active
-                  ? 'border-[#1E3A8A] bg-blue-50/80 text-[#0F172A] shadow-2xs'
+                  ? 'border-[#1E3A8A] bg-blue-50/90 text-[#0F172A] shadow-2xs ring-1 ring-[#1E3A8A]/20'
                   : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
               }`}
               title={meta.subtitle}
@@ -144,11 +145,16 @@ export function MarketingBriefPanel({
           );
         })}
       </div>
+      <div className="rounded-lg bg-blue-50/60 border border-blue-100 px-2.5 py-1.5 text-[11px] text-slate-700">
+        {DESIGN_TASK_LABELS[activeTaskCode]?.subtitle}
+      </div>
 
       {/* Active Task Model Override (Filtered & Verified Status) */}
       <div className="rounded-xl bg-slate-50 border border-slate-200 p-2 space-y-1.5">
         <div className="flex items-center justify-between text-[11px]">
-          <span className="font-semibold text-slate-600">Model cho tác vụ này:</span>
+          <label htmlFor={`${fieldPrefixId}-model-select`} className="font-semibold text-slate-600">
+            Model cho tác vụ này:
+          </label>
           {recommendedForTask && (
             <button
               type="button"
@@ -162,6 +168,7 @@ export function MarketingBriefPanel({
           )}
         </div>
         <select
+          id={`${fieldPrefixId}-model-select`}
           value={`${selectedProviderId}::${selectedModelId}`}
           onChange={(e) => {
             const [pid, mid] = e.target.value.split('::');
@@ -238,8 +245,11 @@ export function MarketingBriefPanel({
         {expandedBrief && (
           <div className="mt-2 space-y-2 pt-1">
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Mục tiêu</label>
+              <label htmlFor={`${fieldPrefixId}-objective`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                Mục tiêu
+              </label>
               <textarea
+                id={`${fieldPrefixId}-objective`}
                 rows={2}
                 value={brief.objective || ''}
                 onChange={(e) => onChangeBrief({ ...brief, objective: e.target.value })}
@@ -250,8 +260,11 @@ export function MarketingBriefPanel({
 
             <div className="grid grid-cols-2 gap-1.5">
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Website</label>
+                <label htmlFor={`${fieldPrefixId}-website`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                  Website
+                </label>
                 <select
+                  id={`${fieldPrefixId}-website`}
                   value={brief.websiteDomain || ''}
                   onChange={(e) => {
                     const dom = e.target.value;
@@ -272,8 +285,11 @@ export function MarketingBriefPanel({
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Kênh</label>
+                <label htmlFor={`${fieldPrefixId}-channel`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                  Kênh
+                </label>
                 <input
+                  id={`${fieldPrefixId}-channel`}
                   type="text"
                   value={brief.targetChannel || ''}
                   onChange={(e) => onChangeBrief({ ...brief, targetChannel: e.target.value })}
@@ -284,8 +300,11 @@ export function MarketingBriefPanel({
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Kích thước mục tiêu</label>
+              <label htmlFor={`${fieldPrefixId}-size`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                Kích thước mục tiêu
+              </label>
               <select
+                id={`${fieldPrefixId}-size`}
                 value={`${outW}x${outH}`}
                 onChange={(e) => {
                   const [w, h] = e.target.value.split('x').map(Number);
@@ -311,8 +330,11 @@ export function MarketingBriefPanel({
 
             <div className="grid grid-cols-2 gap-1.5">
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Headline</label>
+                <label htmlFor={`${fieldPrefixId}-headline`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                  Headline
+                </label>
                 <input
+                  id={`${fieldPrefixId}-headline`}
                   type="text"
                   value={brief.headlineText || ''}
                   onChange={(e) => onChangeBrief({ ...brief, headlineText: e.target.value })}
@@ -320,8 +342,11 @@ export function MarketingBriefPanel({
                 />
               </div>
               <div>
-                <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">CTA</label>
+                <label htmlFor={`${fieldPrefixId}-cta`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                  CTA
+                </label>
                 <input
+                  id={`${fieldPrefixId}-cta`}
                   type="text"
                   value={brief.ctaText || ''}
                   onChange={(e) => onChangeBrief({ ...brief, ctaText: e.target.value })}
@@ -333,8 +358,11 @@ export function MarketingBriefPanel({
             {activeTaskCode === 'design_edit' && (
               <div className="grid grid-cols-2 gap-1.5">
                 <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Phần giữ nguyên</label>
+                  <label htmlFor={`${fieldPrefixId}-keep`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                    Phần giữ nguyên
+                  </label>
                   <input
+                    id={`${fieldPrefixId}-keep`}
                     type="text"
                     value={brief.keepElementsNote || ''}
                     onChange={(e) => onChangeBrief({ ...brief, keepElementsNote: e.target.value })}
@@ -343,8 +371,11 @@ export function MarketingBriefPanel({
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">Phần cần sửa</label>
+                  <label htmlFor={`${fieldPrefixId}-change`} className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                    Phần cần sửa
+                  </label>
                   <input
+                    id={`${fieldPrefixId}-change`}
                     type="text"
                     value={brief.changeElementsNote || ''}
                     onChange={(e) => onChangeBrief({ ...brief, changeElementsNote: e.target.value })}

@@ -113,8 +113,8 @@ export function LeadActivityTimeline({ activities }: { activities: LeadActivityD
     const now = Date.now();
     const q = searchText.trim().toLowerCase();
 
-    return [...activities]
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    return activities
+      .toSorted((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .filter((act) => {
         if (actionFilter !== 'ALL') {
           if (actionFilter === 'spam_risk') {

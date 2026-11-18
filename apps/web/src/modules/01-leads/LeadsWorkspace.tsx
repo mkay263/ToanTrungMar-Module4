@@ -5569,6 +5569,7 @@ export function LeadsWorkspace() {
                                     onKeyDown={(e) => {
                                       if (e.key === 'Enter') {
                                         e.preventDefault();
+                                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                                         const trimmed = editCustomServiceDraft.trim();
                                         if (!trimmed) return;
                                         setEditCustomServiceItems((prev) =>

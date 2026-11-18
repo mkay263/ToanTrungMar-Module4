@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   FlaskConical,
@@ -60,8 +60,39 @@ export function ModelRegistryModal({
   const [providerFilter, setProviderFilter] = useState<string>('all');
   const [probeMessage, setProbeMessage] = useState<string | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
 
-  if (!open) return null;
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (open) {
+      if (!dialog.open) {
+        dialog.showModal();
+      }
+    } else if (dialog.open) {
+      dialog.close();
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog || typeof HTMLDialogElement === 'undefined') return;
+    if ('closedBy' in HTMLDialogElement.prototype) return;
+
+    const handleBackdropClick = (event: MouseEvent) => {
+      if (event.target !== dialog) return;
+      const rect = dialog.getBoundingClientRect();
+      const isDialogContent =
+        rect.top <= event.clientY &&
+        event.clientY <= rect.top + rect.height &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.left + rect.width;
+      if (isDialogContent) return;
+      dialog.close();
+    };
+    dialog.addEventListener('click', handleBackdropClick);
+    return () => dialog.removeEventListener('click', handleBackdropClick);
+  }, []);
 
   const handleRefreshRegistry = async () => {
     setRefreshing(true);
@@ -136,16 +167,17 @@ export function ModelRegistryModal({
   );
 
   return (
-    <div
-      className="fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-3 sm:p-5"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Danh mục & Năng lực Model AI (Registry)"
+    <dialog
+      ref={dialogRef}
+      aria-labelledby="model-registry-dialog-title"
+      onClose={onClose}
+      {...({ closedby: 'any' } as Record<string, unknown>)}
+      className="w-full max-w-5xl max-h-[88vh] rounded-2xl bg-white border border-slate-200 shadow-2xl p-0 overflow-hidden backdrop:bg-slate-900/50 backdrop:backdrop-blur-xs overscroll-contain"
     >
-      <div className="w-full max-w-5xl max-h-[88vh] flex flex-col rounded-2xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+      <div className="flex flex-col max-h-[88vh]">
         <div className="px-5 py-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50">
           <div>
-            <h2 className="text-sm font-bold text-[#0F172A] flex items-center gap-2">
+            <h2 id="model-registry-dialog-title" className="text-sm font-bold text-[#0F172A] flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-[#1E3A8A]" />
               <span>Quản lý Provider &amp; Năng lực Model AI (Server Registry)</span>
             </h2>
@@ -172,7 +204,8 @@ export function ModelRegistryModal({
             )}
             <button
               type="button"
-              onClick={onClose}
+              autoFocus
+              onClick={() => dialogRef.current?.close()}
               className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200"
               aria-label="Đóng"
             >
@@ -234,7 +267,7 @@ export function ModelRegistryModal({
           {/* Model Capabilities Table */}
           <div className="border border-slate-200 rounded-xl overflow-hidden">
             <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
-              <span className="font-bold text-slate-800">
+              <span id="model-registry-table-title" className="font-bold text-slate-800">
                 Danh sách Model khả dụng ({filteredModels.length})
               </span>
               {providerFilter !== 'all' && (
@@ -247,19 +280,24 @@ export function ModelRegistryModal({
                 </button>
               )}
             </div>
-            <div className="overflow-x-auto">
+            <div
+              tabIndex={0}
+              role="region"
+              aria-labelledby="model-registry-table-title"
+              className="overflow-auto max-h-[48vh]"
+            >
               <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-slate-50/70 text-[11px] uppercase text-slate-600 border-b border-slate-200">
+                <thead className="sticky top-0 z-10 bg-slate-50 text-[11px] uppercase text-slate-600 border-b border-slate-200">
                   <tr>
-                    <th className="py-2 px-3">Provider / Model</th>
-                    <th className="py-2 px-2">Tác vụ hỗ trợ &amp; Trạng thái kiểm chứng</th>
-                    <th className="py-2 px-3">Bằng chứng &amp; Ghi chú</th>
+                    <th scope="col" className="py-2 px-3">Provider / Model</th>
+                    <th scope="col" className="py-2 px-2">Tác vụ hỗ trợ &amp; Trạng thái kiểm chứng</th>
+                    <th scope="col" className="py-2 px-3">Bằng chứng &amp; Ghi chú</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredModels.map((m) => (
                     <tr key={`${m.providerId}-${m.modelId}`} className="hover:bg-slate-50/70">
-                      <td className="py-2.5 px-3 align-top min-w-[200px]">
+                      <th scope="row" className="py-2.5 px-3 align-top min-w-[200px] font-normal sticky left-0 bg-white">
                         <div className="font-bold text-slate-900">{m.modelId}</div>
                         <div className="text-[11px] text-slate-500">
                           {m.providerId} · {m.listedInCatalog ? 'Catalog API' : 'Manual/Local'}
@@ -270,7 +308,7 @@ export function ModelRegistryModal({
                             <span>{m.reportedAliasWarning}</span>
                           </div>
                         )}
-                      </td>
+                      </th>
                       <td className="py-2.5 px-2 align-top">
                         <div className="flex flex-wrap gap-1.5">
                           {TASK_KEYS.map((tk) => {
@@ -322,6 +360,6 @@ export function ModelRegistryModal({
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
