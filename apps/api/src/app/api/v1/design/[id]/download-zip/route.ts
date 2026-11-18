@@ -71,6 +71,14 @@ export async function GET(
     projectName?: string;
     photos?: Array<{ id: string; name: string; url: string; storageObjectKey?: string }>;
     productSpec?: unknown;
+    taskCode?: string | null;
+    websiteId?: string | null;
+    websiteDomain?: string | null;
+    campaignId?: string | null;
+    campaignName?: string | null;
+    contentId?: number | null;
+    sourceModule?: string | null;
+    designBrief?: Record<string, unknown> | null;
   } = {};
   try {
     if (row.installPositionJson) {
@@ -162,28 +170,61 @@ export async function GET(
     );
   }
 
-  zip.addFile(
-    'Thong_So_Du_An.json',
-    JSON.stringify(
-      {
-        projectId: row.id,
-        projectName: meta.projectName || `Dự án #${row.id}`,
-        leadCode: row.lead?.leadCode || null,
-        requestType: row.requestType,
-        ledCategory: row.ledCategory,
-        screenDimensions: row.screenDimensions,
-        aspectRatio: row.aspectRatio,
-        status: row.designStatus,
-        productSpec: meta.productSpec || null,
-        realFilesIncluded,
-        skippedMissingEntries,
-        exportedBy: auth.user.fullName,
-        exportedAt: new Date().toISOString(),
-      },
-      null,
-      2
-    )
-  );
+  const versionLineage = row.assetVersions.map((ver) => {
+    let vp: Record<string, unknown> = {};
+    if (ver.parametersJson) {
+      try {
+        vp = JSON.parse(ver.parametersJson);
+      } catch {
+        vp = {};
+      }
+    }
+    return {
+      versionId: ver.id,
+      versionNumber: ver.versionNumber,
+      sourceType: ver.versionType,
+      isApprovedFinal: ver.isApprovedFinal,
+      taskCode: vp.taskCode || meta.taskCode || null,
+      taskId: vp.taskId || null,
+      generationOrigin: vp.generationOrigin || null,
+      providerId: vp.providerId || null,
+      requestedModel: vp.requestedModel || vp.modelUsed || null,
+      reportedModel: vp.reportedModel ?? null,
+      reportedModelNote: vp.reportedModelNote ?? null,
+      costState: vp.costState || null,
+      parentVersionId: vp.parentVersionId ?? vp.sourceVersionId ?? null,
+      inputAssetIds: Array.isArray(vp.inputAssetIds) ? vp.inputAssetIds : [],
+    };
+  });
+
+  const safeProjectSummary = {
+    projectId: row.id,
+    projectName: meta.projectName || `Dự án #${row.id}`,
+    leadCode: row.lead?.leadCode || null,
+    requestType: row.requestType,
+    taskCode: meta.taskCode || (row.requestType === 'banner' ? 'banner_generate' : 'perspective_compose'),
+    websiteDomain: meta.websiteDomain || null,
+    campaignId: meta.campaignId || null,
+    campaignName: meta.campaignName || null,
+    contentId: meta.contentId ?? null,
+    sourceModule: meta.sourceModule || null,
+    ledCategory: row.ledCategory,
+    screenDimensions: row.screenDimensions,
+    aspectRatio: row.aspectRatio,
+    status: row.designStatus,
+    designBrief: meta.designBrief || null,
+    productSpec: meta.productSpec || null,
+    versionLineage,
+    disclaimer:
+      'LƯU Ý QUAN TRỌNG: Các bản phối cảnh trong gói này là ảnh minh họa raster 2D phục vụ đề xuất Marketing/Bán hàng, KHÔNG phải bản vẽ kỹ thuật CAD/3D kết cấu chịu lực thi công.',
+    realFilesIncluded,
+    skippedMissingEntries,
+    exportedBy: auth.user.fullName,
+    exportedAt: new Date().toISOString(),
+  };
+
+  zip.addFile('Thong_So_Du_An.json', JSON.stringify(safeProjectSummary, null, 2));
+  zip.addFile('design-brief-and-lineage.json', JSON.stringify(safeProjectSummary, null, 2));
 
   await prisma.auditLog.create({
     data: {

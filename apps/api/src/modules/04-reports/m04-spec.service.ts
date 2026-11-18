@@ -13,9 +13,16 @@ import {
   paginateArray,
   resolveDashboardScope,
 } from '../../core/website-catalog';
-import { shouldAnonymizeLeadForRole } from '../01-leads/service';
+import {
+  shouldAnonymizeLeadForRole,
+} from '../01-leads/service';
 import { computeCostPerValidAdLead } from '../03-keywords-ads/m03-spec.service';
-import { getGoogleAdsApiConfig, getGoogleConnection } from '../02-tracking-sync/google-oauth.service';
+import { listSeoAiReports } from '../03-keywords-ads/seo-report.service';
+import {
+  classifyCampaignWebsiteAttribution,
+  getGoogleAdsApiConfig,
+  getGoogleConnection,
+} from '../02-tracking-sync/google-oauth.service';
 
 export async function getM04ResultsReportSpec(
   user: SessionUserDto,
@@ -38,6 +45,7 @@ export async function getM04ResultsReportSpec(
     rawLeads,
     prevRawLeads,
     adsCampaignMetrics,
+    prevAdsCampaignMetrics,
     latestSync,
     googleConn,
     adsCfg,
@@ -46,6 +54,7 @@ export async function getM04ResultsReportSpec(
     firstQuoteInPeriodRows,
     closedWonInPeriodRows,
     periodActivityRows,
+    seoReports,
   ] = await Promise.all([
     prisma.lead.findMany({
       where: {
@@ -86,6 +95,15 @@ export async function getM04ResultsReportSpec(
         isSpam: true,
         pipelineStatus: true,
         sourceWebsite: true,
+        contactChannel: true,
+        tracking: {
+          select: {
+            marketingSource: true,
+            utmSource: true,
+            utmMedium: true,
+            gclid: true,
+          },
+        },
       },
     }),
     prisma.platformDailyMetric.findMany({
@@ -96,9 +114,39 @@ export async function getM04ResultsReportSpec(
         NOT: [
           { accountPropertyId: { startsWith: 'GA4-' } },
           { campaignExternalId: { startsWith: 'ga4_' } },
+          { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
         ],
       },
       select: {
+        platform: true,
+        campaignExternalId: true,
+        spendMicros: true,
+        impressions: true,
+        clicks: true,
+        conversionsMicros: true,
+        pageUrlRaw: true,
+        campaign: {
+          select: {
+            utmCampaignSlug: true,
+            campaignName: true,
+            campaignCode: true,
+          },
+        },
+      },
+    }),
+    prisma.platformDailyMetric.findMany({
+      where: {
+        platform: { in: ['google_ads', 'facebook_ads', 'facebook'] },
+        grain: 'campaign',
+        metricDate: { gte: scope.prevStartDateStr, lte: scope.prevEndDateStr },
+        NOT: [
+          { accountPropertyId: { startsWith: 'GA4-' } },
+          { campaignExternalId: { startsWith: 'ga4_' } },
+          { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
+        ],
+      },
+      select: {
+        campaignExternalId: true,
         spendMicros: true,
         pageUrlRaw: true,
         campaign: {
@@ -159,6 +207,7 @@ export async function getM04ResultsReportSpec(
         lead: { select: { createdAt: true, sourceWebsite: true } },
       },
     }),
+    listSeoAiReports().catch(() => []),
   ]);
 
   const hasAdsToken =
@@ -169,6 +218,28 @@ export async function getM04ResultsReportSpec(
         googleConn.scopes?.some((s) => s.includes('adwords')),
     ) ||
     realAdsCatalogCount > 0;
+
+  const isPaidAdLeadRecord = (l: {
+    contactChannel?: string | null;
+    tracking?: {
+      marketingSource?: string | null;
+      utmSource?: string | null;
+      utmMedium?: string | null;
+      gclid?: string | null;
+    } | null;
+  }) => {
+    const med = (l.tracking?.utmMedium || '').toLowerCase();
+    const src = (l.tracking?.marketingSource || '').toLowerCase();
+    return Boolean(
+      l.tracking?.gclid ||
+        l.contactChannel === 'google_lead_form' ||
+        med === 'cpc' ||
+        med === 'ppc' ||
+        med === 'paid' ||
+        src.includes('google ads') ||
+        src.includes('facebook ads'),
+    );
+  };
 
   const leads = rawLeads.filter((l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite));
   const prevLeads = prevRawLeads.filter((l) =>
@@ -182,8 +253,12 @@ export async function getM04ResultsReportSpec(
   const spamCount = receivedLeadCount - validLeadCount;
 
   const prevReceivedCount = prevLeads.length;
-  const prevValidCount = prevLeads.filter((l) => isL2Valid(l)).length;
-  const prevWonCount = prevLeads.filter((l) => isL2Valid(l) && l.pipelineStatus === 'won').length;
+  const prevValidLeadsList = prevLeads.filter((l) => isL2Valid(l));
+  const prevValidCount = prevValidLeadsList.length;
+  const prevWonCount = prevValidLeadsList.filter((l) => l.pipelineStatus === 'won').length;
+  const prevValidAttributedAdLeadCount = prevValidLeadsList.filter(isPaidAdLeadRecord).length;
+  const prevWinRatePct =
+    prevValidCount > 0 ? Number(((prevWonCount / prevValidCount) * 100).toFixed(1)) : null;
 
   const hasQuoteEvidence = (l: (typeof leads)[number]) =>
     Boolean(l.firstQuoteSentAt) ||
@@ -216,46 +291,138 @@ export async function getM04ResultsReportSpec(
       ? Number(((winRateNumerator / winRateDenominator) * 100).toFixed(1))
       : null;
 
-  // Đối soát chi phí quảng cáo và Lead quảng cáo hợp lệ (C04 & C09)
-  const validAdLeads = validLeads.filter((l) => {
-    const ch = normalizeMarketingChannelDisplay({
-      marketingSource: l.tracking?.marketingSource,
-      utmSource: l.tracking?.utmSource,
-      utmMedium: l.tracking?.utmMedium,
-      gclid: l.tracking?.gclid,
-      contactChannel: l.contactChannel,
-    });
-    return ch === 'Google Ads' || ch === 'Quảng cáo Facebook';
-  });
+  // Đối soát chi phí quảng cáo và Lead quảng cáo hợp lệ (C04 & C09 & MK02)
+  const validAdLeads = validLeads.filter((l) => isPaidAdLeadRecord(l));
+
+  // Phân nhóm từng campaign theo quy tắc: MULTI_WEBSITE_UNSPLIT tuyệt đối không gán 100% chi phí cho từng web
+  const campAggMap = new Map<
+    string,
+    {
+      campaignId: string;
+      campaignName: string;
+      platform: string;
+      websiteDomain: string | null;
+      attributionStatus: 'SINGLE_WEBSITE' | 'MULTI_WEBSITE_UNSPLIT' | 'UNATTRIBUTED';
+      spendMicros: bigint;
+      clicks: number;
+      impressions: number;
+      conversionsMicros: bigint;
+      finalUrls: Set<string>;
+      existingSlug: string | null;
+    }
+  >();
+
+  for (const r of adsCampaignMetrics) {
+    const cid = (r.campaignExternalId || r.campaign?.campaignCode || r.campaign?.campaignName || 'unknown').trim();
+    const cname = (r.campaign?.campaignName || r.campaignExternalId || cid).trim();
+    const existing = campAggMap.get(cid) || {
+      campaignId: cid,
+      campaignName: cname,
+      platform: r.platform,
+      websiteDomain: null,
+      attributionStatus: 'UNATTRIBUTED' as const,
+      spendMicros: 0n,
+      clicks: 0,
+      impressions: 0,
+      conversionsMicros: 0n,
+      finalUrls: new Set<string>(),
+      existingSlug: r.campaign?.utmCampaignSlug || null,
+    };
+    existing.spendMicros += r.spendMicros ?? 0n;
+    existing.clicks += r.clicks || 0;
+    existing.impressions += r.impressions || 0;
+    existing.conversionsMicros += r.conversionsMicros ?? 0n;
+    if (r.pageUrlRaw) existing.finalUrls.add(r.pageUrlRaw);
+    campAggMap.set(cid, existing);
+  }
+
+  let totalAllCampaignMicros = 0n;
+  let singleSiteMatchedMicros = 0n;
+  let singleSiteMatchedCount = 0;
+  let multiWebsiteExcludedMicros = 0n;
+  const multiWebsiteCampIds = new Set<string>();
+  const adCostMicrosByWebsite = new Map<string, bigint>();
+
+  for (const camp of campAggMap.values()) {
+    const attr = classifyCampaignWebsiteAttribution(
+      camp.campaignName,
+      Array.from(camp.finalUrls),
+      camp.existingSlug,
+    );
+    camp.attributionStatus = attr.status;
+    camp.websiteDomain = attr.domain;
+    totalAllCampaignMicros += camp.spendMicros;
+
+    if (attr.status === 'SINGLE_WEBSITE' && attr.domain) {
+      const prevDomMicros = adCostMicrosByWebsite.get(attr.domain) ?? 0n;
+      adCostMicrosByWebsite.set(attr.domain, prevDomMicros + camp.spendMicros);
+      if (scope.selectedWebsite && matchesWebsiteDomain(attr.domain, scope.selectedWebsite)) {
+        singleSiteMatchedMicros += camp.spendMicros;
+        singleSiteMatchedCount += 1;
+      }
+    } else if (attr.status === 'MULTI_WEBSITE_UNSPLIT') {
+      multiWebsiteExcludedMicros += camp.spendMicros;
+      multiWebsiteCampIds.add(camp.campaignId);
+    }
+  }
 
   let attributedAdCost: number | null = null;
   let adReconciliationNote = '';
+  const multiWebsiteExcludedAdCost =
+    multiWebsiteExcludedMicros > 0n
+      ? Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0))
+      : null;
+
   if (adsCampaignMetrics.length > 0) {
     if (!scope.selectedWebsite) {
-      const totalMicros = adsCampaignMetrics.reduce((s, r) => s + (r.spendMicros ?? 0n), 0n);
-      attributedAdCost = Number((Number(totalMicros) / 1_000_000).toFixed(0));
-      adReconciliationNote = 'Đã đối soát tổng chi phí quảng cáo cấp tài khoản với Lead quảng cáo hợp lệ.';
+      attributedAdCost = Number((Number(totalAllCampaignMicros) / 1_000_000).toFixed(0));
+      adReconciliationNote =
+        multiWebsiteCampIds.size > 0
+          ? `Đã tổng hợp toàn bộ chi phí tài khoản; gồm ${multiWebsiteCampIds.size} chiến dịch đa website không tự chia chi phí về từng domain riêng lẻ.`
+          : 'Đã đối soát tổng chi phí quảng cáo thực tế với Lead quảng cáo hợp lệ.';
+    } else if (singleSiteMatchedCount > 0) {
+      attributedAdCost = Number((Number(singleSiteMatchedMicros) / 1_000_000).toFixed(0));
+      adReconciliationNote =
+        multiWebsiteCampIds.size > 0
+          ? `Chỉ tính chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain} (đã loại trừ ${multiWebsiteCampIds.size} chiến dịch đa website / tài khoản chung trị giá ${Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0)).toLocaleString('vi-VN')} ₫ để tránh cộng lặp).`
+          : `Chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}.`;
     } else {
-      const siteMatched = adsCampaignMetrics.filter((r) => {
-        const slug = r.campaign?.utmCampaignSlug || '';
-        const domainHint = (slug.startsWith('domain:') ? slug.slice(7) : r.pageUrlRaw || '').toLowerCase();
-        return Boolean(domainHint && domainHint.includes(scope.selectedWebsite!.domain.toLowerCase()));
-      });
-      if (siteMatched.length > 0) {
-        const siteMicros = siteMatched.reduce((s, r) => s + (r.spendMicros ?? 0n), 0n);
-        attributedAdCost = Number((Number(siteMicros) / 1_000_000).toFixed(0));
-        adReconciliationNote = `Chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}.`;
-      } else {
-        attributedAdCost = null;
-        adReconciliationNote = `Chưa có dữ liệu phân bổ chi phí chiến dịch riêng cho ${scope.selectedWebsite.domain} (không tự chia đều chi phí tài khoản).`;
-      }
+      attributedAdCost = null;
+      adReconciliationNote =
+        multiWebsiteCampIds.size > 0
+          ? `Chưa có chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}; có ${multiWebsiteCampIds.size} chiến dịch chạy chung nhiều website (${Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0)).toLocaleString('vi-VN')} ₫) nên giữ CPL = Chưa đủ dữ liệu.`
+          : `Chưa có dữ liệu phân bổ chi phí chiến dịch riêng cho ${scope.selectedWebsite.domain} (không tự chia đều chi phí tài khoản).`;
     }
   } else {
     attributedAdCost = hasAdsToken && !scope.selectedWebsite ? 0 : null;
     adReconciliationNote = hasAdsToken
-      ? 'Đã kết nối Google Ads v26; các chiến dịch hiện tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn.'
+      ? 'Đã kết nối Google Ads; các chiến dịch hiện tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn.'
       : `Chưa kết nối tài khoản Google Ads OAuth (ghi nhận ${validAdLeads.length} Lead quảng cáo hợp lệ trong CRM).`;
   }
+
+  let prevAdCost: number | null = null;
+  if (prevAdsCampaignMetrics.length > 0) {
+    if (!scope.selectedWebsite) {
+      const m = prevAdsCampaignMetrics.reduce((s, r) => s + (r.spendMicros ?? 0n), 0n);
+      prevAdCost = Number((Number(m) / 1_000_000).toFixed(0));
+    } else {
+      let prevSingleMicros = 0n;
+      let prevSingleHits = 0;
+      for (const r of prevAdsCampaignMetrics) {
+        const attr = classifyCampaignWebsiteAttribution(
+          r.campaign?.campaignName || r.campaignExternalId || '',
+          r.pageUrlRaw ? [r.pageUrlRaw] : [],
+          r.campaign?.utmCampaignSlug,
+        );
+        if (attr.status === 'SINGLE_WEBSITE' && attr.domain && matchesWebsiteDomain(attr.domain, scope.selectedWebsite)) {
+          prevSingleMicros += r.spendMicros ?? 0n;
+          prevSingleHits += 1;
+        }
+      }
+      prevAdCost = prevSingleHits > 0 ? Number((Number(prevSingleMicros) / 1_000_000).toFixed(0)) : null;
+    }
+  }
+  const prevCostPerValidAdLead = computeCostPerValidAdLead(prevAdCost, prevValidAttributedAdLeadCount);
 
   const costPerValidAdLead = computeCostPerValidAdLead(attributedAdCost, validAdLeads.length);
 
@@ -500,12 +667,23 @@ export async function getM04ResultsReportSpec(
     webMap.set(wKey, cur);
   }
 
-  const byWebsite = Array.from(webMap.values()).sort((a, b) => {
-    if (Boolean(a.isUnclassifiedWebsite) !== Boolean(b.isUnclassifiedWebsite)) {
-      return a.isUnclassifiedWebsite ? 1 : -1;
-    }
-    return b.leadCount - a.leadCount;
-  });
+  const byWebsite = Array.from(webMap.values())
+    .map((w) => {
+      const webMicros = !w.isUnclassifiedWebsite ? adCostMicrosByWebsite.get(w.website.toLowerCase()) ?? null : null;
+      const webAdCost = webMicros !== null ? Number((Number(webMicros) / 1_000_000).toFixed(0)) : null;
+      return {
+        ...w,
+        adCost: webAdCost,
+        cpl: computeCostPerValidAdLead(webAdCost, w.adLeadCount),
+        winRatePct: w.validCount > 0 ? Number(((w.wonCount / w.validCount) * 100).toFixed(1)) : null,
+      };
+    })
+    .sort((a, b) => {
+      if (Boolean(a.isUnclassifiedWebsite) !== Boolean(b.isUnclassifiedWebsite)) {
+        return a.isUnclassifiedWebsite ? 1 : -1;
+      }
+      return b.leadCount - a.leadCount;
+    });
 
   // Phân tích theo Kênh marketing chuẩn hóa (C04: tách khỏi hình thức liên hệ, không tự gán Organic/Direct)
   const chMap = new Map<
@@ -536,12 +714,202 @@ export async function getM04ResultsReportSpec(
     chMap.set(ch, cur);
   }
 
-  const byChannel = Array.from(chMap.values()).sort((a, b) => {
-    if ((a.channel === 'Chưa xác định') !== (b.channel === 'Chưa xác định')) {
-      return a.channel === 'Chưa xác định' ? 1 : -1;
+  const byChannel = Array.from(chMap.values())
+    .map((c) => ({
+      ...c,
+      winRatePct: c.validCount > 0 ? Number(((c.wonCount / c.validCount) * 100).toFixed(1)) : null,
+      shareOfValidPct: validLeadCount > 0 ? Number(((c.validCount / validLeadCount) * 100).toFixed(1)) : null,
+    }))
+    .sort((a, b) => {
+      if ((a.channel === 'Chưa xác định') !== (b.channel === 'Chưa xác định')) {
+        return a.channel === 'Chưa xác định' ? 1 : -1;
+      }
+      return b.validCount - a.validCount || b.leadCount - a.leadCount;
+    });
+
+  // Đối chiếu theo từng Chiến dịch (MK02)
+  const crmCampaignStats = new Map<
+    string,
+    { received: number; valid: number; validAd: number; won: number }
+  >();
+  for (const l of leads) {
+    const rawKey = (l.tracking?.utmCampaign || l.tracking?.campaignName || '').trim().toLowerCase();
+    if (!rawKey) continue;
+    const prev = crmCampaignStats.get(rawKey) || { received: 0, valid: 0, validAd: 0, won: 0 };
+    prev.received += 1;
+    if (isL2Valid(l)) {
+      prev.valid += 1;
+      if (isPaidAdLeadRecord(l)) prev.validAd += 1;
+      if (l.pipelineStatus === 'won') prev.won += 1;
     }
-    return b.leadCount - a.leadCount;
+    crmCampaignStats.set(rawKey, prev);
+  }
+
+  const byCampaign = Array.from(campAggMap.values())
+    .filter((camp) => {
+      if (!scope.selectedWebsite) return true;
+      return camp.attributionStatus === 'SINGLE_WEBSITE' && camp.websiteDomain && matchesWebsiteDomain(camp.websiteDomain, scope.selectedWebsite);
+    })
+    .map((camp) => {
+      const adCost = Number((Number(camp.spendMicros) / 1_000_000).toFixed(0));
+      const conv = Number((Number(camp.conversionsMicros) / 1_000_000).toFixed(1));
+      const strippedId = camp.campaignId.replace(/^GADS_/i, '').trim().toLowerCase();
+      const matched =
+        crmCampaignStats.get(camp.campaignName.trim().toLowerCase()) ||
+        crmCampaignStats.get(camp.campaignId.trim().toLowerCase()) ||
+        crmCampaignStats.get(strippedId) ||
+        { received: 0, valid: 0, validAd: 0, won: 0 };
+      return {
+        campaignId: camp.campaignId,
+        campaignName: camp.campaignName,
+        platform: camp.platform,
+        websiteDomain: camp.websiteDomain,
+        attributionStatus: camp.attributionStatus,
+        adCost,
+        clicks: camp.clicks,
+        impressions: camp.impressions,
+        platformConversions: conv,
+        receivedLeadCount: matched.received,
+        validLeadCount: matched.valid,
+        validAttributedAdLeadCount: matched.validAd,
+        costPerValidAdLead: computeCostPerValidAdLead(adCost, matched.validAd),
+        wonLeadCount: matched.won,
+        winRatePct: matched.valid > 0 ? Number(((matched.won / matched.valid) * 100).toFixed(1)) : null,
+      };
+    })
+    .sort((a, b) => (b.adCost ?? 0) - (a.adCost ?? 0) || b.clicks - a.clicks);
+
+  // Chuỗi thời gian theo ngày (0 cho ngày xác nhận không có Lead, null ngoài ngưỡng tương lai)
+  const dayFmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
   });
+  const todayStr = dayFmt.format(new Date());
+  const leadDayMap = new Map<string, { received: number; valid: number }>();
+  for (const l of leads) {
+    const dk = dayFmt.format(l.createdAt);
+    const cur = leadDayMap.get(dk) || { received: 0, valid: 0 };
+    cur.received += 1;
+    if (isL2Valid(l)) cur.valid += 1;
+    leadDayMap.set(dk, cur);
+  }
+  const timeSeries: NonNullable<M04ResultsReportDto['timeSeries']> = [];
+  {
+    const cursor = new Date(`${scope.startDateStr}T00:00:00Z`);
+    const endDt = new Date(`${scope.endDateStr}T00:00:00Z`);
+    let safety = 0;
+    while (cursor <= endDt && safety < 400) {
+      safety += 1;
+      const dStr = cursor.toISOString().slice(0, 10);
+      const isFuture = dStr > todayStr;
+      const dayCounts = leadDayMap.get(dStr) || { received: 0, valid: 0 };
+      timeSeries.push({
+        bucketStart: dStr,
+        bucketEnd: dStr,
+        label: `${dStr.slice(8, 10)}/${dStr.slice(5, 7)}`,
+        receivedLeadCount: isFuture ? null : dayCounts.received,
+        validLeadCount: isFuture ? null : dayCounts.valid,
+        isMissingDay: isFuture,
+      });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  }
+
+  const missingWebsiteCount = leads.filter(
+    (l) => !sanitizeWebsiteSourceDisplay(l.sourceWebsite).cleanLabel,
+  ).length;
+  const unknownChannelCount = leads.filter((l) => {
+    const ch = normalizeMarketingChannelDisplay({
+      marketingSource: l.tracking?.marketingSource,
+      utmSource: l.tracking?.utmSource,
+      utmMedium: l.tracking?.utmMedium,
+      gclid: l.tracking?.gclid,
+      contactChannel: l.contactChannel,
+    });
+    return ch === 'Chưa xác định';
+  }).length;
+  const attributionCoveragePct =
+    receivedLeadCount > 0
+      ? Number((((receivedLeadCount - missingWebsiteCount) / receivedLeadCount) * 100).toFixed(1))
+      : null;
+
+  const matchingSeoReport =
+    seoReports.find((r) =>
+      scope.selectedWebsite
+        ? r.website.toLowerCase().includes(scope.selectedWebsite.domain.toLowerCase())
+        : r.website.toLowerCase().includes('tất cả') || r.website === 'all',
+    ) || seoReports[0] || null;
+
+  const summaryFindings: NonNullable<M04ResultsReportDto['marketingInsights']>['summaryFindings'] = [];
+  if (attributedAdCost !== null) {
+    summaryFindings.push({
+      id: 'ad_efficiency',
+      severity: costPerValidAdLead !== null && validAdLeads.length > 0 ? 'info' : 'warning',
+      title: 'Hiệu quả chi phí quảng cáo & Lead đối soát',
+      evidenceText:
+        validAdLeads.length > 0 && costPerValidAdLead !== null
+          ? `Chi phí ${attributedAdCost.toLocaleString('vi-VN')} ₫ mang về ${validAdLeads.length} Lead quảng cáo hợp lệ (CPL: ${Math.round(costPerValidAdLead).toLocaleString('vi-VN')} ₫/Lead).`
+          : `Ghi nhận ${attributedAdCost.toLocaleString('vi-VN')} ₫ chi tiêu trong kỳ nhưng chưa có Lead quảng cáo hợp lệ gắn GCLID/UTM trùng khớp để tính CPL.`,
+      actionHref: `/tracking?websiteId=${encodeURIComponent(scope.websiteId)}`,
+      actionLabel: 'Kiểm tra chiến dịch',
+    });
+  }
+  if (multiWebsiteCampIds.size > 0 && scope.selectedWebsite && multiWebsiteExcludedAdCost !== null) {
+    summaryFindings.push({
+      id: 'multi_site_excluded',
+      severity: 'info',
+      title: `Có ${multiWebsiteCampIds.size} chiến dịch đa website chưa tách chi phí cho ${scope.selectedWebsite.domain}`,
+      evidenceText: `Tổng ${multiWebsiteExcludedAdCost.toLocaleString('vi-VN')} ₫ chi tiêu chạy chung nhiều landing domain đã được tách khỏi bộ lọc website đơn để tránh tính nhầm 100% chi phí.`,
+    });
+  }
+  if (validLeadCount > 0) {
+    summaryFindings.push({
+      id: 'lead_conversion_cohort',
+      severity: wonLeadCount > 0 ? 'info' : 'warning',
+      title: 'Chất lượng chuyển đổi Cohort trong kỳ',
+      evidenceText: `Trong ${receivedLeadCount} Lead tiếp nhận có ${validLeadCount} Lead hợp lệ (L2), tỷ lệ chốt đạt ${winRatePct !== null ? `${winRatePct}%` : '—'} (${wonLeadCount} chốt${overdueQuotes.length > 0 ? `, ${overdueQuotes.length} báo giá quá hạn >7 ngày` : ''}).`,
+      actionHref: `/leads?from=${encodeURIComponent(scope.startDateStr)}&to=${encodeURIComponent(scope.endDateStr)}${scope.selectedWebsite ? `&website=${encodeURIComponent(scope.selectedWebsite.domain)}` : ''}`,
+      actionLabel: 'Mở danh sách Lead',
+    });
+  }
+  if (unclassifiedProductLeadCount > 0) {
+    summaryFindings.push({
+      id: 'missing_product_classification',
+      severity: 'action',
+      title: `${unclassifiedProductLeadCount} Lead chưa gắn sản phẩm quan tâm`,
+      evidenceText: `Cần rà soát và gắn dòng sản phẩm cho ${unclassifiedProductLeadCount} hồ sơ để báo cáo theo sản phẩm phản ánh đúng nhu cầu thị trường.`,
+      actionHref: `/leads?from=${encodeURIComponent(scope.startDateStr)}&to=${encodeURIComponent(scope.endDateStr)}`,
+      actionLabel: 'Gắn sản phẩm Lead',
+    });
+  }
+
+  const recommendedActions: NonNullable<M04ResultsReportDto['marketingInsights']>['recommendedActions'] = [
+    {
+      id: 'propose_seo_content',
+      title: 'Đề xuất bài nội dung SEO',
+      reason: matchingSeoReport
+        ? `Dựa trên snapshot SEO gần nhất (${matchingSeoReport.snapshot.current.totalClicks} clicks / ${matchingSeoReport.snapshot.current.totalImpressions} impressions).`
+        : 'Tạo đề xuất bài viết mới trên module Từ khóa & SEO theo phạm vi website đang chọn.',
+      targetType: 'seo_content',
+      href: `/ads?tab=content&website=${encodeURIComponent(scope.domain || 'toantrung.com.vn')}`,
+    },
+    {
+      id: 'create_design_brief',
+      title: 'Tạo brief thiết kế cho chiến dịch',
+      reason: `Giữ nguyên bối cảnh phạm vi ${scope.websiteLabel} (${scope.startDateStr} → ${scope.endDateStr}) để team Thiết kế xử lý banner/ấn phẩm mới.`,
+      targetType: 'design_brief',
+      href: `/design?fromBrief=1&taskCode=banner_generate&sourceModule=reports&websiteId=${encodeURIComponent(scope.websiteId)}&dateFrom=${encodeURIComponent(scope.startDateStr)}&dateTo=${encodeURIComponent(scope.endDateStr)}`,
+      prefillParams: {
+        websiteId: scope.websiteId,
+        websiteDomain: scope.domain || '',
+        dateFrom: scope.startDateStr,
+        dateTo: scope.endDateStr,
+        sourceModule: 'reports',
+      },
+    },
+  ];
 
   const pendingActionRows = waitingQuoteLeads
     .map((l) => {
@@ -667,15 +1035,54 @@ export async function getM04ResultsReportSpec(
       winRateDefinition:
         'Tỷ lệ chốt = Chốt thành công / Lead hợp lệ (L2) trong cùng tập Lead tạo trong kỳ và phạm vi website đang chọn.',
       attributedAdCost,
+      adCost: attributedAdCost,
       validAdLeadCount: validAdLeads.length,
+      validAttributedAdLeadCount: validAdLeads.length,
       adReconciliationNote,
       costPerValidAdLead,
       currencyCode: 'VND',
       overdueQuoteCount: overdueQuotes.length,
       unclassifiedProductLeadCount,
+      multiWebsiteExcludedAdCost,
+      multiWebsiteCampaignCount: multiWebsiteCampIds.size,
       previousReceivedLeadCount: prevReceivedCount,
       previousValidLeadCount: prevValidCount,
       previousWonLeadCount: prevWonCount,
+      previousAdCost: prevAdCost,
+      previousCostPerValidAdLead: prevCostPerValidAdLead,
+      previousWinRatePct: prevWinRatePct,
+    },
+    previousPeriod: {
+      startDate: scope.prevStartDateStr,
+      endDate: scope.prevEndDateStr,
+      adCost: prevAdCost,
+      receivedLeadCount: prevReceivedCount,
+      validLeadCount: prevValidCount,
+      validAttributedAdLeadCount: prevValidAttributedAdLeadCount,
+      costPerValidAdLead: prevCostPerValidAdLead,
+      wonLeadCount: prevWonCount,
+      winRatePct: prevWinRatePct,
+    },
+    timeSeries,
+    dataQuality: {
+      missingWebsiteCount,
+      missingProductCount: unclassifiedProductLeadCount,
+      unknownChannelCount,
+      attributionCoveragePct,
+    },
+    marketingInsights: {
+      summaryFindings,
+      recommendedActions,
+      latestSeoAiReport: matchingSeoReport
+        ? {
+            id: matchingSeoReport.id,
+            website: matchingSeoReport.website,
+            generatedAt: matchingSeoReport.snapshot.generatedAt,
+            generationMode: matchingSeoReport.generationMode,
+            modelUsed: matchingSeoReport.modelUsed,
+            excerpt: matchingSeoReport.editedContent.replace(/[#*`>\-]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 220),
+          }
+        : null,
     },
     periodActivity: {
       receivedInPeriodCount,
@@ -706,6 +1113,7 @@ export async function getM04ResultsReportSpec(
       bySales,
       byWebsite,
       byChannel,
+      byCampaign,
       byProduct,
       pendingActionLeads: paginateArray(
         pendingActionRows,

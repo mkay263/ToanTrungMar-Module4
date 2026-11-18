@@ -13,15 +13,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type {
   AiModelOptionDto,
+  AiModelRegistrySnapshotDto,
   AiProviderCatalogItemDto,
   AiProviderId,
   ConfigureAiProvidersDto,
+  DesignTaskCode,
 } from '@toantrung/contracts';
 import { APP_CONFIG } from '../../../core/config';
 import { GoogleImagenProvider } from './google-imagen.provider';
 import { OpenAiImageProvider } from './openai-image.provider';
 import { UniversalCloudAiProvider } from './universal-cloud.provider';
 import { LocalSandboxAiProvider } from './local-sandbox.provider';
+import {
+  AiModelRegistryService,
+  classifyUpstreamAiHttpError,
+  maskSecretValue,
+  resolveEffectiveProviderCredential,
+  validateSafeHttpUrl,
+} from './model-registry.service';
 import {
   type AiDesignProvider,
   type BannerGenerationInput,
@@ -414,6 +423,7 @@ export class AiDesignProviderFactory {
     if (
       clean.includes('image') ||
       clean.includes('imagen') ||
+      clean.includes('banana') ||
       clean.includes('dall-e') ||
       clean.includes('flux') ||
       clean.includes('sd3') ||
@@ -425,12 +435,16 @@ export class AiDesignProviderFactory {
     }
     if (
       clean === 'toantrung-rules-v3' ||
-      clean.startsWith('gemini-3.5-flash-lite') ||
-      clean.startsWith('gemini-3.1-flash-lite') ||
-      clean === 'gemini-flash-lite-latest' ||
+      /^gemini-(?:1\.5|2\.0|2\.5|3(?:\.\d+)?)/.test(clean) ||
+      clean.startsWith('gemini-flash') ||
       clean.startsWith('gemma-') ||
       clean.startsWith('gpt-4') ||
+      clean.startsWith('gpt-5') ||
+      clean.startsWith('gpt-6') ||
       clean.startsWith('gpt-3.5') ||
+      /^o[134](?:-|$)/.test(clean) ||
+      clean.startsWith('codex') ||
+      clean.startsWith('deepseek') ||
       clean.startsWith('llama-') ||
       clean.startsWith('claude-')
     ) {
@@ -447,25 +461,29 @@ export class AiDesignProviderFactory {
     const targetProviderId = requestedProviderId || config.defaultProviderId || 'google_imagen';
     const allowFallback = !input.disableLocalFallback && config.autoFallbackToLocal;
 
-    if (this.isChatOnlyModel(input.modelId) && !allowFallback) {
+    if (this.isChatOnlyModel(input.modelId)) {
       return {
         imageBuffer: Buffer.alloc(0),
         mimeType: 'image/png',
         durationMs: 0,
         modelUsed: input.modelId || 'chat-model',
+        requestedModel: input.modelId || 'chat-model',
         provider: targetProviderId,
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
+        tokensActual: false,
+        costState: 'unknown',
         costMicros: 0n,
         costCurrency: 'USD',
         status: 'failed',
         errorCode: 'CHAT_MODEL_NO_IMAGE_OUTPUT',
-        errorMessage: `Model "${input.modelId}" thuộc nhóm CHAT MODEL (chỉ tư vấn văn bản, không hỗ trợ xuất ảnh). Vui lòng chọn IMAGE MODEL (Google Imagen 3, Gemini Flash Image, OpenAI GPT-Image-1, FLUX.1 Pro hoặc Toàn Trung Studio Compositor).`,
+        errorMessage: `Model "${input.modelId}" thuộc nhóm CHAT/VISION (chỉ phân tích văn bản/ảnh, không xuất file ảnh). Vui lòng chọn IMAGE MODEL cho tác vụ Dựng phối cảnh.`,
       };
     }
 
     const provider = this.getProvider(targetProviderId, input.modelId);
+    const activeModelUsed = input.modelId || provider.getStatusInfo().activeModel;
 
     if (input.simulateTimeout) {
       return provider.generatePerspectiveDraft(input);
@@ -475,6 +493,16 @@ export class AiDesignProviderFactory {
     if (res.status === 'success') {
       const check = validateGeneratedImageBuffer(res.imageBuffer);
       if (check.isValid) {
+        if (targetProviderId !== 'local_sandbox') {
+          AiModelRegistryService.recordModelRuntimeObservation({
+            providerId: targetProviderId,
+            modelId: res.modelUsed || activeModelUsed,
+            taskCode: 'perspective_compose',
+            taskStatus: 'verified',
+            statusDetail: `Xác nhận thực thi perspective_compose thành công (${res.durationMs}ms).`,
+            reportedAliasWarning: res.reportedModelNote || null,
+          });
+        }
         return res;
       }
       res.status = 'failed';
@@ -483,7 +511,20 @@ export class AiDesignProviderFactory {
         check.errorMessage || 'Provider chỉ trả về văn bản hoặc thiếu dữ liệu ảnh hợp lệ.';
     }
 
-    if (allowFallback && targetProviderId !== 'local_sandbox') {
+    if (targetProviderId !== 'local_sandbox' && res.errorMessage) {
+      const httpMatch = res.errorMessage.match(/\[(\d{3})\]/);
+      const statusNum = httpMatch ? Number(httpMatch[1]) : 500;
+      const c = classifyUpstreamAiHttpError(statusNum, res.errorMessage);
+      AiModelRegistryService.recordModelRuntimeObservation({
+        providerId: targetProviderId,
+        modelId: res.modelUsed || activeModelUsed,
+        taskCode: 'perspective_compose',
+        taskStatus: c.statusKind,
+        statusDetail: c.shortReason,
+      });
+    }
+
+    if (allowFallback && targetProviderId !== 'local_sandbox' && !input.requireReferenceEdit) {
       const failedCloudAttempts: NonNullable<ProviderGenerationResult['failedCloudAttempts']> = [
         {
           provider: targetProviderId,
@@ -494,31 +535,7 @@ export class AiDesignProviderFactory {
         },
       ];
 
-      // Step 1: If primary cloud provider failed, try configured Custom Gateway if different
-      if (
-        targetProviderId !== 'custom_endpoint' &&
-        config.providers.custom_endpoint?.apiKey &&
-        !process.env.NODE_TEST_CONTEXT
-      ) {
-        const customModel = config.providers.custom_endpoint.activeModel || 'gpt-image-2';
-        const customProv = this.getProvider('custom_endpoint', customModel);
-        const customRes = await customProv.generatePerspectiveDraft({
-          ...input,
-          modelId: customModel,
-        });
-        if (customRes.status === 'success' && validateGeneratedImageBuffer(customRes.imageBuffer).isValid) {
-          return { ...customRes, failedCloudAttempts };
-        }
-        failedCloudAttempts.push({
-          provider: 'custom_endpoint',
-          modelUsed: customModel,
-          errorCode: customRes.errorCode,
-          errorMessage: customRes.errorMessage,
-          durationMs: customRes.durationMs,
-        });
-      }
-
-      // Step 2: Guaranteed instant Studio Engine composite fallback (NEVER impersonate Cloud AI model names)
+      // Step 1: If caller allowed fallback & primary cloud failed, do NOT guess arbitrary unconfigured custom gateway; drop cleanly to transparent Local Studio Engine
       const fallback = new LocalSandboxAiProvider('toantrung-studio-v3');
       const fallbackRes = await fallback.generatePerspectiveDraft(input);
       const reasonBrief = res.errorCode || res.errorMessage || 'Cloud AI tạm thời không phản hồi';
@@ -526,6 +543,9 @@ export class AiDesignProviderFactory {
         ...fallbackRes,
         provider: 'local_sandbox',
         modelUsed: 'toantrung-studio-v3',
+        requestedModel: input.modelId || activeModelUsed,
+        reportedModel: 'toantrung-studio-v3',
+        costState: 'actual',
         isLocalFallback: true,
         failedCloudAttempts,
         fallbackNotice: `Cloud AI (${targetProviderId}: ${reasonBrief}) không thể sinh ảnh; đã dựng bản phối cảnh kỹ thuật nội bộ (Studio Engine toantrung-studio-v3), không phải ảnh từ Cloud AI.`,
@@ -541,27 +561,32 @@ export class AiDesignProviderFactory {
   ): Promise<ProviderGenerationResult> {
     const { config } = this.getCatalog();
     const targetProviderId = requestedProviderId || config.defaultProviderId || 'google_imagen';
-    const allowFallback = !input.disableLocalFallback && config.autoFallbackToLocal;
+    const allowFallback = !input.disableLocalFallback && !input.requireReferenceEdit && config.autoFallbackToLocal;
+    const taskCode: DesignTaskCode = input.requireReferenceEdit ? 'design_edit' : 'banner_generate';
 
-    if (this.isChatOnlyModel(input.modelId) && !allowFallback) {
+    if (this.isChatOnlyModel(input.modelId)) {
       return {
         imageBuffer: Buffer.alloc(0),
         mimeType: 'image/png',
         durationMs: 0,
         modelUsed: input.modelId || 'chat-model',
+        requestedModel: input.modelId || 'chat-model',
         provider: targetProviderId,
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
+        tokensActual: false,
+        costState: 'unknown',
         costMicros: 0n,
         costCurrency: 'USD',
         status: 'failed',
         errorCode: 'CHAT_MODEL_NO_IMAGE_OUTPUT',
-        errorMessage: `Model "${input.modelId}" thuộc nhóm CHAT MODEL (chỉ tư vấn văn bản, không hỗ trợ xuất ảnh Banner). Vui lòng chọn IMAGE MODEL (Google Imagen 3, OpenAI GPT-Image-1, FLUX.1 Pro hoặc Toàn Trung Studio Compositor).`,
+        errorMessage: `Model "${input.modelId}" thuộc nhóm CHAT/VISION (chỉ tư vấn văn bản/phân tích ảnh, không hỗ trợ xuất file ảnh). Vui lòng chọn IMAGE MODEL cho tác vụ "${taskCode}".`,
       };
     }
 
     const provider = this.getProvider(targetProviderId, input.modelId);
+    const activeModelUsed = input.modelId || provider.getStatusInfo().activeModel;
 
     if (input.simulateTimeout) {
       return provider.generateBannerDraft(input);
@@ -571,12 +596,35 @@ export class AiDesignProviderFactory {
     if (res.status === 'success') {
       const check = validateGeneratedImageBuffer(res.imageBuffer);
       if (check.isValid) {
+        if (targetProviderId !== 'local_sandbox') {
+          AiModelRegistryService.recordModelRuntimeObservation({
+            providerId: targetProviderId,
+            modelId: res.modelUsed || activeModelUsed,
+            taskCode,
+            taskStatus: 'verified',
+            statusDetail: `Xác nhận thực thi ${taskCode} thành công (${res.durationMs}ms).`,
+            reportedAliasWarning: res.reportedModelNote || null,
+          });
+        }
         return res;
       }
       res.status = 'failed';
       res.errorCode = check.errorCode || 'INVALID_IMAGE_BINARY';
       res.errorMessage =
         check.errorMessage || 'Provider chỉ trả về văn bản hoặc thiếu dữ liệu ảnh Banner hợp lệ.';
+    }
+
+    if (targetProviderId !== 'local_sandbox' && res.errorMessage) {
+      const httpMatch = res.errorMessage.match(/\[(\d{3})\]/);
+      const statusNum = httpMatch ? Number(httpMatch[1]) : 500;
+      const c = classifyUpstreamAiHttpError(statusNum, res.errorMessage);
+      AiModelRegistryService.recordModelRuntimeObservation({
+        providerId: targetProviderId,
+        modelId: res.modelUsed || activeModelUsed,
+        taskCode,
+        taskStatus: c.statusKind,
+        statusDetail: c.shortReason,
+      });
     }
 
     if (allowFallback && targetProviderId !== 'local_sandbox') {
@@ -590,31 +638,6 @@ export class AiDesignProviderFactory {
         },
       ];
 
-      // Step 1: If primary cloud provider failed, try configured Custom Gateway if different
-      if (
-        targetProviderId !== 'custom_endpoint' &&
-        config.providers.custom_endpoint?.apiKey &&
-        !process.env.NODE_TEST_CONTEXT
-      ) {
-        const customModel = config.providers.custom_endpoint.activeModel || 'gpt-image-2';
-        const customProv = this.getProvider('custom_endpoint', customModel);
-        const customRes = await customProv.generateBannerDraft({
-          ...input,
-          modelId: customModel,
-        });
-        if (customRes.status === 'success' && validateGeneratedImageBuffer(customRes.imageBuffer).isValid) {
-          return { ...customRes, failedCloudAttempts };
-        }
-        failedCloudAttempts.push({
-          provider: 'custom_endpoint',
-          modelUsed: customModel,
-          errorCode: customRes.errorCode,
-          errorMessage: customRes.errorMessage,
-          durationMs: customRes.durationMs,
-        });
-      }
-
-      // Step 2: Guaranteed instant Studio Engine composite fallback (NEVER impersonate Cloud AI model names)
       const fallback = new LocalSandboxAiProvider('toantrung-studio-v3');
       const fallbackRes = await fallback.generateBannerDraft(input);
       const reasonBrief = res.errorCode || res.errorMessage || 'Cloud AI tạm thời không phản hồi';
@@ -622,6 +645,9 @@ export class AiDesignProviderFactory {
         ...fallbackRes,
         provider: 'local_sandbox',
         modelUsed: 'toantrung-studio-v3',
+        requestedModel: input.modelId || activeModelUsed,
+        reportedModel: 'toantrung-studio-v3',
+        costState: 'actual',
         isLocalFallback: true,
         failedCloudAttempts,
         fallbackNotice: `Cloud AI (${targetProviderId}: ${reasonBrief}) không thể sinh banner; đã dựng bản bố cục nội bộ (Studio Engine toantrung-studio-v3), không phải ảnh từ Cloud AI.`,
@@ -629,6 +655,31 @@ export class AiDesignProviderFactory {
     }
 
     return res;
+  }
+
+  static async getModelRegistry(
+    forceRefresh = false,
+    onlyProviderId?: AiProviderId
+  ): Promise<AiModelRegistrySnapshotDto> {
+    const config = readStoredConfig();
+    return AiModelRegistryService.getModelRegistrySnapshot(config, {
+      forceRefresh,
+      onlyProviderId,
+    });
+  }
+
+  static async probeModelCapability(
+    providerId: AiProviderId,
+    modelId: string,
+    taskCode: DesignTaskCode
+  ) {
+    const config = readStoredConfig();
+    return AiModelRegistryService.probeSelectedModelTask({
+      stored: config,
+      providerId,
+      modelId,
+      taskCode,
+    });
   }
 
   static getActiveProviderInfo(): ProviderStatusInfo {
@@ -747,41 +798,19 @@ export class AiDesignProviderFactory {
     }
 
     const rawInputKey = input.apiKey?.trim() || '';
-    // Auto-detect provider from API Key prefix when user pastes any API key into the unified input
-    let detectedPid: AiProviderId = pid;
-    if (rawInputKey && !rawInputKey.includes('••••')) {
-      if (rawInputKey.startsWith('AIza') || rawInputKey.startsWith('AQ.')) {
-        detectedPid = 'google_imagen';
-      } else if (
-        rawInputKey.startsWith('sk-or-') ||
-        rawInputKey.startsWith('gsk_') ||
-        rawInputKey.startsWith('sk-jy-') ||
-        rawInputKey.startsWith('sk-cx-') ||
-        Boolean(input.apiEndpoint?.trim())
-      ) {
-        detectedPid = 'custom_endpoint';
-      } else if (rawInputKey.startsWith('sk-')) {
-        detectedPid = 'openai_dalle';
-      }
-    }
-
-    const storedKey = config.providers[detectedPid]?.apiKey || '';
+    const explicitPid: AiProviderId = pid;
+    const storedEntry = config.providers[explicitPid];
     const effectiveKey =
       rawInputKey && !rawInputKey.includes('••••')
         ? rawInputKey
-        : storedKey ||
-          (detectedPid === 'google_imagen'
-            ? process.env.GEMINI_API_KEY || process.env.IMAGEN_API_KEY || ''
-            : detectedPid === 'openai_dalle'
-              ? process.env.OPENAI_API_KEY || ''
-              : '');
+        : storedEntry?.apiKey || resolveEffectiveProviderCredential(explicitPid, config).apiKey || '';
 
     if (!effectiveKey) {
       return {
         ok: false,
         connected: false,
-        providerId: detectedPid,
-        modelTested: input.modelId || 'gemini-3.5-flash-lite',
+        providerId: explicitPid,
+        modelTested: input.modelId || 'none',
         latencyMs: Date.now() - started,
         replyText:
           'Chưa có API Key để tự động đọc danh sách Model. Hãy dán mã API Key vào ô bên trên rồi bấm Kết nối & Tự đọc Model.',
@@ -789,499 +818,120 @@ export class AiDesignProviderFactory {
       };
     }
 
-    // Test & Auto-Probe Usable Models from Google Gemini / Google AI Studio / Imagen Key
-    if (
-      detectedPid === 'google_imagen' ||
-      effectiveKey.startsWith('AIza') ||
-      effectiveKey.startsWith('AQ.')
-    ) {
-      try {
-        // Step 1: Call ModelService.ListModels to read all candidate models on this API key
-        const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(
-          effectiveKey
-        )}`;
-        const listRes = await fetch(listUrl, {
-          method: 'GET',
-          signal: AbortSignal.timeout(10000),
-        });
+    const explicitEndpoint =
+      input.apiEndpoint?.trim() ||
+      storedEntry?.apiEndpoint ||
+      resolveEffectiveProviderCredential(explicitPid, config).apiEndpoint ||
+      (explicitPid === 'google_imagen'
+        ? 'https://generativelanguage.googleapis.com/v1beta'
+        : explicitPid === 'openai_dalle'
+          ? 'https://api.openai.com/v1'
+          : '');
 
-        if (!listRes.ok) {
-          const errTxt = await listRes.text();
-          return {
-            ok: false,
-            connected: false,
-            providerId: 'google_imagen',
-            modelTested: 'gemini-flash',
-            latencyMs: Date.now() - started,
-            replyText: `Mã API Key Google không hợp lệ hoặc bị từ chối [HTTP ${listRes.status}]: ${errTxt.slice(0, 140)}`,
-            maskedKey: maskKey(effectiveKey),
-          };
-        }
-
-        const listJson = (await listRes.json()) as {
-          models?: Array<{
-            name?: string;
-            displayName?: string;
-            description?: string;
-            supportedGenerationMethods?: string[];
-          }>;
-        };
-
-        const rawModels = listJson.models || [];
-
-        // Extract Image Generation / Multi-Image Editing models available on this Google API key
-        const imageModelPriority = [
-          'gemini-2.5-flash-image',
-          'gemini-2.5-flash-image-preview',
-          'gemini-2.0-flash-exp-image-generation',
-          'gemini-2.0-flash-preview-image-generation',
-          'imagen-3.0-generate-002',
-          'imagen-3.0-generate-001',
-          'imagen-3.0-fast-generate-001',
-        ];
-
-        const rawCleaned = rawModels.map((m) => ({
-          raw: m,
-          id: (m.name || '').replace(/^models\//, '').trim(),
-        }));
-
-        const imageModelsFromKey = rawCleaned
-          .filter(({ id }) => {
-            if (!id) return false;
-            return (
-              imageModelPriority.includes(id) ||
-              /gemini-.*image|imagen-3/i.test(id)
-            );
-          })
-          .sort((a, b) => {
-            const iA = imageModelPriority.indexOf(a.id);
-            const iB = imageModelPriority.indexOf(b.id);
-            return (iA === -1 ? 99 : iA) - (iB === -1 ? 99 : iB);
-          })
-          .slice(0, 4);
-
-        // Extract fast Chat & Vision models available on this Google API key
-        const fastPriorityOrder = [
-          'gemini-3.5-flash-lite',
-          'gemini-flash-lite-latest',
-          'gemini-2.5-flash',
-          'gemini-2.0-flash',
-          'gemini-3.1-flash-lite',
-          'gemini-3-flash-preview',
-        ];
-
-        const candidates = rawCleaned
-          .filter(({ id, raw }) => {
-            if (!id) return false;
-            if (
-              /embedding|tts|audio|transcribe|robotics|computer-use|lyria|aqa|veo|deep-research|customtools|antigravity|image|imagen|banana|omni|argon|3\.6|3\.7|3\.8|31b/i.test(
-                id
-              )
-            ) {
-              return false;
-            }
-            if (id.startsWith('gemini-1.5-') || id.includes('-pro')) {
-              return false;
-            }
-            const methods = raw.supportedGenerationMethods || [];
-            return methods.length === 0 || methods.includes('generateContent');
-          })
-          .sort((a, b) => {
-            const iA = fastPriorityOrder.indexOf(a.id);
-            const iB = fastPriorityOrder.indexOf(b.id);
-            return (iA === -1 ? 99 : iA) - (iB === -1 ? 99 : iB);
-          })
-          .slice(0, 5);
-
-        // Step 2: Fast Parallel Probe for Chat/Vision models
-        const probeResults = await Promise.all(
-          candidates.map(async ({ id, raw }) => {
-            const t0 = Date.now();
-            try {
-              const genUrl = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-                id
-              )}:generateContent?key=${encodeURIComponent(effectiveKey)}`;
-              const genRes = await fetch(genUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-                  generationConfig: { maxOutputTokens: 3 },
-                }),
-                signal: AbortSignal.timeout(1800),
-              });
-              const ms = Date.now() - t0;
-              if (!genRes.ok) {
-                return { id, raw, usable: false, status: genRes.status, ms };
-              }
-              return { id, raw, usable: true, status: 200, ms };
-            } catch {
-              return { id, raw, usable: false, status: 408, ms: Date.now() - t0 };
-            }
-          })
-        );
-
-        const verifiedWorkingChat = probeResults
-          .filter((r) => r.usable)
-          .sort((a, b) => a.ms - b.ms);
-
-        const discoveredModels: AiModelOptionDto[] = [
-          // 1. Image Generation & Product Compositing models discovered on this API key
-          ...imageModelsFromKey.map(({ id, raw }) => ({
-            id,
-            name: raw.displayName ? raw.displayName.trim() : id,
-            badge: '🎨 Tạo & Ghép ảnh',
-            costPerImageUsd: 0.02,
-            supportsInpainting: true,
-            description:
-              raw.description ||
-              'Model tạo phối cảnh, ghép sản phẩm công ty & thiết kế Banner trực tiếp từ Google API Key.',
-          })),
-          // 2. Verified 200 OK Chat & Vision analysis models discovered on this API key
-          ...verifiedWorkingChat.map((item) => ({
-            id: item.id,
-            name: item.raw.displayName ? item.raw.displayName.trim() : item.id,
-            badge: `💬 Chat & Phân tích ảnh`,
-            costPerImageUsd: 0.0,
-            supportsInpainting: true,
-            description:
-              item.raw.description ||
-              `Model trò chuyện & phân tích ảnh công trình (Phản hồi ${item.ms}ms).`,
-          })),
-        ];
-
-        if (discoveredModels.length === 0) {
-          return {
-            ok: false,
-            connected: false,
-            providerId: 'google_imagen',
-            modelTested: 'none',
-            latencyMs: Date.now() - started,
-            replyText: `Đã đọc ${rawModels.length} model từ Google API Key nhưng tất cả đều hết hạn mức (HTTP 429) hoặc không phản hồi. Vui lòng kiểm tra lại hạn mức Key!`,
-            maskedKey: maskKey(effectiveKey),
-          };
-        }
-
-        const requestedClean = input.modelId?.replace(/^models\//, '') || '';
-        const chosenEntry =
-          discoveredModels.find((v) => v.id === requestedClean) || discoveredModels[0];
-        const chosenModel = chosenEntry.id;
-
-        const currentCfg = readStoredConfig();
-        const prevEntry = currentCfg.providers.google_imagen || {};
-        currentCfg.providers.google_imagen = {
-          ...prevEntry,
-          apiKey: effectiveKey,
-          activeModel: chosenModel,
-          discoveredModels,
-        };
-        currentCfg.defaultProviderId = 'google_imagen';
-        currentCfg.defaultModelId = chosenModel;
-        writeStoredConfig(currentCfg);
-
-        const imgCount = imageModelsFromKey.length;
-        const chatCount = verifiedWorkingChat.length;
-        return {
-          ok: true,
-          connected: true,
-          providerId: 'google_imagen',
-          modelTested: chosenModel,
-          latencyMs: Date.now() - started,
-          replyText: `Đã nhận diện Google API Key → Đọc được ${discoveredModels.length} Model (${imgCount} Model Tạo/Ghép ảnh, ${chatCount} Model Chat & Phân tích ảnh). Đã chọn: ${chosenEntry.name}!`,
-          maskedKey: maskKey(effectiveKey),
-          discoveredModels,
-          providerStatus: this.getActiveProviderInfo(),
-        };
-      } catch (err) {
+    if (explicitEndpoint) {
+      const safeCheck = validateSafeHttpUrl(explicitEndpoint);
+      if (!safeCheck.valid) {
         return {
           ok: false,
           connected: false,
-          providerId: 'google_imagen',
-          modelTested: 'gemini-flash',
+          providerId: explicitPid,
+          modelTested: input.modelId || 'none',
           latencyMs: Date.now() - started,
-          replyText: `Lỗi mạng khi kết nối tới Google API: ${
-            err instanceof Error ? err.message : 'Không xác định'
-          }`,
-          maskedKey: maskKey(effectiveKey),
+          replyText: safeCheck.error || 'Endpoint AI không hợp lệ.',
+          maskedKey: maskSecretValue(effectiveKey),
         };
       }
     }
 
-    // Auto-detect & Probe Usable Models for OpenAI, Custom Gateway (DiDi/CCPro, OpenRouter, Groq)
-    const candidateBaseUrls: string[] = [];
-    if (input.apiEndpoint?.trim()) {
-      candidateBaseUrls.push(input.apiEndpoint.trim());
-    } else if (config.providers[detectedPid]?.apiEndpoint) {
-      candidateBaseUrls.push(config.providers[detectedPid]!.apiEndpoint!);
-    }
-    if (effectiveKey.startsWith('sk-jy-') || effectiveKey.startsWith('sk-cx-')) {
-      candidateBaseUrls.unshift(
-        'https://api.ccpro.cn/v1',
-        'https://ccpro.cn/v1',
-        'https://gateway.ccpro.cn/v1'
-      );
-    } else if (effectiveKey.startsWith('sk-or-')) {
-      candidateBaseUrls.push('https://openrouter.ai/api/v1');
-    } else if (effectiveKey.startsWith('gsk_')) {
-      candidateBaseUrls.push('https://api.groq.com/openai/v1');
-    } else if (detectedPid === 'openai_dalle' || effectiveKey.startsWith('sk-')) {
-      candidateBaseUrls.push('https://api.openai.com/v1');
-    } else {
-      candidateBaseUrls.push('https://openrouter.ai/api/v1');
-    }
+    // Build candidate config explicitly for the requested provider only (zero key-prefix switching, zero host guessing)
+    const testConfig: StoredMultiAiConfig = {
+      ...config,
+      providers: {
+        ...config.providers,
+        [explicitPid]: {
+          ...storedEntry,
+          apiKey: effectiveKey,
+          apiEndpoint: explicitEndpoint || storedEntry?.apiEndpoint || null,
+        },
+      },
+    };
 
-    let discoveredOpenAiModels: AiModelOptionDto[] = [];
-    let totalOtherScanned = 0;
-    let successfulBaseUrl = candidateBaseUrls[0];
-    let listJson: {
-      data?: Array<{ id?: string; name?: string; description?: string }>;
-      models?: Array<{ id?: string; name?: string; description?: string }>;
-    } = {};
-    let lastErrStatus = 401;
-    let lastErrTxt = '';
-    let probeSucceeded = false;
+    const snapshot = await AiModelRegistryService.getModelRegistrySnapshot(testConfig, {
+      forceRefresh: true,
+      onlyProviderId: explicitPid,
+    });
+    const conn = snapshot.connections.find((c) => c.providerId === explicitPid);
 
-    for (const rawCandidate of candidateBaseUrls) {
-      const baseApiUrl = (rawCandidate || '')
-        .trim()
-        .replace(/\.+$/, '')
-        .replace(/\/images\/generations\/?$/i, '')
-        .replace(/\/chat\/completions\/?$/i, '')
-        .replace(/\/completions\/?$/i, '')
-        .replace(/\/models\/?$/i, '')
-        .replace(/\/$/, '');
-
-      try {
-        let listRes = await fetch(`${baseApiUrl}/models`, {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${effectiveKey}`,
-            Accept: 'application/json',
-          },
-          signal: AbortSignal.timeout(8000),
-        });
-
-        // DiDi / Codex / CCPro Gateway requires an initial chat conversation to activate the license key:
-        // "密钥尚未激活，请先在客户端发起一次对话完成激活后再查询 / Key not activated - start a conversation in your client first"
-        if (listRes.status === 403 || !listRes.ok) {
-          const errBody = await listRes.text();
-          lastErrTxt = errBody;
-          lastErrStatus = listRes.status;
-
-          if (
-            errBody.includes('激活') ||
-            errBody.includes('not activated') ||
-            errBody.includes('客户端发起一次对话')
-          ) {
-            try {
-              const pingRes = await fetch(`${baseApiUrl}/chat/completions`, {
-                method: 'POST',
-                headers: {
-                  Authorization: `Bearer ${effectiveKey}`,
-                  'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                  model: 'gpt-4o-mini',
-                  messages: [{ role: 'user', content: 'ping' }],
-                  max_tokens: 5,
-                }),
-                signal: AbortSignal.timeout(10000),
-              });
-
-              if (pingRes.ok) {
-                const retryListRes = await fetch(`${baseApiUrl}/models`, {
-                  method: 'GET',
-                  headers: {
-                    Authorization: `Bearer ${effectiveKey}`,
-                    Accept: 'application/json',
-                  },
-                  signal: AbortSignal.timeout(8000),
-                });
-                if (retryListRes.ok) {
-                  listJson = (await retryListRes.json()) as typeof listJson;
-                  successfulBaseUrl = baseApiUrl;
-                  probeSucceeded = true;
-                  break;
-                }
-              }
-            } catch {
-              // Ignore ping error and continue fallback
-            }
-          }
-        } else {
-          listJson = (await listRes.json()) as typeof listJson;
-          successfulBaseUrl = baseApiUrl;
-          probeSucceeded = true;
-          break;
-        }
-      } catch (e) {
-        lastErrTxt = e instanceof Error ? e.message : 'Lỗi kết nối';
-      }
-    }
-
-    if (!probeSucceeded) {
+    if (conn && conn.listApiStatus === 'error') {
       return {
         ok: false,
         connected: false,
-        providerId: detectedPid,
-        modelTested: 'gpt-image-2',
+        providerId: explicitPid,
+        modelTested: input.modelId || 'none',
         latencyMs: Date.now() - started,
-        replyText: `Mã API Key (${detectedPid === 'openai_dalle' ? 'OpenAI' : 'Custom API'}) không hợp lệ hoặc bị từ chối [HTTP ${lastErrStatus}]: ${lastErrTxt.slice(0, 140)}`,
-        maskedKey: maskKey(effectiveKey),
+        replyText: conn.listApiDetail,
+        maskedKey: maskSecretValue(effectiveKey),
       };
     }
 
-    const items = listJson.data || listJson.models || [];
-    totalOtherScanned = items.length;
+    const providerModels = snapshot.models.filter((m) => m.providerId === explicitPid);
+    const discoveredModels: AiModelOptionDto[] = providerModels.slice(0, 20).map((m) => {
+      const supportsImage =
+        m.supportedOperations.includes('image_generation') ||
+        m.supportedOperations.includes('image_editing_ref');
+      return {
+        id: m.modelId,
+        name: m.displayName || m.modelId,
+        badge: supportsImage ? '🎨 Tạo/Sửa ảnh' : '💬 Chat & Vision',
+        costPerImageUsd: supportsImage ? 0.03 : 0.0,
+        supportsInpainting: m.supportedOperations.includes('image_editing_ref'),
+        description: m.statusDetail,
+      };
+    });
 
-    const normalizedItems = items
-      .map((m) => ({
-        id: (m.id || m.name || '').trim(),
-        name: m.name || m.id || '',
-        description: m.description || '',
-      }))
-      .filter((m) => Boolean(m.id));
-
-    // 1. Separate Image Generation / Multi-Image Edit models on this API key
-    const openAiImagePriority = [
-      'gpt-image-2',
-      'gpt-image-2-4k',
-      'gpt-image-2.5',
-      'gpt-image-2.5-flare',
-      'gpt-image-2.5-sunburst',
-      'gpt-image-2-4k-high',
-      'gpt-image-2.6-flare-4k',
-      'gpt-image-2.6-sunburst-4k',
-      'gpt-2.5-image',
-      'gpt-image-1',
-      'dall-e-3',
-      'dall-e-2',
-    ];
-    const imageCandidates = normalizedItems
-      .filter(
-        (m) =>
-          openAiImagePriority.includes(m.id) ||
-          /gpt-.*image|dall-e|flux|stable-diffusion|sdxl|imagen/i.test(m.id)
-      )
-      .sort((a, b) => {
-        const iA = openAiImagePriority.indexOf(a.id);
-        const iB = openAiImagePriority.indexOf(b.id);
-        return (iA === -1 ? 99 : iA) - (iB === -1 ? 99 : iB);
-      })
-      .slice(0, 8);
-
-    // If OpenAI key is valid and has gpt-image-1, also surface gpt-2.5-image alias if not explicitly listed yet
-    if (
-      detectedPid === 'openai_dalle' &&
-      !imageCandidates.some((m) => m.id === 'gpt-2.5-image')
-    ) {
-      imageCandidates.unshift({
-        id: 'gpt-2.5-image',
-        name: 'GPT 2.5 Image',
-        description: 'Model ghép ảnh sản phẩm công ty vào hiện trường & tạo Banner (OpenAI Image API).',
-      });
-    }
-
-    // 2. Separate Vision & Chat models on this API key
-    const openAiChatPriority = [
-      'gpt-5.4',
-      'gpt-5.4-mini',
-      'gpt-5.5',
-      'gpt-5.6',
-      'gpt-6',
-      'gpt-4o',
-      'gpt-4o-mini',
-      'gpt-4.1',
-      'gpt-4.1-mini',
-    ];
-    const chatCandidates = normalizedItems
-      .filter(
-        (m) =>
-          !/embedding|tts|whisper|moderation|audio|realtime|dall-e|gpt-.*image|babbage|davinci|instruct/i.test(
-            m.id
-          ) &&
-          (openAiChatPriority.includes(m.id) ||
-            /^(gpt-5|gpt-6|gpt-4o|gpt-4\.1|chatgpt-4o|claude-3|gemini-|deepseek)/i.test(m.id))
-      )
-      .sort((a, b) => {
-        const iA = openAiChatPriority.indexOf(a.id);
-        const iB = openAiChatPriority.indexOf(b.id);
-        return (iA === -1 ? 99 : iA) - (iB === -1 ? 99 : iB);
-      })
-      .slice(0, 6);
-
-    discoveredOpenAiModels = [
-      ...imageCandidates.map((m) => ({
-        id: m.id,
-        name:
-          m.id === 'gpt-image-2'
-            ? 'GPT-Image 2 (Codex AI)'
-            : m.id === 'gpt-image-2-4k'
-              ? 'GPT-Image 2 4K Ultra'
-              : m.id === 'gpt-image-2.5'
-                ? 'GPT-Image 2.5 Pro'
-                : m.id === 'gpt-2.5-image'
-                  ? 'GPT 2.5 Image'
-                  : m.id === 'gpt-image-1'
-                    ? 'GPT-Image 1'
-                    : m.name || m.id,
-        badge: '🎨 Tạo & Ghép ảnh',
-        costPerImageUsd: 0.04,
-        supportsInpainting: true,
-        description: m.description || 'Model Tạo phối cảnh, ghép sản phẩm & thiết kế Banner.',
-      })),
-      ...chatCandidates.map((m) => ({
-        id: m.id,
-        name: m.name && m.name !== m.id ? `${m.name} (${m.id})` : m.id,
-        badge: '💬 Chat & Phân tích ảnh',
-        costPerImageUsd: 0.0,
-        supportsInpainting: true,
-        description: m.description || 'Model Trò chuyện & phân tích ảnh hiện trường.',
-      })),
-    ];
-
-    const chosenOtherModel =
-      input.modelId?.trim() ||
-      discoveredOpenAiModels[0]?.id ||
-      config.providers[detectedPid]?.activeModel ||
-      (detectedPid === 'openai_dalle' ? 'gpt-2.5-image' : detectedPid);
+    const requestedClean = input.modelId?.replace(/^models\//, '').trim() || '';
+    const chosenEntry =
+      discoveredModels.find((v) => v.id === requestedClean) ||
+      discoveredModels.find((v) => v.badge.includes('Tạo')) ||
+      discoveredModels[0];
+    const chosenModel = chosenEntry?.id || requestedClean || storedEntry?.activeModel || explicitPid;
 
     const currentCfg = readStoredConfig();
-    const prevEntry = currentCfg.providers[detectedPid] || {};
-    currentCfg.providers[detectedPid] = {
+    const prevEntry = currentCfg.providers[explicitPid] || {};
+    currentCfg.providers[explicitPid] = {
       ...prevEntry,
       apiKey: effectiveKey,
-      apiEndpoint: `${successfulBaseUrl}/images/generations`,
-      activeModel: chosenOtherModel,
-      ...(discoveredOpenAiModels.length > 0 ? { discoveredModels: discoveredOpenAiModels } : {}),
+      ...(explicitEndpoint ? { apiEndpoint: explicitEndpoint } : {}),
+      activeModel: chosenModel,
+      ...(discoveredModels.length > 0 ? { discoveredModels } : {}),
     };
-    currentCfg.defaultProviderId = detectedPid;
-    currentCfg.defaultModelId = chosenOtherModel;
+    currentCfg.defaultProviderId = explicitPid;
+    currentCfg.defaultModelId = chosenModel;
     writeStoredConfig(currentCfg);
 
-    const providerLabel =
-      detectedPid === 'openai_dalle'
-        ? 'OpenAI API'
-        : effectiveKey.startsWith('sk-jy-') || effectiveKey.startsWith('sk-cx-')
-          ? 'DiDi / CCPro Gateway'
-          : effectiveKey.startsWith('sk-or-')
-            ? 'OpenRouter API'
-            : effectiveKey.startsWith('gsk_')
-              ? 'Groq API'
-              : 'Custom API';
+    const imgCount = providerModels.filter(
+      (m) =>
+        m.supportedOperations.includes('image_generation') ||
+        m.supportedOperations.includes('image_editing_ref')
+    ).length;
+    const chatCount = providerModels.filter(
+      (m) =>
+        m.supportedOperations.includes('text_analysis') ||
+        m.supportedOperations.includes('vision_understanding')
+    ).length;
 
     return {
       ok: true,
       connected: true,
-      providerId: detectedPid,
-      modelTested: chosenOtherModel,
+      providerId: explicitPid,
+      modelTested: chosenModel,
       latencyMs: Date.now() - started,
       replyText:
-        discoveredOpenAiModels.length > 0
-          ? `Đã nhận diện ${providerLabel} (quét ${totalOtherScanned} model) → Phân loại được ${discoveredOpenAiModels.length} Model khả dụng. Đã chọn: ${chosenOtherModel}!`
-          : `Đã kết nối khóa API (${maskKey(effectiveKey)}) cho ${providerLabel}. Đã chọn Model: ${chosenOtherModel}!`,
-      maskedKey: maskKey(effectiveKey),
-      discoveredModels: discoveredOpenAiModels.length > 0 ? discoveredOpenAiModels : undefined,
+        conn?.listApiStatus === 'ok'
+          ? `Kết nối thành công ${conn.providerName} → Đọc được ${providerModels.length} model (${imgCount} tạo/sửa ảnh, ${chatCount} phân tích brief). Đã chọn: ${chosenModel}.`
+          : `Đã lưu cấu hình ${explicitPid} (${maskSecretValue(effectiveKey)}). ${conn?.listApiDetail || ''}`,
+      maskedKey: maskSecretValue(effectiveKey),
+      discoveredModels: discoveredModels.length > 0 ? discoveredModels : undefined,
       providerStatus: this.getActiveProviderInfo(),
     };
   }
@@ -1292,3 +942,4 @@ export * from './google-imagen.provider';
 export * from './openai-image.provider';
 export * from './universal-cloud.provider';
 export * from './local-sandbox.provider';
+export * from './model-registry.service';

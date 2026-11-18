@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { apiRequest } from '@/core/http/client';
 import {
   ArrowUpRight,
@@ -327,7 +328,7 @@ export function SeoAiReportPanel({
           cachedAvgPosition: topic.avgPosition ?? undefined,
         },
       });
-      await apiRequest<{ id: number; title: string }>('/api/v1/ads', {
+      const articleRes = await apiRequest<{ id: number; title: string }>('/api/v1/ads', {
         method: 'POST',
         csrfToken,
         body: {
@@ -339,7 +340,7 @@ export function SeoAiReportPanel({
         },
       });
       setPlannedKeywords((prev) => ({ ...prev, [topic.keyword]: true }));
-      setStatusMsg(`Đã tạo bản nháp bài viết "${topic.suggestedTopicTitle}" trong mục Nội dung.`);
+      setStatusMsg(`Đã tạo bản nháp bài viết #${articleRes.id} "${topic.suggestedTopicTitle}" trong mục Nội dung.`);
       onContentCreated?.();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo bài nháp.');
@@ -729,28 +730,37 @@ export function SeoAiReportPanel({
                       )}
 
                       {canEditContent && (
-                        <button
-                          type="button"
-                          disabled={isPlanned || isBusy}
-                          onClick={() => void handlePlanTopic(topic)}
-                          className={`h-8 px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
-                            isPlanned
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                              : 'bg-[#0F275C] hover:bg-[#1E3A8A] text-white disabled:opacity-50'
-                          }`}
-                        >
-                          {isPlanned ? (
-                            <>
-                              <CheckCircle2 className="w-3.5 h-3.5" />
-                              <span>Đã đưa vào bài nháp</span>
-                            </>
-                          ) : (
-                            <>
-                              <FilePlus2 className="w-3.5 h-3.5" />
-                              <span>{isBusy ? 'Đang tạo bài...' : 'Tạo bài nháp ngay'}</span>
-                            </>
-                          )}
-                        </button>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Link
+                            href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=seo_ai&websiteDomain=${encodeURIComponent(topic.targetWebsite)}&campaignName=${encodeURIComponent(topic.suggestedTopicTitle)}${activeReport ? `&snapshotId=${encodeURIComponent(activeReport.id)}` : ''}`}
+                            className="h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1"
+                            title="Mở Brief thiết kế minh họa gắn từ khóa & snapshot SEO này"
+                          >
+                            <span>Tạo brief minh họa</span>
+                          </Link>
+                          <button
+                            type="button"
+                            disabled={isPlanned || isBusy}
+                            onClick={() => void handlePlanTopic(topic)}
+                            className={`h-8 px-3 rounded-lg text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                              isPlanned
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : 'bg-[#0F275C] hover:bg-[#1E3A8A] text-white disabled:opacity-50'
+                            }`}
+                          >
+                            {isPlanned ? (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>Đã đưa vào bài nháp</span>
+                              </>
+                            ) : (
+                              <>
+                                <FilePlus2 className="w-3.5 h-3.5" />
+                                <span>{isBusy ? 'Đang tạo bài...' : 'Tạo bài nháp ngay'}</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>

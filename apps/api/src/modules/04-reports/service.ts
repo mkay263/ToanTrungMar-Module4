@@ -1149,6 +1149,8 @@ export async function getScopedReportsDashboard(
   };
 }
 
+import { getM04ResultsReportSpec } from './m04-spec.service';
+
 function escapeCsvCell(val: string | number): string {
   const s = String(val ?? '');
   if (s.includes(',') || s.includes('"') || s.includes('\n')) {
@@ -1163,6 +1165,11 @@ export async function generateScopedReportExportBuffer(
   format: 'xlsx' | 'csv' = 'xlsx',
 ): Promise<{ buffer: Buffer; fileName: string; mimeType: string }> {
   const dashboard = await getScopedReportsDashboard(user, rawQuery);
+  const m04Spec = await getM04ResultsReportSpec(user, {
+    websiteId: dashboard.websiteId || 'all',
+    from: dashboard.fromDate,
+    to: dashboard.toDate,
+  });
   const dateStamp = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Ho_Chi_Minh',
     year: 'numeric',
@@ -1188,11 +1195,19 @@ export async function generateScopedReportExportBuffer(
   });
 
   if (format === 'csv') {
+    const cplLabel =
+      m04Spec.metrics.costPerValidAdLead !== null
+        ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} VND`
+        : 'Chưa đủ dữ liệu';
+    const adCostLabel =
+      m04Spec.metrics.attributedAdCost !== null && m04Spec.metrics.attributedAdCost !== undefined
+        ? `${m04Spec.metrics.attributedAdCost.toLocaleString('vi-VN')} VND`
+        : 'Chưa kết nối/chưa tách riêng';
     const lines: string[] = [
-      `Báo cáo kết quả Toàn Trung - ${dashboard.scopeDescription}`,
-      `Kỳ báo cáo,${dashboard.fromDate} đến ${dashboard.toDate}`,
-      `Website nguồn,${dashboard.websiteLabel || 'Tất cả website'}`,
-      `Lead tiếp nhận (L1),${dashboard.overview.totalLeadsL1},Lead hợp lệ (L2),${dashboard.overview.validLeadsL2},Lead hiệu quả (L3),${dashboard.overview.effectiveLeadsL3},Tỷ lệ chốt,${dashboard.overview.winRateText}`,
+      `Hiệu quả Marketing Toàn Trung - ${dashboard.scopeDescription}`,
+      `Kỳ báo cáo,${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate}`,
+      `Website nguồn,${m04Spec.scope.websiteLabel}`,
+      `Chi phí quảng cáo,${adCostLabel},Lead tiếp nhận,${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount},Lead hợp lệ (L2),${m04Spec.metrics.validLeadCount},CPL quảng cáo hợp lệ,${cplLabel},Chốt thành công,${m04Spec.metrics.wonLeadCount},Tỷ lệ chốt,${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'}`,
       '',
       [
         'STT',
@@ -1236,23 +1251,74 @@ export async function generateScopedReportExportBuffer(
     const csvContent = '\uFEFF' + lines.join('\r\n');
     return {
       buffer: Buffer.from(csvContent, 'utf8'),
-      fileName: `BaoCao_ToanTrung_${dashboard.websiteId || 'all'}_${dateStamp}.csv`,
+      fileName: `BaoCao_HieuQuaMarketing_${dashboard.websiteId || 'all'}_${dateStamp}.csv`,
       mimeType: 'text/csv; charset=utf-8',
     };
   }
 
   const xlsxBuffer = buildStandardXlsxBuffer([
     {
-      name: 'TongHopDoiSoat',
-      title: `TỔNG HỢP & ĐỐI SOÁT KẾT QUẢ — ${dashboard.scopeDescription}`,
+      name: 'HieuQuaMarketing',
+      title: `HIỆU QUẢ MARKETING — ${m04Spec.scope.websiteLabel} (${m04Spec.scope.startDate} → ${m04Spec.scope.endDate})`,
       metadata: [
-        { label: 'Kỳ báo cáo', value: `${dashboard.fromDate} đến ${dashboard.toDate} (Asia/Ho_Chi_Minh)` },
-        { label: 'Phạm vi website', value: dashboard.websiteLabel || 'Tất cả website' },
-        { label: 'Cơ sở thống kê', value: 'Tập Lead tạo trong kỳ với trạng thái xử lý hiện tại' },
-        { label: 'Lead tiếp nhận (L1)', value: String(dashboard.overview.totalLeadsL1) },
-        { label: 'Lead hợp lệ (L2)', value: String(dashboard.overview.validLeadsL2) },
-        { label: 'Lead hiệu quả (L3)', value: String(dashboard.overview.effectiveLeadsL3) },
-        { label: 'Chốt thành công / Tỷ lệ chốt', value: `${dashboard.overview.wonCount} (${dashboard.overview.winRateText})` },
+        { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate} (Asia/Ho_Chi_Minh)` },
+        { label: 'Phạm vi website', value: m04Spec.scope.websiteLabel },
+        { label: 'Chi phí quảng cáo', value: m04Spec.metrics.attributedAdCost !== null && m04Spec.metrics.attributedAdCost !== undefined ? `${m04Spec.metrics.attributedAdCost.toLocaleString('vi-VN')} ₫` : 'Chưa tách riêng' },
+        { label: 'Lead tiếp nhận / Hợp lệ (L2)', value: `${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount} / ${m04Spec.metrics.validLeadCount}` },
+        { label: 'CPL quảng cáo hợp lệ', value: m04Spec.metrics.costPerValidAdLead !== null ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} ₫ (${m04Spec.metrics.validAttributedAdLeadCount ?? 0} Lead Ads L2)` : 'Chưa đủ dữ liệu' },
+        { label: 'Chốt thành công / Tỷ lệ chốt', value: `${m04Spec.metrics.wonLeadCount} (${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'})` },
+      ],
+      columns: [
+        { header: 'Website', key: 'website', width: 26, type: 'string' },
+        { header: 'Lead tiếp nhận', key: 'leadCount', width: 15, type: 'number' },
+        { header: 'Lead hợp lệ', key: 'validCount', width: 15, type: 'number' },
+        { header: 'Lead Ads L2', key: 'adLeadCount', width: 15, type: 'number' },
+        { header: 'Chi phí Ads (VND)', key: 'adCost', width: 18, type: 'number' },
+        { header: 'CPL Ads (VND)', key: 'cpl', width: 16, type: 'number' },
+        { header: 'Chốt thành công', key: 'wonCount', width: 15, type: 'number' },
+      ],
+      rows: m04Spec.tables.byWebsite.map((w) => ({
+        website: w.website,
+        leadCount: w.leadCount,
+        validCount: w.validCount,
+        adLeadCount: w.adLeadCount,
+        adCost: w.adCost ?? 0,
+        cpl: w.cpl ? Math.round(w.cpl) : 0,
+        wonCount: w.wonCount,
+      })),
+    },
+    {
+      name: 'KenhVaChienDich',
+      title: `ĐỐI CHIẾU HIỆU QUẢ THEO CHIẾN DỊCH — ${m04Spec.scope.websiteLabel}`,
+      metadata: [
+        { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate}` },
+        { label: 'Ghi chú đối soát Ads', value: m04Spec.metrics.adReconciliationNote || 'Chuẩn L2 CRM' },
+      ],
+      columns: [
+        { header: 'Chiến dịch', key: 'campaignName', width: 34, type: 'string' },
+        { header: 'Website gắn', key: 'websiteDomain', width: 22, type: 'string' },
+        { header: 'Phân bổ', key: 'attributionStatus', width: 22, type: 'string' },
+        { header: 'Chi phí (VND)', key: 'adCost', width: 18, type: 'number' },
+        { header: 'Clicks', key: 'clicks', width: 12, type: 'number' },
+        { header: 'Lead Ads L2', key: 'validAdLeads', width: 14, type: 'number' },
+        { header: 'CPL (VND)', key: 'cpl', width: 16, type: 'number' },
+      ],
+      rows: (m04Spec.tables.byCampaign || []).map((c) => ({
+        campaignName: c.campaignName,
+        websiteDomain: c.websiteDomain || 'Chung/Chưa tách',
+        attributionStatus: c.attributionStatus,
+        adCost: c.adCost ?? 0,
+        clicks: c.clicks,
+        validAdLeads: c.validAttributedAdLeadCount,
+        cpl: c.costPerValidAdLead ? Math.round(c.costPerValidAdLead) : 0,
+      })),
+    },
+    {
+      name: 'TongHopSales',
+      title: `TỔNG HỢP XỬ LÝ THEO SALES — ${dashboard.scopeDescription}`,
+      metadata: [
+        { label: 'Kỳ báo cáo', value: `${dashboard.fromDate} đến ${dashboard.toDate}` },
+        { label: 'Lead tiếp nhận (L1) / Hợp lệ (L2)', value: `${dashboard.overview.totalLeadsL1} / ${dashboard.overview.validLeadsL2}` },
       ],
       columns: [
         { header: 'Nhân sự / Nhóm đối soát', key: 'salesName', width: 34, type: 'string' },
@@ -1314,7 +1380,7 @@ export async function generateScopedReportExportBuffer(
 
   return {
     buffer: xlsxBuffer,
-    fileName: `BaoCao_ToanTrung_${dashboard.websiteId || 'all'}_${dateStamp}.xlsx`,
+    fileName: `BaoCao_HieuQuaMarketing_${dashboard.websiteId || 'all'}_${dateStamp}.xlsx`,
     mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   };
 }

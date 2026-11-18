@@ -75,7 +75,8 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
     simulateTimeout?: boolean,
     referenceImageBuffer?: Buffer,
     referenceImageMimeType?: string,
-    productReferenceBuffers?: Array<{ buffer: Buffer; mimeType: string; name: string }>
+    productReferenceBuffers?: Array<{ buffer: Buffer; mimeType: string; name: string }>,
+    requireReferenceEdit?: boolean
   ): Promise<ProviderGenerationResult> {
     const started = Date.now();
     if (simulateTimeout) {
@@ -85,6 +86,10 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
         mimeType: 'image/png',
         durationMs: Date.now() - started,
         modelUsed: modelId,
+        requestedModel: modelId,
+        reportedModel: null,
+        tokensActual: false,
+        costState: 'unknown',
         provider: this.providerId,
         promptTokens: 0,
         completionTokens: 0,
@@ -92,7 +97,7 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
         costMicros: 0n,
         costCurrency: 'USD',
         status: 'timeout',
-        errorMessage: `${this.providerName} quá thời gian phản hồi 60s (Simulated UC06 E1).`,
+        errorMessage: `${this.providerName} quá thời gian phản hồi 75s (Simulated UC06 E1).`,
       };
     }
 
@@ -102,6 +107,10 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
         mimeType: 'image/png',
         durationMs: Date.now() - started,
         modelUsed: modelId,
+        requestedModel: modelId,
+        reportedModel: null,
+        tokensActual: false,
+        costState: 'unknown',
         provider: this.providerId,
         promptTokens: 0,
         completionTokens: 0,
@@ -114,26 +123,57 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
     }
 
     try {
-      // When using DiDi / CCPro / Codex proxy, map image models to the verified operational model `gpt-image-2`
-      const isDiDiGateway =
-        this.apiEndpoint.includes('ccpro.cn') ||
-        Boolean(this.apiKey?.startsWith('sk-jy-') || this.apiKey?.startsWith('sk-cx-'));
-
-      const effectiveModel = isDiDiGateway ? 'gpt-image-2' : modelId;
+      const effectiveModel = modelId.trim() || this.activeModel;
       const hasSitePhoto = Boolean(referenceImageBuffer && referenceImageBuffer.length > 0);
       const hasProductPhotos = Boolean(productReferenceBuffers && productReferenceBuffers.length > 0);
+      const mustUseReferenceEdit = Boolean(requireReferenceEdit || hasSitePhoto || hasProductPhotos);
+
+      if (requireReferenceEdit && !hasSitePhoto && !hasProductPhotos) {
+        return {
+          imageBuffer: Buffer.alloc(0),
+          mimeType: 'image/png',
+          durationMs: Date.now() - started,
+          modelUsed: effectiveModel,
+          requestedModel: effectiveModel,
+          reportedModel: null,
+          tokensActual: false,
+          costState: 'unknown',
+          provider: this.providerId,
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          costMicros: 0n,
+          costCurrency: 'USD',
+          status: 'failed',
+          errorCode: 'MISSING_REFERENCE_IMAGE_BUFFER',
+          errorMessage: 'Tác vụ chỉnh sửa yêu cầu ảnh gốc hoặc ảnh tham chiếu hợp lệ trên máy chủ.',
+        };
+      }
+
+      const isGptImage2Family = /^gpt-image-2/i.test(effectiveModel);
+      const isGptImageFamily = /^gpt-image|^gpt-2\.5-image/i.test(effectiveModel);
+      const chosenSize =
+        isGptImage2Family || widthPx === heightPx
+          ? '1024x1024'
+          : isGptImageFamily
+            ? widthPx >= heightPx
+              ? '1536x1024'
+              : '1024x1536'
+            : widthPx >= heightPx
+              ? '1792x1024'
+              : '1024x1792';
 
       let response: Response;
-      if (hasSitePhoto || hasProductPhotos) {
-        // Use /v1/images/edits multipart FormData so the AI strictly bases the result on the provided image(s)!
+      if (mustUseReferenceEdit) {
+        // Strict image editing path (/v1/images/edits): NEVER silently fall back to text-only /images/generations
         const editsEndpoint = this.apiEndpoint.replace(/\/images\/generations\/?$/i, '/images/edits');
         const form = new FormData();
         form.append('model', effectiveModel);
         const editInstruction = hasSitePhoto
-          ? `STRICTLY preserve the exact original provided photo background, structure, objects, lighting, and camera angle. Do NOT over-transform or invent a new scene. Only apply the user's exact requested edit cleanly onto the provided image: ${prompt}`
+          ? `STRICTLY preserve the exact original provided photo background, structure, objects, lighting, and camera angle. Only apply the user's exact requested edit cleanly onto the provided image: ${prompt}`
           : `Use the provided product reference image(s) faithfully without altering their shape, logo, or details: ${prompt}`;
         form.append('prompt', editInstruction);
-        form.append('size', isDiDiGateway ? '1024x1024' : widthPx >= heightPx ? '1536x1024' : '1024x1536');
+        form.append('size', chosenSize);
 
         if (hasSitePhoto && referenceImageBuffer) {
           const blob = new Blob([new Uint8Array(referenceImageBuffer)], {
@@ -146,7 +186,11 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
             const blob = new Blob([new Uint8Array(prod.buffer)], {
               type: prod.mimeType || 'image/png',
             });
-            form.append(hasSitePhoto ? 'image[]' : idx === 0 ? 'image' : 'image[]', blob, prod.name || `product-${idx + 1}.png`);
+            form.append(
+              hasSitePhoto || idx > 0 ? 'image[]' : 'image',
+              blob,
+              prod.name || `product-${idx + 1}.png`
+            );
           });
         }
 
@@ -156,38 +200,16 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
             Authorization: `Bearer ${this.apiKey}`,
           },
           body: form,
-          signal: AbortSignal.timeout(25000),
+          signal: AbortSignal.timeout(75000),
         });
-
-        // If the gateway does not support multipart /images/edits, automatically fall back to /images/generations
-        if (!response.ok) {
-          const fallbackBody: Record<string, unknown> = {
-            model: effectiveModel,
-            prompt,
-            n: 1,
-            size: isDiDiGateway ? '1024x1024' : widthPx >= heightPx ? '1792x1024' : '1024x1792',
-          };
-          if (!isDiDiGateway) {
-            fallbackBody.response_format = 'b64_json';
-          }
-          response = await fetch(this.apiEndpoint, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${this.apiKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(fallbackBody),
-            signal: AbortSignal.timeout(25000),
-          });
-        }
       } else {
         const payloadBody: Record<string, unknown> = {
           model: effectiveModel,
           prompt,
           n: 1,
-          size: isDiDiGateway ? '1024x1024' : widthPx >= heightPx ? '1792x1024' : '1024x1792',
+          size: chosenSize,
         };
-        if (!isDiDiGateway) {
+        if (!isGptImageFamily) {
           payloadBody.response_format = 'b64_json';
         }
 
@@ -198,7 +220,7 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(payloadBody),
-          signal: AbortSignal.timeout(25000),
+          signal: AbortSignal.timeout(75000),
         });
       }
 
@@ -209,7 +231,11 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
           imageBuffer: Buffer.alloc(0),
           mimeType: 'image/png',
           durationMs,
-          modelUsed: modelId,
+          modelUsed: effectiveModel,
+          requestedModel: effectiveModel,
+          reportedModel: null,
+          tokensActual: false,
+          costState: 'unknown',
           provider: this.providerId,
           promptTokens: 0,
           completionTokens: 0,
@@ -217,11 +243,25 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
           costMicros: 0n,
           costCurrency: 'USD',
           status: 'failed',
-          errorMessage: `${this.providerName} Error [${response.status}]: ${text}`,
+          errorCode: `UPSTREAM_HTTP_${response.status}`,
+          errorMessage: `${this.providerName} Error [${response.status}]: ${text.slice(0, 240)}`,
         };
       }
 
-      const json = await response.json();
+      const json = (await response.json()) as {
+        model?: string;
+        data?: Array<{ b64_json?: string; url?: string }>;
+        predictions?: Array<{ bytesBase64Encoded?: string }>;
+        images?: string[];
+        image_base64?: string;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+          input_tokens?: number;
+          output_tokens?: number;
+        };
+      };
       const b64 =
         json.data?.[0]?.b64_json ||
         json.predictions?.[0]?.bytesBase64Encoded ||
@@ -233,7 +273,7 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
         imageBuffer = Buffer.from(b64, 'base64');
       } else if (json.data?.[0]?.url) {
         try {
-          const imgFetch = await fetch(json.data[0].url);
+          const imgFetch = await fetch(json.data[0].url, { signal: AbortSignal.timeout(25000) });
           if (imgFetch.ok) {
             const arr = await imgFetch.arrayBuffer();
             imageBuffer = Buffer.from(arr);
@@ -248,7 +288,11 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
           imageBuffer: Buffer.alloc(0),
           mimeType: 'image/png',
           durationMs,
-          modelUsed: modelId,
+          modelUsed: effectiveModel,
+          requestedModel: effectiveModel,
+          reportedModel: typeof json.model === 'string' && json.model.trim() ? json.model.trim() : null,
+          tokensActual: false,
+          costState: 'unknown',
           provider: this.providerId,
           promptTokens: 0,
           completionTokens: 0,
@@ -260,33 +304,58 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
         };
       }
 
-      const costMicros = BigInt(Math.round(this.costPerImageUsd * 1_000_000));
+      const usage = json.usage;
+      const hasUsage =
+        usage &&
+        (typeof usage.total_tokens === 'number' ||
+          typeof usage.prompt_tokens === 'number' ||
+          typeof usage.input_tokens === 'number');
+      const promptTokens = Number(usage?.prompt_tokens ?? usage?.input_tokens ?? 0);
+      const completionTokens = Number(usage?.completion_tokens ?? usage?.output_tokens ?? 0);
+      const totalTokens = Number(usage?.total_tokens ?? promptTokens + completionTokens);
+      const reportedModel =
+        typeof json.model === 'string' && json.model.trim() ? json.model.trim() : null;
+      const reportedModelNote = reportedModel
+        ? null
+        : 'Gateway không trả field `model` trong phản hồi ảnh; chỉ ghi nhận alias đã yêu cầu.';
+
       return {
         imageBuffer,
         mimeType: 'image/png',
         durationMs,
-        modelUsed: modelId,
+        modelUsed: effectiveModel,
+        requestedModel: effectiveModel,
+        reportedModel,
+        reportedModelNote,
         provider: this.providerId,
-        promptTokens: Math.round(prompt.length * 1.5),
-        completionTokens: 1536,
-        totalTokens: Math.round(prompt.length * 1.5) + 1536,
-        costMicros,
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        tokensActual: Boolean(hasUsage),
+        costMicros: 0n,
         costCurrency: 'USD',
+        costState: 'unknown',
+        isCostEstimated: false,
         status: 'success',
       };
     } catch (err) {
+      const isTimeout = err instanceof Error && /abort|timeout/i.test(err.name + ' ' + err.message);
       return {
         imageBuffer: Buffer.alloc(0),
         mimeType: 'image/png',
         durationMs: Date.now() - started,
         modelUsed: modelId,
+        requestedModel: modelId,
+        reportedModel: null,
+        tokensActual: false,
+        costState: 'unknown',
         provider: this.providerId,
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
         costMicros: 0n,
         costCurrency: 'USD',
-        status: 'failed',
+        status: isTimeout ? 'timeout' : 'failed',
         errorMessage: err instanceof Error ? err.message : `Lỗi kết nối ${this.providerName}.`,
       };
     }
@@ -304,7 +373,8 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
       input.simulateTimeout,
       input.referenceImageBuffer,
       input.referenceImageMimeType,
-      input.productReferenceBuffers
+      input.productReferenceBuffers,
+      input.requireReferenceEdit
     );
   }
 
@@ -316,9 +386,10 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
       input.dimensions.widthPx,
       input.dimensions.heightPx,
       input.simulateTimeout,
-      undefined,
-      undefined,
-      input.productReferenceBuffers
+      input.referenceImageBuffer,
+      input.referenceImageMimeType,
+      input.productReferenceBuffers,
+      input.requireReferenceEdit
     );
   }
 }

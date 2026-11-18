@@ -125,6 +125,7 @@ export class OpenAiImageProvider implements AiDesignProvider {
             Authorization: `Bearer ${this.apiKey}`,
           },
           body: form,
+          signal: AbortSignal.timeout(75000),
         });
       } else {
         const bodyPayload: Record<string, unknown> = {
@@ -143,6 +144,7 @@ export class OpenAiImageProvider implements AiDesignProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(bodyPayload),
+          signal: AbortSignal.timeout(75000),
         });
       }
 
@@ -154,6 +156,10 @@ export class OpenAiImageProvider implements AiDesignProvider {
           mimeType: 'image/png',
           durationMs,
           modelUsed: requestedModel,
+          requestedModel,
+          reportedModel: null,
+          tokensActual: false,
+          costState: 'unknown',
           provider: 'openai_dalle',
           promptTokens: 0,
           completionTokens: 0,
@@ -165,14 +171,24 @@ export class OpenAiImageProvider implements AiDesignProvider {
         };
       }
 
-      const json = await res.json();
+      const json = (await res.json()) as {
+        model?: string;
+        data?: Array<{ b64_json?: string; url?: string }>;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        };
+      };
       const b64 = json.data?.[0]?.b64_json;
       let imgBuf: Buffer = Buffer.alloc(0);
       if (b64) {
         imgBuf = Buffer.from(b64, 'base64');
       } else if (json.data?.[0]?.url) {
         try {
-          const imgRes = await fetch(json.data[0].url);
+          const imgRes = await fetch(json.data[0].url, { signal: AbortSignal.timeout(25000) });
           if (imgRes.ok) {
             imgBuf = Buffer.from(await imgRes.arrayBuffer());
           }
@@ -181,17 +197,33 @@ export class OpenAiImageProvider implements AiDesignProvider {
         }
       }
 
+      const usage = json.usage;
+      const hasUsage = Boolean(
+        usage &&
+          (typeof usage.total_tokens === 'number' ||
+            typeof usage.input_tokens === 'number' ||
+            typeof usage.prompt_tokens === 'number')
+      );
+      const pTokens = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0);
+      const cTokens = Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0);
+      const tTokens = Number(usage?.total_tokens ?? pTokens + cTokens);
+
       return {
         imageBuffer: imgBuf,
         mimeType: 'image/png',
         durationMs,
         modelUsed: requestedModel,
+        requestedModel,
+        reportedModel: typeof json.model === 'string' && json.model.trim() ? json.model.trim() : null,
         provider: 'openai_dalle',
-        promptTokens: Math.round(input.prompt.length * 1.5),
-        completionTokens: 1024,
-        totalTokens: Math.round(input.prompt.length * 1.5) + 1024,
+        promptTokens: pTokens,
+        completionTokens: cTokens,
+        totalTokens: tTokens,
+        tokensActual: hasUsage,
         costMicros: 40_000n,
         costCurrency: 'USD',
+        costState: 'estimated',
+        isCostEstimated: true,
         status: imgBuf.length > 0 ? 'success' : 'failed',
         errorMessage: imgBuf.length > 0 ? undefined : 'OpenAI không trả về dữ liệu ảnh hợp lệ.',
       };
@@ -237,10 +269,11 @@ export class OpenAiImageProvider implements AiDesignProvider {
     }
 
     try {
+      const hasSitePhoto = Boolean(input.referenceImageBuffer && input.referenceImageBuffer.length > 0);
       const hasProductPhotos = Boolean(input.productReferenceBuffers && input.productReferenceBuffers.length > 0);
       let res: Response;
 
-      if (isGptImageModel && hasProductPhotos && input.productReferenceBuffers) {
+      if (isGptImageModel && (hasSitePhoto || hasProductPhotos)) {
         const form = new FormData();
         form.append('model', apiModel);
         form.append('prompt', input.prompt);
@@ -248,7 +281,13 @@ export class OpenAiImageProvider implements AiDesignProvider {
           'size',
           input.dimensions.widthPx >= input.dimensions.heightPx ? '1536x1024' : '1024x1536'
         );
-        input.productReferenceBuffers.forEach((prod, idx) => {
+        if (hasSitePhoto && input.referenceImageBuffer) {
+          const blob = new Blob([new Uint8Array(input.referenceImageBuffer)], {
+            type: input.referenceImageMimeType || 'image/png',
+          });
+          form.append('image[]', blob, 'site-photo.png');
+        }
+        input.productReferenceBuffers?.forEach((prod, idx) => {
           const blob = new Blob([new Uint8Array(prod.buffer)], {
             type: prod.mimeType || 'image/png',
           });
@@ -260,6 +299,7 @@ export class OpenAiImageProvider implements AiDesignProvider {
             Authorization: `Bearer ${this.apiKey}`,
           },
           body: form,
+          signal: AbortSignal.timeout(75000),
         });
       } else {
         const bodyPayload: Record<string, unknown> = {
@@ -284,6 +324,7 @@ export class OpenAiImageProvider implements AiDesignProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(bodyPayload),
+          signal: AbortSignal.timeout(75000),
         });
       }
 
@@ -295,6 +336,10 @@ export class OpenAiImageProvider implements AiDesignProvider {
           mimeType: 'image/png',
           durationMs,
           modelUsed: requestedModel,
+          requestedModel,
+          reportedModel: null,
+          tokensActual: false,
+          costState: 'unknown',
           provider: 'openai_dalle',
           promptTokens: 0,
           completionTokens: 0,
@@ -306,14 +351,24 @@ export class OpenAiImageProvider implements AiDesignProvider {
         };
       }
 
-      const json = await res.json();
+      const json = (await res.json()) as {
+        model?: string;
+        data?: Array<{ b64_json?: string; url?: string }>;
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        };
+      };
       const b64 = json.data?.[0]?.b64_json;
       let imgBuf: Buffer = Buffer.alloc(0);
       if (b64) {
         imgBuf = Buffer.from(b64, 'base64');
       } else if (json.data?.[0]?.url) {
         try {
-          const imgRes = await fetch(json.data[0].url);
+          const imgRes = await fetch(json.data[0].url, { signal: AbortSignal.timeout(25000) });
           if (imgRes.ok) {
             imgBuf = Buffer.from(await imgRes.arrayBuffer());
           }
@@ -322,17 +377,33 @@ export class OpenAiImageProvider implements AiDesignProvider {
         }
       }
 
+      const usage = json.usage;
+      const hasUsage = Boolean(
+        usage &&
+          (typeof usage.total_tokens === 'number' ||
+            typeof usage.input_tokens === 'number' ||
+            typeof usage.prompt_tokens === 'number')
+      );
+      const pTokens = Number(usage?.input_tokens ?? usage?.prompt_tokens ?? 0);
+      const cTokens = Number(usage?.output_tokens ?? usage?.completion_tokens ?? 0);
+      const tTokens = Number(usage?.total_tokens ?? pTokens + cTokens);
+
       return {
         imageBuffer: imgBuf,
         mimeType: 'image/png',
         durationMs,
         modelUsed: requestedModel,
+        requestedModel,
+        reportedModel: typeof json.model === 'string' && json.model.trim() ? json.model.trim() : null,
         provider: 'openai_dalle',
-        promptTokens: Math.round(input.prompt.length * 1.5),
-        completionTokens: 1024,
-        totalTokens: Math.round(input.prompt.length * 1.5) + 1024,
+        promptTokens: pTokens,
+        completionTokens: cTokens,
+        totalTokens: tTokens,
+        tokensActual: hasUsage,
         costMicros: 40_000n,
         costCurrency: 'USD',
+        costState: 'estimated',
+        isCostEstimated: true,
         status: imgBuf.length > 0 ? 'success' : 'failed',
         errorMessage: imgBuf.length > 0 ? undefined : 'OpenAI không trả về dữ liệu ảnh hợp lệ.',
       };

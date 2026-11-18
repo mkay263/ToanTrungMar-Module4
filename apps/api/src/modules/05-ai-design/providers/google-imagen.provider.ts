@@ -130,7 +130,7 @@ export class GoogleImagenProvider implements AiDesignProvider {
               responseModalities: ['TEXT', 'IMAGE'],
             },
           }),
-          signal: AbortSignal.timeout(35000),
+          signal: AbortSignal.timeout(60000),
         });
         if (!res.ok) {
           const errTxt = await res.text().catch(() => '');
@@ -141,6 +141,12 @@ export class GoogleImagenProvider implements AiDesignProvider {
           continue;
         }
         const json = (await res.json()) as {
+          modelVersion?: string;
+          usageMetadata?: {
+            promptTokenCount?: number;
+            candidatesTokenCount?: number;
+            totalTokenCount?: number;
+          };
           candidates?: Array<{
             content?: {
               parts?: Array<{
@@ -153,18 +159,24 @@ export class GoogleImagenProvider implements AiDesignProvider {
         const imgPart = resParts.find((p) => p.inlineData?.data);
         if (!imgPart?.inlineData?.data) continue;
 
+        const um = json.usageMetadata;
+        const hasUsage = Boolean(um && typeof um.totalTokenCount === 'number');
         return {
           result: {
             imageBuffer: Buffer.from(imgPart.inlineData.data, 'base64'),
             mimeType: imgPart.inlineData.mimeType || 'image/png',
             durationMs: Date.now() - started,
             modelUsed: geminiImgModel,
+            requestedModel: geminiImgModel,
+            reportedModel: json.modelVersion || null,
             provider: 'google_imagen',
-            promptTokens: Math.round(prompt.length * 1.5),
-            completionTokens: 1290,
-            totalTokens: Math.round(prompt.length * 1.5) + 1290,
+            promptTokens: Number(um?.promptTokenCount ?? 0),
+            completionTokens: Number(um?.candidatesTokenCount ?? 0),
+            totalTokens: Number(um?.totalTokenCount ?? 0),
+            tokensActual: hasUsage,
             costMicros: 0n,
             costCurrency: 'USD',
+            costState: 'unknown',
             status: 'success',
           },
         };
@@ -309,13 +321,18 @@ export class GoogleImagenProvider implements AiDesignProvider {
         imageBuffer: Buffer.from(b64, 'base64'),
         mimeType: 'image/png',
         durationMs,
-        modelUsed: 'imagen-3.0-generate-002',
+        modelUsed: this.activeModel || 'imagen-3.0-generate-002',
+        requestedModel: this.activeModel || 'imagen-3.0-generate-002',
+        reportedModel: null,
         provider: 'google_imagen',
-        promptTokens: Math.round(input.prompt.length * 1.5),
-        completionTokens: 2048,
-        totalTokens: Math.round(input.prompt.length * 1.5) + 2048,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        tokensActual: false,
         costMicros,
         costCurrency: 'USD',
+        costState: 'estimated',
+        isCostEstimated: true,
         status: 'success',
       };
     } catch (err) {
@@ -439,13 +456,18 @@ export class GoogleImagenProvider implements AiDesignProvider {
         imageBuffer: Buffer.from(b64, 'base64'),
         mimeType: 'image/png',
         durationMs,
-        modelUsed: 'imagen-3.0-generate-002',
+        modelUsed: this.activeModel || 'imagen-3.0-generate-002',
+        requestedModel: this.activeModel || 'imagen-3.0-generate-002',
+        reportedModel: null,
         provider: 'google_imagen',
-        promptTokens: Math.round(input.prompt.length * 1.5),
-        completionTokens: 1536,
-        totalTokens: Math.round(input.prompt.length * 1.5) + 1536,
+        promptTokens: 0,
+        completionTokens: 0,
+        totalTokens: 0,
+        tokensActual: false,
         costMicros: 30_000n,
         costCurrency: 'USD',
+        costState: 'estimated',
+        isCostEstimated: true,
         status: 'success',
       };
     } catch (err) {

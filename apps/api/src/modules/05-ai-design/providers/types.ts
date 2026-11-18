@@ -3,7 +3,11 @@
  * Module 05: Hỗ trợ Thiết kế & Phối cảnh AI (UC06)
  */
 
-import type { AiProviderCatalogItemDto, AiProviderId } from '@toantrung/contracts';
+import type {
+  AiModelRegistrySnapshotDto,
+  AiProviderCatalogItemDto,
+  AiProviderId,
+} from '@toantrung/contracts';
 
 export interface QuadCoordinates {
   topLeft: { x: number; y: number };
@@ -39,11 +43,14 @@ export interface PerspectiveGenerationInput {
   idempotencyKey: string;
   simulateTimeout?: boolean;
   disableLocalFallback?: boolean;
+  requireReferenceEdit?: boolean;
 }
 
 export interface BannerGenerationInput {
   workflow: 'banner';
   prompt: string;
+  referenceImageBuffer?: Buffer;
+  referenceImageMimeType?: string;
   productReferenceBuffers?: Array<{ buffer: Buffer; mimeType: string; name: string }>;
   sourceVersionId?: number | null;
   dimensions: {
@@ -60,6 +67,7 @@ export interface BannerGenerationInput {
   idempotencyKey: string;
   simulateTimeout?: boolean;
   disableLocalFallback?: boolean;
+  requireReferenceEdit?: boolean;
 }
 
 export type DesignGenerationInput = PerspectiveGenerationInput | BannerGenerationInput;
@@ -69,12 +77,17 @@ export interface ProviderGenerationResult {
   mimeType: string;
   durationMs: number;
   modelUsed: string;
+  requestedModel?: string;
+  reportedModel?: string | null;
+  reportedModelNote?: string | null;
   provider: AiProviderId;
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  tokensActual?: boolean;
   costMicros: bigint; // 1 USD = 1,000,000 micros
   costCurrency: 'USD' | 'VND';
+  costState?: 'actual' | 'estimated' | 'unknown';
   isCostEstimated?: boolean;
   status: 'success' | 'failed' | 'timeout';
   errorCode?: string;
@@ -103,6 +116,7 @@ export interface ProviderStatusInfo {
   defaultModelId?: string;
   autoFallbackToLocal?: boolean;
   availableProviders?: AiProviderCatalogItemDto[];
+  modelRegistry?: AiModelRegistrySnapshotDto;
 }
 
 export interface AiDesignProvider {

@@ -637,24 +637,28 @@ export async function getM02TrafficInteractionSpec(params?: {
     utmSlug?: string | null,
     pageUrlRaw?: string | null,
   ): string | null => {
+    if (utmSlug === 'multi_website_unsplit') {
+      return null;
+    }
     if (utmSlug && utmSlug.startsWith('domain:')) {
       return utmSlug.slice('domain:'.length).toLowerCase();
     }
     if (pageUrlRaw) {
-      for (const w of scope.availableWebsites) {
-        if (pageUrlRaw.toLowerCase().includes(w.domain.toLowerCase())) {
-          return w.domain;
-        }
-      }
+      const matchedInUrl = scope.availableWebsites.filter((w) =>
+        pageUrlRaw.toLowerCase().includes(w.domain.toLowerCase()),
+      );
+      if (matchedInUrl.length > 1) return null;
+      if (matchedInUrl.length === 1) return matchedInUrl[0].domain;
     }
     const lower = (campaignName || '').toLowerCase();
-    if (lower.includes('bangdientu')) return 'bangdientu.com.vn';
-    if (lower.includes('bangled')) return 'bangled.vn';
-    if (lower.includes('manhinhled')) return 'manhinhled.net.vn';
+    const matchedNames: string[] = [];
+    if (lower.includes('bangdientu')) matchedNames.push('bangdientu.com.vn');
+    if (lower.includes('bangled')) matchedNames.push('bangled.vn');
+    if (lower.includes('manhinhled')) matchedNames.push('manhinhled.net.vn');
     if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt')) {
-      return 'toantrung.com.vn';
+      matchedNames.push('toantrung.com.vn');
     }
-    return null;
+    return matchedNames.length === 1 ? matchedNames[0] : null;
   };
 
   const campAggMap = new Map<

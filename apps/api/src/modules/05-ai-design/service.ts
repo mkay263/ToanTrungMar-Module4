@@ -9,6 +9,7 @@ import {
   recordAiUsageAttempt,
 } from '@toantrung/database';
 import {
+  DESIGN_TASK_LABELS,
   containsCustomerPiiInPrompt,
   sanitizeProjectOrSubjectText,
   toMonetaryAmountDto,
@@ -19,11 +20,14 @@ import {
   type CreateDesignRequestDto,
   type DesignActiveJobDto,
   type DesignAssetVersionItemDto,
+  type DesignBriefDto,
   type DesignChatMessageDto,
   type DesignRequestItemDto,
   type DesignStatus,
+  type DesignTaskCode,
   type DesignType,
   type LedProductSpecDto,
+  type MarketingBriefSubmitDto,
   type ProjectPhotoItemDto,
   type QuadCoordinatesDto,
   type RegenerateDesignDraftDto,
@@ -37,6 +41,7 @@ import {
 import { notifyLeadSalesOnDesignCompleted } from '../01-leads/service';
 import {
   AiDesignProviderFactory,
+  AiModelRegistryService,
   type ProviderStatusInfo,
 } from './providers';
 import {
@@ -56,6 +61,7 @@ import {
 } from './led-technical.engine';
 import {
   processBannerToTargetResolution,
+  renderBrandLayoutOverlayOnImage,
   renderPerspectiveCompositeWithProtection,
   validateGeneratedImageBuffer,
 } from './perspective-compositor';
@@ -173,6 +179,14 @@ interface StoredMetadata {
   contactName?: string | null;
   installationInfo?: string | null;
   productId?: number | null;
+  taskCode?: DesignTaskCode | null;
+  designBrief?: DesignBriefDto | null;
+  websiteId?: string | null;
+  websiteDomain?: string | null;
+  campaignId?: string | null;
+  campaignName?: string | null;
+  contentId?: number | null;
+  sourceModule?: string | null;
   pixelPitch?: string;
   cabinetModelCode?: string | null;
   compositingMode?: CompositingProtectionMode;
@@ -344,7 +358,142 @@ export async function getDesignProjectForUser(
 }
 
 export async function getAiDesignStatus(): Promise<ProviderStatusInfo> {
-  return AiDesignProviderFactory.getActiveProviderInfo();
+  const base = AiDesignProviderFactory.getActiveProviderInfo();
+  const modelRegistry = await AiDesignProviderFactory.getModelRegistry(false).catch(() => undefined);
+  return { ...base, modelRegistry };
+}
+
+export async function createMarketingDesignBrief(
+  actor: SessionUserDto,
+  input: MarketingBriefSubmitDto
+): Promise<{
+  ok: boolean;
+  projectId: number;
+  assignedDesignerName: string;
+  taskCode: DesignTaskCode;
+  message: string;
+}> {
+  const textToCheck = [
+    input.projectName,
+    input.notes || '',
+    input.designBrief.objective || '',
+    input.designBrief.headlineText || '',
+    input.designBrief.subheadlineText || '',
+  ].join('\n');
+  const piiCheck = containsCustomerPiiInPrompt(textToCheck);
+  if (piiCheck.hasPii) {
+    throw new Error(piiCheck.reason);
+  }
+
+  let assignedDesigner = input.designBrief.assignedDesignerId
+    ? await prisma.user.findUnique({ where: { id: input.designBrief.assignedDesignerId } })
+    : null;
+  if (!assignedDesigner || !assignedDesigner.isActive) {
+    assignedDesigner = await prisma.user.findFirst({
+      where: { isActive: true, role: { roleCode: 'DESIGNER' } },
+      orderBy: { id: 'asc' },
+    });
+  }
+  const assignedDesignerId = assignedDesigner?.id ?? actor.id;
+  const assignedDesignerName = assignedDesigner?.fullName ?? 'Designer Toàn Trung';
+
+  const product = input.productId
+    ? await prisma.product.findUnique({ where: { id: input.productId } })
+    : input.designBrief.productId
+      ? await prisma.product.findUnique({ where: { id: input.designBrief.productId } })
+      : null;
+
+  const outW = input.designBrief.outputWidthPx ?? 1536;
+  const outH = input.designBrief.outputHeightPx ?? 1024;
+  const isBanner = input.designType === 'banner' || input.taskCode === 'banner_generate';
+  const dbRequestType = isBanner ? 'banner' : '3d_perspective';
+
+  const briefRecord: DesignBriefDto = {
+    ...input.designBrief,
+    requesterUserId: actor.id,
+    requesterName: actor.fullName,
+    assignedDesignerId,
+  };
+
+  const metadata: StoredMetadata = {
+    projectName: input.projectName.trim(),
+    contactName: null,
+    installationInfo: null,
+    productId: product?.id ?? null,
+    taskCode: input.taskCode,
+    designBrief: briefRecord,
+    websiteId: briefRecord.websiteId ?? null,
+    websiteDomain: briefRecord.websiteDomain ?? null,
+    campaignId: briefRecord.campaignId ?? null,
+    campaignName: briefRecord.campaignName ?? null,
+    contentId: briefRecord.contentId ?? null,
+    sourceModule: input.sourceModule,
+    ...(isBanner ? { bannerWidthPx: outW, bannerHeightPx: outH } : {}),
+    photos: [],
+    chatMessages: [
+      {
+        id: `msg-brief-init-${Date.now()}`,
+        role: 'assistant',
+        text: [
+          `📋 **Brief Thiết kế mới từ ${actor.fullName}** (${DESIGN_TASK_LABELS[input.taskCode].title})`,
+          briefRecord.objective ? `• Mục tiêu: ${briefRecord.objective}` : null,
+          briefRecord.websiteDomain ? `• Website: ${briefRecord.websiteDomain}` : null,
+          briefRecord.campaignName ? `• Chiến dịch: ${briefRecord.campaignName}` : null,
+          briefRecord.targetChannel || briefRecord.outputFormat
+            ? `• Kênh / Định dạng: ${[briefRecord.targetChannel, briefRecord.outputFormat].filter(Boolean).join(' · ')} (${outW}×${outH}px)`
+            : `• Kích thước mục tiêu: ${outW}×${outH}px`,
+          briefRecord.headlineText ? `• Headline: "${briefRecord.headlineText}"` : null,
+          briefRecord.ctaText ? `• CTA: "${briefRecord.ctaText}"` : null,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        timestamp: new Date().toISOString(),
+        chatMode: 'consultant_free',
+        modelUsed: 'Brief Marketing',
+        cost: '$0.00',
+        status: 'success',
+      },
+    ],
+  };
+
+  const created = await prisma.designRequest.create({
+    data: {
+      requestType: dbRequestType,
+      ledCategory: product?.productName || (isBanner ? 'Ấn phẩm Marketing / Banner' : 'Thiết kế phối cảnh'),
+      screenDimensions: `${outW}x${outH}px`,
+      aspectRatio: `${outW}:${outH}`,
+      prompt: briefRecord.objective || input.projectName,
+      notes: input.notes || null,
+      assignedDesignerId,
+      designStatus: 'pending',
+      installPositionJson: JSON.stringify(metadata),
+    },
+  });
+
+  await prisma.auditLog.create({
+    data: {
+      actorUserId: actor.id,
+      action: 'MARKETING_DESIGN_BRIEF_CREATED',
+      targetType: 'DesignRequest',
+      targetId: String(created.id),
+      detailsJson: JSON.stringify({
+        taskCode: input.taskCode,
+        sourceModule: input.sourceModule,
+        websiteDomain: briefRecord.websiteDomain || null,
+        campaignId: briefRecord.campaignId || null,
+        contentId: briefRecord.contentId ?? null,
+        hasBaselineSnapshot: Boolean(briefRecord.baselineSnapshot),
+      }),
+    },
+  });
+
+  return {
+    ok: true,
+    projectId: created.id,
+    assignedDesignerName,
+    taskCode: input.taskCode,
+    message: `Đã gửi Brief "${input.projectName}" (#${created.id}) tới ${assignedDesignerName}.`,
+  };
 }
 
 export async function configureAiProviders(
@@ -432,7 +581,10 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
     }),
   ]);
 
-  const providerStatus = AiDesignProviderFactory.getActiveProviderInfo();
+  const [providerStatus, modelRegistry] = await Promise.all([
+    Promise.resolve(AiDesignProviderFactory.getActiveProviderInfo()),
+    AiDesignProviderFactory.getModelRegistry(false).catch(() => undefined),
+  ]);
 
   const requests: DesignRequestItemDto[] = rows.map((r) => {
     const dims = parseDimensions(r.screenDimensions);
@@ -442,7 +594,16 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       let parsedVerParams: {
         providerId?: string;
         modelUsed?: string;
-        generationOrigin?: 'CLOUD_AI' | 'LOCAL_COMPOSITE_FALLBACK' | 'DESIGNER_UPLOAD' | null;
+        requestedModel?: string | null;
+        reportedModel?: string | null;
+        reportedModelNote?: string | null;
+        costState?: 'actual' | 'estimated' | 'unknown' | null;
+        tokensActual?: boolean;
+        taskCode?: DesignTaskCode | null;
+        taskId?: string | null;
+        inputAssetIds?: string[];
+        parentVersionId?: number | null;
+        generationOrigin?: 'CLOUD_AI' | 'AI_PLUS_LAYOUT' | 'LOCAL_COMPOSITE_FALLBACK' | 'DESIGNER_UPLOAD' | null;
         studioComposite?: boolean;
         referenceSitePhotoId?: string | null;
         sourcePhotoId?: string | null;
@@ -492,6 +653,14 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
         generationOrigin: inferredOrigin,
         providerId: parsedVerParams.providerId ?? null,
         modelUsed: parsedVerParams.modelUsed ?? v.aiUsageLog?.modelName ?? null,
+        requestedModel: parsedVerParams.requestedModel ?? parsedVerParams.modelUsed ?? null,
+        reportedModel: parsedVerParams.reportedModel ?? null,
+        reportedModelNote: parsedVerParams.reportedModelNote ?? null,
+        costState: parsedVerParams.costState ?? (v.aiUsageLog?.costMicros ? 'estimated' : 'unknown'),
+        taskCode: parsedVerParams.taskCode ?? meta.taskCode ?? null,
+        taskId: parsedVerParams.taskId ?? null,
+        inputAssetIds: Array.isArray(parsedVerParams.inputAssetIds) ? parsedVerParams.inputAssetIds : [],
+        parentVersionId: parsedVerParams.parentVersionId ?? parsedVerParams.sourceVersionId ?? null,
         storageObjectKey: v.storageObjectKey,
         downloadUrl: `/api/v1/design/asset/${v.id}`,
         mimeType: measuredImg?.detectedMimeType || v.mimeType,
@@ -504,9 +673,12 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
             : r.aspectRatio,
         promptUsed: v.promptUsed,
         processingDurationMs: v.aiUsageLog?.durationMs ?? r.processingTimeMs,
-        tokenUsed: v.aiUsageLog?.totalTokens ?? r.tokenCost,
+        tokenUsed:
+          parsedVerParams.tokensActual === false
+            ? null
+            : v.aiUsageLog?.totalTokens ?? r.tokenCost ?? null,
         cost:
-          v.aiUsageLog?.costMicros != null
+          v.aiUsageLog?.costMicros != null && v.aiUsageLog.costMicros > 0n
             ? toMonetaryAmountDto(v.aiUsageLog.costMicros, 'USD', 'micros')
             : null,
         isApprovedFinal: v.isApprovedFinal,
@@ -575,23 +747,30 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
             },
           ];
 
+    const hasMeasuredPhysicalDims =
+      meta.screenWidthM != null || dims.screenWidthM != null;
+    const isUnmeasuredBannerOrBrief =
+      r.requestType === 'banner' && !hasMeasuredPhysicalDims;
+
     const effectiveWidthM = meta.screenWidthM ?? dims.screenWidthM ?? 4.8;
     const effectiveHeightM = meta.screenHeightM ?? dims.screenHeightM ?? 2.7;
-    const effectiveBannerW = meta.bannerWidthPx ?? dims.bannerWidthPx ?? 1920;
-    const effectiveBannerH = meta.bannerHeightPx ?? dims.bannerHeightPx ?? 1080;
+    const effectiveBannerW = meta.bannerWidthPx ?? dims.bannerWidthPx ?? 1536;
+    const effectiveBannerH = meta.bannerHeightPx ?? dims.bannerHeightPx ?? 1024;
     const effectivePitch = meta.pixelPitch || meta.productSpec?.pixelPitch || 'P2.5';
     const effectiveStyle = meta.screenStyle || meta.productSpec?.screenStyle || 'flat';
 
-    const productSpec = computeLedProductSpec({
-      productCode: meta.productSpec?.productCode,
-      productName: r.ledCategory || 'Màn hình LED Indoor',
-      categoryGroup: meta.productSpec?.categoryGroup,
-      widthM: effectiveWidthM,
-      heightM: effectiveHeightM,
-      pitch: effectivePitch,
-      screenStyle: effectiveStyle,
-    });
-    if (meta.productId) {
+    const productSpec = isUnmeasuredBannerOrBrief
+      ? null
+      : computeLedProductSpec({
+          productCode: meta.productSpec?.productCode,
+          productName: r.ledCategory || 'Màn hình LED Indoor',
+          categoryGroup: meta.productSpec?.categoryGroup,
+          widthM: effectiveWidthM,
+          heightM: effectiveHeightM,
+          pitch: effectivePitch,
+          screenStyle: effectiveStyle,
+        });
+    if (productSpec && meta.productId) {
       productSpec.productId = meta.productId;
     }
 
@@ -611,8 +790,10 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       projectName,
       contactName: isAnonymizedLead
         ? 'Khách hàng ẩn danh (UC01)'
-        : meta.contactName ?? (r.lead?.contactName || 'Chưa cập nhật'),
-      installationInfo: meta.installationInfo || 'Tường bên phải showroom, cách sàn 1.2m',
+        : meta.contactName ?? r.lead?.contactName ?? null,
+      installationInfo: isUnmeasuredBannerOrBrief
+        ? meta.installationInfo ?? null
+        : meta.installationInfo || 'Tường bên phải showroom, cách sàn 1.2m',
       notes: r.notes,
       leadId: r.leadId,
       leadCode: r.lead?.leadCode ?? null,
@@ -623,8 +804,16 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
               : r.lead.companyName || r.lead.contactName || 'Dự án LED'
           }`
         : null,
-      productId: meta.productId ?? 1,
+      productId: meta.productId ?? null,
       productName: r.ledCategory,
+      websiteId: meta.websiteId ?? null,
+      websiteDomain: meta.websiteDomain ?? null,
+      campaignId: meta.campaignId ?? null,
+      campaignName: meta.campaignName ?? null,
+      contentId: meta.contentId ?? null,
+      sourceModule: meta.sourceModule ?? null,
+      taskCode: meta.taskCode ?? (r.requestType === 'banner' ? 'banner_generate' : 'perspective_compose'),
+      designBrief: meta.designBrief ?? null,
       requestedBySalesId: r.requestedBySalesId,
       requestedBySalesName: r.requestedBySales?.fullName ?? null,
       assignedDesignerId: r.assignedDesignerId ?? user.id,
@@ -635,8 +824,8 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       screenHeightM: meta.screenHeightM ?? dims.screenHeightM,
       installZoneBboxJson: r.installPositionJson,
       placementQuad: meta.placementQuad || DEFAULT_PLACEMENT_QUAD,
-      bannerWidthPx: meta.bannerWidthPx ?? dims.bannerWidthPx,
-      bannerHeightPx: meta.bannerHeightPx ?? dims.bannerHeightPx,
+      bannerWidthPx: meta.bannerWidthPx ?? dims.bannerWidthPx ?? effectiveBannerW,
+      bannerHeightPx: meta.bannerHeightPx ?? dims.bannerHeightPx ?? effectiveBannerH,
       aspectRatio: r.aspectRatio || '16:9',
       aspectLocked: meta.aspectLocked ?? true,
       isArchived: meta.isArchived ?? false,
@@ -682,7 +871,10 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
       name: p.productName,
       categoryGroup: p.categoryGroup,
     })),
-    providerStatus,
+    providerStatus: {
+      ...providerStatus,
+      modelRegistry,
+    },
   };
 }
 
@@ -1407,19 +1599,76 @@ export async function processChatDesignRequest(
     designContext.fields.compositingMode = input.compositingMode;
   }
 
-  // 2. Deterministic Command Router (never relies solely on LLM prompt instructions)
-  const routeDecision = routeDesignCommand({
-    rawMessage: input.prompt,
-    source: input.triggerSource || 'user_input',
-    explicitButtonAction:
-      input.chatMode === 'image_generator' &&
-      !DAO_TAO_ANH_REGEX.test(input.prompt) &&
-      input.triggerSource === 'user_button'
-        ? existing.requestType === 'banner'
-          ? 'GENERATE_BANNER'
-          : 'GENERATE_SCENE'
-        : null,
-  });
+  // Persist brief/task metadata when provided in chat request
+  if (input.taskCode) {
+    currentMeta.taskCode = input.taskCode;
+  }
+  if (input.designBrief) {
+    currentMeta.designBrief = {
+      ...(currentMeta.designBrief || {}),
+      ...input.designBrief,
+    };
+    if (input.designBrief.websiteId !== undefined) currentMeta.websiteId = input.designBrief.websiteId;
+    if (input.designBrief.websiteDomain !== undefined) currentMeta.websiteDomain = input.designBrief.websiteDomain;
+    if (input.designBrief.campaignId !== undefined) currentMeta.campaignId = input.designBrief.campaignId;
+    if (input.designBrief.campaignName !== undefined) currentMeta.campaignName = input.designBrief.campaignName;
+    if (input.designBrief.contentId !== undefined) currentMeta.contentId = input.designBrief.contentId;
+    if (input.designBrief.outputWidthPx) currentMeta.bannerWidthPx = input.designBrief.outputWidthPx;
+    if (input.designBrief.outputHeightPx) currentMeta.bannerHeightPx = input.designBrief.outputHeightPx;
+  }
+
+  // 2. Deterministic Command Router (honors explicit 4 tasks first, then natural command routing)
+  const routeDecision =
+    input.taskCode === 'brief_analyze'
+      ? {
+          action: 'CHAT' as const,
+          commandToken: null,
+          cleanInstruction: input.prompt,
+          isMetaQuestionAboutCommand: false,
+          blockedNonUserTrigger: false,
+          reason: 'taskCode:brief_analyze',
+        }
+      : input.taskCode === 'banner_generate'
+        ? {
+            action: 'GENERATE_BANNER' as const,
+            commandToken: '@taobanner',
+            cleanInstruction: input.prompt,
+            isMetaQuestionAboutCommand: false,
+            blockedNonUserTrigger: false,
+            reason: 'taskCode:banner_generate',
+          }
+        : input.taskCode === 'perspective_compose'
+          ? {
+              action: 'GENERATE_SCENE' as const,
+              commandToken: '@taoanh',
+              cleanInstruction: input.prompt,
+              isMetaQuestionAboutCommand: false,
+              blockedNonUserTrigger: false,
+              reason: 'taskCode:perspective_compose',
+            }
+          : input.taskCode === 'design_edit'
+            ? {
+                action: (existing.requestType === 'banner' ? 'GENERATE_BANNER' : 'GENERATE_SCENE') as
+                  | 'GENERATE_BANNER'
+                  | 'GENERATE_SCENE',
+                commandToken: existing.requestType === 'banner' ? '@taobanner' : '@taoanh',
+                cleanInstruction: input.prompt,
+                isMetaQuestionAboutCommand: false,
+                blockedNonUserTrigger: false,
+                reason: 'taskCode:design_edit',
+              }
+            : routeDesignCommand({
+                rawMessage: input.prompt,
+                source: input.triggerSource || 'user_input',
+                explicitButtonAction:
+                  input.chatMode === 'image_generator' &&
+                  !DAO_TAO_ANH_REGEX.test(input.prompt) &&
+                  input.triggerSource === 'user_button'
+                    ? existing.requestType === 'banner'
+                      ? 'GENERATE_BANNER'
+                      : 'GENERATE_SCENE'
+                    : null,
+              });
 
   // Extract multi-turn user-confirmed specifications from chat text
   const extraction = extractAndMergeUserChatContext(designContext, input.prompt);
@@ -1475,8 +1724,13 @@ export async function processChatDesignRequest(
     photosList.find((p) => p.selected) ||
     photosList[0];
 
-  const sourceVersionObj = input.sourceVersionId
-    ? existing.assetVersions.find((v) => v.id === input.sourceVersionId)
+  const requestedParentVerId =
+    input.parentVersionId ??
+    input.sourceVersionId ??
+    (input.taskCode === 'design_edit' ? existing.assetVersions[0]?.id ?? null : null);
+
+  const sourceVersionObj = requestedParentVerId
+    ? existing.assetVersions.find((v) => v.id === requestedParentVerId) || null
     : null;
 
   let storageKeyToRead: string | null = null;
@@ -1501,6 +1755,14 @@ export async function processChatDesignRequest(
   }
 
   const activePhotoFileData = storageKeyToRead ? readPrivateBusinessFile(storageKeyToRead) : null;
+  const resolvedInputAssetIds: string[] = Array.from(
+    new Set([
+      ...(Array.isArray(input.inputAssetIds) ? input.inputAssetIds : []),
+      ...(sourceVersionObj ? [`version:${sourceVersionObj.id}`] : []),
+      ...(activePhotoObj?.id ? [`photo:${activePhotoObj.id}`] : []),
+      ...(input.referenceProductPhotoIds || []).map((id) => `product:${id}`),
+    ]),
+  );
 
   // Gather any Product Reference Photos (ảnh sản phẩm mẫu từ Kho Sản phẩm Công ty dùng chung hoặc của dự án)
   const requestedProductIds = new Set(input.referenceProductPhotoIds || []);
@@ -1669,6 +1931,7 @@ export async function processChatDesignRequest(
         const quadInfo = input.placementQuad || currentMeta.placementQuad || DEFAULT_PLACEMENT_QUAD;
         // Only attach the heavy survey photo when the user actually asks about the photo/room/image/wall
         const asksAboutVisualImage =
+          input.taskCode === 'brief_analyze' ||
           /ảnh|hình|nhìn|xem|phân tích|trong phòng|vách|tường|vị trí|showroom|công trình|mặt tiền|ghép|sửa|thêm|xóa|bỏ/i.test(
             input.prompt
           );
@@ -1680,15 +1943,22 @@ export async function processChatDesignRequest(
               activePhotoFileData.buffer.length < 5 * 1024 * 1024
           );
 
+        const hasMeasuredPhysicalDims = Boolean(
+          (designContext.provenance.widthMm === 'user_confirmed' && designContext.fields.widthMm) ||
+            input.screenWidthM ||
+            currentMeta.screenWidthM,
+        );
+        const dimContextNote = hasMeasuredPhysicalDims
+          ? `LED ${pitch}, kích thước đo đạc ${Math.round(wM * 1000)}x${Math.round(hM * 1000)}mm (${wM}m x ${hM}m), tỷ lệ ${ratio}, vùng lắp TL(${quadInfo.topLeft.x}%,${quadInfo.topLeft.y}%) -> BR(${quadInfo.bottomRight.x}%,${quadInfo.bottomRight.y}%).`
+          : `Ấn phẩm/Banner kích thước ${bW}×${bH}px (tỷ lệ ${ratio}); chưa khai báo kích thước màn hình LED vật lý theo mét — không tự giả định kích thước.`;
+
         const sysInstruction = [
-          'Bạn là một trợ lý AI thông minh, thân thiện và tự nhiên (giống hệt ChatGPT / Google Gemini).',
-          'NGUYÊN TẮC QUAN TRỌNG NHẤT:',
-          '1. Hãy trò chuyện tự nhiên, mạch lạc, gần gũi như một người bạn / trợ lý AI bình thường. Người dùng hỏi chủ đề gì (đời sống, kiến thức chung, viết content, dịch thuật, tính toán, ý tưởng, hay thiết kế LED) thì trả lời trực tiếp, thông minh và đúng trọng tâm câu hỏi đó.',
-          '2. TUYỆT ĐỐI KHÔNG trả lời máy móc kiểu rập khuôn, KHÔNG tự ý liệt kê bảng thông số kỹ thuật LED hay hướng dẫn bấm nút nếu người dùng chỉ đang trò chuyện hoặc hỏi việc khác.',
-          '3. Nếu người dùng đang trao đổi về dự án màn hình LED của họ, hãy phản hồi tự nhiên và khéo léo ghi nhận thông số họ vừa nói. Ngữ cảnh dự án hiện tại (chỉ tham khảo khi nói về LED): ' +
-            `LED ${pitch}, kích thước ${Math.round(wM * 1000)}x${Math.round(hM * 1000)}mm (${wM}m x ${hM}m), tỷ lệ ${ratio}, vùng lắp TL(${quadInfo.topLeft.x}%,${quadInfo.topLeft.y}%) -> BR(${quadInfo.bottomRight.x}%,${quadInfo.bottomRight.y}%).`,
-          '4. Nếu tin nhắn có đính kèm bức ảnh và người dùng hỏi về bức ảnh đó, hãy quan sát ảnh thật kỹ để trả lời.',
-          '5. Chỉ khi người dùng chủ động yêu cầu tạo/sửa ảnh hoặc ghép màn hình LED vào ảnh thì ở dòng cuối cùng mới gợi ý câu lệnh @TaoAnh: <mô tả>. Còn lại tuyệt đối không chèn @TaoAnh.',
+          'Bạn là chuyên gia phân tích brief thiết kế & tư vấn kỹ thuật cho Toàn Trung.',
+          'NGUYÊN TẮC BẮT BUỘC:',
+          '1. Trả lời tự nhiên, súc tích, bám sát brief, mục tiêu chiến dịch, thông điệp, ảnh tham chiếu (nếu có) và kích thước đầu ra.',
+          '2. KHÔNG BỊA số liệu hoặc kích thước mét chưa được đo đạc/cung cấp.',
+          `3. Ngữ cảnh kỹ thuật dự án hiện tại: ${dimContextNote}`,
+          '4. Nếu tin nhắn có đính kèm bức ảnh và người dùng hỏi về bức ảnh đó, hãy quan sát ảnh thật kỹ để phân tích bố cục, ánh sáng và gợi ý chỉnh sửa.',
         ].join('\n');
 
         // Build multi-turn conversation history so Gemini remembers previous messages naturally
@@ -1739,16 +2009,15 @@ export async function processChatDesignRequest(
         const candidateModels = Array.from(
           new Set(
             [
-              // If user specifically chose a gemini-* model, try it first; if activeModel was gemma-*, try discovered gemini-* first for richer chat/vision
               rawRequestedModel.startsWith('gemini-') ? rawRequestedModel : '',
-              ...discoveredGeminiFirst,
-              rawRequestedModel,
+              'gemini-3.8-flash',
               'gemini-3-flash-preview',
-              'gemma-4-26b-a4b-it',
+              ...discoveredGeminiFirst.filter((id) => !id.includes('2.5-flash')),
+              rawRequestedModel,
               'gemini-flash-lite-latest',
             ].filter(Boolean)
           )
-        ).slice(0, 3);
+        ).slice(0, 4);
 
         let rawAiText = '';
         let usedModelName = candidateModels[0] || 'gemini-3-flash-preview';
@@ -1806,10 +2075,11 @@ export async function processChatDesignRequest(
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(payloadObj),
-              signal: AbortSignal.timeout(8000),
+              signal: AbortSignal.timeout(12000),
             });
             if (gemRes.ok) {
               const gemJson = (await gemRes.json()) as {
+                modelVersion?: string;
                 candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
               };
               const extracted = gemJson.candidates?.[0]?.content?.parts
@@ -1818,11 +2088,17 @@ export async function processChatDesignRequest(
                 .trim();
               if (extracted) {
                 rawAiText = extracted;
-                usedModelName = modelCandidate;
+                usedModelName = gemJson.modelVersion || modelCandidate;
+                AiModelRegistryService.recordModelRuntimeObservation({
+                  providerId: 'google_imagen',
+                  modelId: modelCandidate,
+                  taskCode: 'brief_analyze',
+                  taskStatus: 'verified',
+                  statusDetail: `Phân tích brief/ảnh thành công (modelVersion=${usedModelName}).`,
+                });
                 break;
               }
-            } else if (gemRes.status === 429) {
-              // Try next model in candidateModels (each model has its own RPM quota bucket!)
+            } else if (gemRes.status === 429 || gemRes.status === 404) {
               continue;
             }
           } catch {
@@ -1839,7 +2115,7 @@ export async function processChatDesignRequest(
             suggestedTaoAnhPrompt = undefined;
             replyText = rawAiText;
           }
-          consultModelUsed = `Google ${usedModelName} (Gmail Free)`;
+          consultModelUsed = usedModelName;
         }
       } catch {
         // Fallback to natural conversational reply if network fails
@@ -1984,13 +2260,24 @@ export async function processChatDesignRequest(
     };
   }
 
-  // 5. Reject text-only Chat Models when attempting Image Generation
+  // 5. Reject text-only / vision-only Chat Models when attempting Image Generation
+  if (input.modelId && AiDesignProviderFactory.isChatOnlyModel(input.modelId)) {
+    throw new Error(
+      `MODEL_NOT_IMAGE_CAPABLE: Model "${input.modelId}" chỉ hỗ trợ Chat/Phân tích brief & ảnh, không hỗ trợ xuất file ảnh. Vui lòng chọn IMAGE MODEL phù hợp.`
+    );
+  }
+
+  const effectiveTaskCode: DesignTaskCode =
+    input.taskCode ||
+    (dbType === 'banner' ? 'banner_generate' : 'perspective_compose');
+
   if (
-    input.modelId &&
-    /(?:chat-only|text-only|gemini-1\.5-flash-8b|gpt-4o-mini-text)/i.test(input.modelId)
+    effectiveTaskCode === 'design_edit' &&
+    (!activePhotoFileData || activePhotoFileData.buffer.length === 0) &&
+    productReferenceBuffers.length === 0
   ) {
     throw new Error(
-      `MODEL_NOT_IMAGE_CAPABLE: Model "${input.modelId}" chỉ hỗ trợ Chat văn bản, không hỗ trợ xuất file ảnh. Vui lòng chọn Image Provider/Model hỗ trợ tạo ảnh (như gemini-3.1-flash-image-preview, imagen-3.0, gpt-image-1 hoặc Local Sandbox).`
+      'MISSING_REFERENCE_IMAGE_BUFFER: Tác vụ Chỉnh sửa thiết kế đang có yêu cầu chọn 1 phiên bản ảnh cũ hoặc đính kèm ảnh tham chiếu gốc để gửi vào /images/edits.'
     );
   }
 
@@ -2115,6 +2402,9 @@ export async function processChatDesignRequest(
                 input.idempotencyKey ||
                 `chat-design-${requestId}-v${nextVersionNumber}-${Date.now()}`,
               simulateTimeout: input.simulateAiTimeout,
+              disableLocalFallback:
+                input.disableLocalFallback || effectiveTaskCode === 'design_edit',
+              requireReferenceEdit: effectiveTaskCode === 'design_edit',
             },
             normalizedProviderId
           )
@@ -2122,8 +2412,11 @@ export async function processChatDesignRequest(
             {
               workflow: 'banner',
               prompt: cleanImagePrompt,
+              referenceImageBuffer: activePhotoFileData?.buffer,
+              referenceImageMimeType: activePhotoFileData?.mimeType,
               productReferenceBuffers:
                 productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
+              sourceVersionId: requestedParentVerId,
               dimensions: {
                 widthPx: effectiveBannerW,
                 heightPx: effectiveBannerH,
@@ -2135,6 +2428,9 @@ export async function processChatDesignRequest(
                 input.idempotencyKey ||
                 `chat-banner-${requestId}-v${nextVersionNumber}-${Date.now()}`,
               simulateTimeout: input.simulateAiTimeout,
+              disableLocalFallback:
+                input.disableLocalFallback || effectiveTaskCode === 'design_edit',
+              requireReferenceEdit: effectiveTaskCode === 'design_edit',
             },
             normalizedProviderId
           );
@@ -2287,6 +2583,8 @@ export async function processChatDesignRequest(
   let bannerResizeExplanation: string | null = null;
   let curvedDistortionWarning: string | null = null;
 
+  let layoutOverlayApplied = false;
+  let layoutOverlayNote: string | null = null;
   if (dbType === 'banner') {
     const bannerProcessed = processBannerToTargetResolution({
       sourceBuffer: finalBufferToSave,
@@ -2298,6 +2596,18 @@ export async function processChatDesignRequest(
     finalBufferToSave = bannerProcessed.imageBuffer;
     bannerTypographyWarning = bannerProcessed.typographyWarning;
     bannerResizeExplanation = bannerProcessed.resizeExplanation;
+    if (input.applyLayoutOverlay) {
+      const overlaid = renderBrandLayoutOverlayOnImage({
+        sourceBuffer: finalBufferToSave,
+        brandPrimaryColor: currentMeta.designBrief?.brandPrimaryColor || input.designBrief?.brandPrimaryColor,
+        headlineText: currentMeta.designBrief?.headlineText || input.designBrief?.headlineText,
+        ctaText: currentMeta.designBrief?.ctaText || input.designBrief?.ctaText,
+        websiteDomain: currentMeta.websiteDomain || input.designBrief?.websiteDomain,
+      });
+      finalBufferToSave = overlaid.imageBuffer;
+      layoutOverlayApplied = overlaid.applied;
+      layoutOverlayNote = overlaid.overlayNote;
+    }
   } else if (effectiveStyle === 'curved') {
     curvedDistortionWarning =
       'Cấu hình màn hình LED cong (Curved): Phép biến đổi mặt phẳng 4 góc chỉ là xấp xỉ; cần kiểm tra biến dạng phi phẳng theo bán kính cong thực tế.';
@@ -2310,6 +2620,7 @@ export async function processChatDesignRequest(
     declaredMimeType: finalMimeToSave,
   });
 
+  const hasActualTokens = providerResult.tokensActual !== false && providerResult.totalTokens > 0;
   const aiLog = await recordAiUsageAttempt(prisma, {
     idempotencyKey:
       input.idempotencyKey || `chat-design-run-${requestId}-v${nextVersionNumber}-${Date.now()}`,
@@ -2320,10 +2631,10 @@ export async function processChatDesignRequest(
     userId: actor.id,
     designRequestId: requestId,
     modelName: providerResult.modelUsed,
-    promptTokens: providerResult.promptTokens,
-    completionTokens: providerResult.completionTokens,
-    totalTokens: providerResult.totalTokens,
-    costMicros: providerResult.costMicros,
+    promptTokens: hasActualTokens ? providerResult.promptTokens : null,
+    completionTokens: hasActualTokens ? providerResult.completionTokens : null,
+    totalTokens: hasActualTokens ? providerResult.totalTokens : null,
+    costMicros: providerResult.costMicros > 0n ? providerResult.costMicros : null,
     costCurrency: providerResult.costCurrency,
     durationMs: providerResult.durationMs,
     status: 'success',
@@ -2333,9 +2644,12 @@ export async function processChatDesignRequest(
 
   const isLocalStudioOutput =
     Boolean(providerResult.isLocalFallback) || providerResult.provider === 'local_sandbox';
-  const generationOrigin: 'CLOUD_AI' | 'LOCAL_COMPOSITE_FALLBACK' = isLocalStudioOutput
-    ? 'LOCAL_COMPOSITE_FALLBACK'
-    : 'CLOUD_AI';
+  const generationOrigin: 'CLOUD_AI' | 'AI_PLUS_LAYOUT' | 'LOCAL_COMPOSITE_FALLBACK' =
+    isLocalStudioOutput
+      ? 'LOCAL_COMPOSITE_FALLBACK'
+      : layoutOverlayApplied
+        ? 'AI_PLUS_LAYOUT'
+        : 'CLOUD_AI';
 
   const createdVersion = await createDesignAssetVersionSafe(requestId, (versionNumber) => ({
     designRequestId: requestId,
@@ -2349,6 +2663,15 @@ export async function processChatDesignRequest(
       regeneratedFromVersion: existing.version,
       sourceOrigin: sourceImageOrigin,
       generationOrigin,
+      taskCode: effectiveTaskCode,
+      taskId: runningJob.jobId,
+      inputAssetIds: resolvedInputAssetIds,
+      parentVersionId: requestedParentVerId,
+      requestedModel: providerResult.requestedModel || input.modelId || providerResult.modelUsed,
+      reportedModel: providerResult.reportedModel ?? null,
+      reportedModelNote: providerResult.reportedModelNote ?? null,
+      costState: providerResult.costState || 'unknown',
+      tokensActual: Boolean(providerResult.tokensActual),
       isLocalFallback: Boolean(providerResult.isLocalFallback),
       sourcePhotoId: activePhotoObj?.id ?? null,
       referenceSitePhotoId: activePhotoObj?.id ?? null,
@@ -2360,10 +2683,13 @@ export async function processChatDesignRequest(
       sha256: savedFile.sha256,
       compositingMode: effectiveCompositingMode,
       placementQuad: effectiveQuad,
-      screenDimensionsMm: {
-        widthMm: Math.round(effectiveWidthM * 1000),
-        heightMm: Math.round(effectiveHeightM * 1000),
-      },
+      screenDimensionsMm:
+        currentMeta.screenWidthM || dbType === '3d_perspective'
+          ? {
+              widthMm: Math.round(effectiveWidthM * 1000),
+              heightMm: Math.round(effectiveHeightM * 1000),
+            }
+          : undefined,
       bannerResolutionPx:
         dbType === 'banner'
           ? { widthPx: effectiveBannerW, heightPx: effectiveBannerH }
@@ -2371,6 +2697,7 @@ export async function processChatDesignRequest(
       curvedDistortionWarning,
       bannerResizeExplanation,
       bannerTypographyWarning,
+      layoutOverlayNote,
       quality: input.quality,
       providerId: providerResult.provider,
       modelUsed: providerResult.modelUsed,
@@ -2460,7 +2787,8 @@ export async function processChatDesignRequest(
     processedIdempotencyKeys: processedKeys,
   };
 
-  const newTotalTokens = (existing.tokenCost ?? 0) + providerResult.totalTokens;
+  const newTotalTokens =
+    (existing.tokenCost ?? 0) + (hasActualTokens ? providerResult.totalTokens : 0);
   const newTotalCostMicros = (existing.totalCostMicros ?? 0n) + providerResult.costMicros;
 
   await prisma.designRequest.update({
@@ -2480,6 +2808,13 @@ export async function processChatDesignRequest(
   return {
     requestId,
     commandAction: routeDecision.action,
+    taskCode: effectiveTaskCode,
+    taskId: runningJob.jobId,
+    generationOrigin,
+    requestedModel: providerResult.requestedModel || input.modelId || providerResult.modelUsed,
+    reportedModel: providerResult.reportedModel ?? null,
+    reportedModelNote: providerResult.reportedModelNote ?? null,
+    parentVersionId: requestedParentVerId,
     versionNumber: createdVersion.versionNumber,
     versionId: createdVersion.id,
     downloadUrl: `/api/v1/design/asset/${createdVersion.id}`,
@@ -2489,6 +2824,7 @@ export async function processChatDesignRequest(
     typographyWarning: bannerTypographyWarning,
     resizeExplanation: bannerResizeExplanation,
     curvedDistortionWarning,
+    layoutOverlayNote,
     chatMessages: updatedChat,
     designContext,
   };
@@ -2523,6 +2859,25 @@ export async function updateDesignProject(
   if (input.aspectLocked !== undefined) meta.aspectLocked = input.aspectLocked;
   if (input.isArchived !== undefined) meta.isArchived = input.isArchived;
   if (input.placementQuad) meta.placementQuad = input.placementQuad;
+  if (input.taskCode !== undefined) meta.taskCode = input.taskCode;
+  if (input.websiteId !== undefined) meta.websiteId = input.websiteId;
+  if (input.campaignId !== undefined) meta.campaignId = input.campaignId;
+  if (input.contentId !== undefined) meta.contentId = input.contentId;
+  if (input.designBrief !== undefined) {
+    meta.designBrief = input.designBrief ? { ...(meta.designBrief || {}), ...input.designBrief } : null;
+    if (input.designBrief?.websiteDomain !== undefined) {
+      meta.websiteDomain = input.designBrief.websiteDomain;
+    }
+    if (input.designBrief?.campaignName !== undefined) {
+      meta.campaignName = input.designBrief.campaignName;
+    }
+    if (input.designBrief?.outputWidthPx) {
+      meta.bannerWidthPx = input.designBrief.outputWidthPx;
+    }
+    if (input.designBrief?.outputHeightPx) {
+      meta.bannerHeightPx = input.designBrief.outputHeightPx;
+    }
+  }
 
   // Keep per-project DesignContext synchronized when user manually updates fields
   if (meta.designContext) {
@@ -2644,23 +2999,28 @@ export async function updateDesignProject(
       : '3d_perspective'
     : existing.requestType;
 
+  const hasMeasuredDims = meta.screenWidthM != null || dims.screenWidthM != null;
   const wM = meta.screenWidthM ?? dims.screenWidthM ?? 4.8;
   const hM = meta.screenHeightM ?? dims.screenHeightM ?? 2.7;
-  const bW = meta.bannerWidthPx ?? dims.bannerWidthPx ?? 1920;
-  const bH = meta.bannerHeightPx ?? dims.bannerHeightPx ?? 1080;
+  const bW = meta.bannerWidthPx ?? dims.bannerWidthPx ?? 1536;
+  const bH = meta.bannerHeightPx ?? dims.bannerHeightPx ?? 1024;
 
-  meta.productSpec = computeLedProductSpec({
-    productCode: productObj?.productCode || meta.productSpec?.productCode,
-    productName: productObj?.productName || nextLedCategory || 'Màn hình LED Indoor',
-    categoryGroup: productObj?.categoryGroup || meta.productSpec?.categoryGroup,
-    widthM: wM,
-    heightM: hM,
-    pitch: meta.pixelPitch || meta.productSpec?.pixelPitch || 'P2.5',
-    screenStyle: meta.screenStyle || meta.productSpec?.screenStyle || 'flat',
-    cabinetModelCode: meta.cabinetModelCode,
-  });
-  if (meta.productId) {
-    meta.productSpec.productId = meta.productId;
+  if (nextDesignType === 'banner' && !hasMeasuredDims) {
+    meta.productSpec = undefined;
+  } else {
+    meta.productSpec = computeLedProductSpec({
+      productCode: productObj?.productCode || meta.productSpec?.productCode,
+      productName: productObj?.productName || nextLedCategory || 'Màn hình LED Indoor',
+      categoryGroup: productObj?.categoryGroup || meta.productSpec?.categoryGroup,
+      widthM: wM,
+      heightM: hM,
+      pitch: meta.pixelPitch || meta.productSpec?.pixelPitch || 'P2.5',
+      screenStyle: meta.screenStyle || meta.productSpec?.screenStyle || 'flat',
+      cabinetModelCode: meta.cabinetModelCode,
+    });
+    if (meta.productId && meta.productSpec) {
+      meta.productSpec.productId = meta.productId;
+    }
   }
 
   const nextScreenDimensions =

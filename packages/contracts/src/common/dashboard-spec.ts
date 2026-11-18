@@ -449,15 +449,73 @@ export interface M04ResultsReportDto {
     winRateDenominator: number;
     winRateDefinition: string;
     attributedAdCost?: number | null;
+    adCost?: number | null;
     validAdLeadCount?: number;
+    validAttributedAdLeadCount?: number;
     adReconciliationNote?: string;
     costPerValidAdLead: number | null;
     currencyCode: string;
     overdueQuoteCount: number;
     unclassifiedProductLeadCount?: number;
+    multiWebsiteExcludedAdCost?: number | null;
+    multiWebsiteCampaignCount?: number;
     previousReceivedLeadCount?: number | null;
     previousValidLeadCount?: number | null;
     previousWonLeadCount?: number | null;
+    previousAdCost?: number | null;
+    previousCostPerValidAdLead?: number | null;
+    previousWinRatePct?: number | null;
+  };
+  previousPeriod?: {
+    startDate: string;
+    endDate: string;
+    adCost: number | null;
+    receivedLeadCount: number | null;
+    validLeadCount: number | null;
+    validAttributedAdLeadCount: number | null;
+    costPerValidAdLead: number | null;
+    wonLeadCount: number | null;
+    winRatePct: number | null;
+  };
+  timeSeries?: Array<{
+    bucketStart: string;
+    bucketEnd: string;
+    label: string;
+    receivedLeadCount: number | null;
+    validLeadCount: number | null;
+    isMissingDay?: boolean;
+  }>;
+  dataQuality?: {
+    missingWebsiteCount: number;
+    missingProductCount: number;
+    unknownChannelCount: number;
+    attributionCoveragePct: number | null;
+  };
+  marketingInsights?: {
+    summaryFindings: Array<{
+      id: string;
+      severity: 'info' | 'warning' | 'action';
+      title: string;
+      evidenceText: string;
+      actionHref?: string;
+      actionLabel?: string;
+    }>;
+    recommendedActions: Array<{
+      id: string;
+      title: string;
+      reason: string;
+      targetType: 'seo_content' | 'design_brief' | 'leads_filter';
+      href: string;
+      prefillParams?: Record<string, string>;
+    }>;
+    latestSeoAiReport?: {
+      id: string;
+      website: string;
+      generatedAt: string;
+      generationMode: string;
+      modelUsed: string | null;
+      excerpt: string;
+    } | null;
   };
   periodActivity?: {
     receivedInPeriodCount: number;
@@ -497,9 +555,36 @@ export interface M04ResultsReportDto {
       quotedCount: number;
       wonCount: number;
       adLeadCount: number;
+      adCost?: number | null;
       cpl: number | null;
+      winRatePct?: number | null;
     }>;
-    byChannel: Array<{ channel: string; leadCount: number; validCount: number; quotedCount: number; wonCount: number }>;
+    byChannel: Array<{
+      channel: string;
+      leadCount: number;
+      validCount: number;
+      quotedCount: number;
+      wonCount: number;
+      winRatePct?: number | null;
+      shareOfValidPct?: number | null;
+    }>;
+    byCampaign?: Array<{
+      campaignId: string;
+      campaignName: string;
+      platform: string;
+      websiteDomain: string | null;
+      attributionStatus: 'SINGLE_WEBSITE' | 'MULTI_WEBSITE_UNSPLIT' | 'UNATTRIBUTED';
+      adCost: number | null;
+      clicks: number;
+      impressions: number;
+      platformConversions: number;
+      receivedLeadCount: number;
+      validLeadCount: number;
+      validAttributedAdLeadCount: number;
+      costPerValidAdLead: number | null;
+      wonLeadCount: number;
+      winRatePct: number | null;
+    }>;
     byProduct: Array<{
       productId: number;
       productName: string;

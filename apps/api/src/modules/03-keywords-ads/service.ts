@@ -694,7 +694,7 @@ Yêu cầu bắt buộc:
         title: baseTitle,
         metaDescription,
         contentHtml,
-        changeNote: 'Bản nháp chuẩn SEO đầu tiên do AI khởi tạo (UC05 Bước 3).',
+        changeNote: `Bản nháp SEO AI (${evidenceSourceSite} · kỳ ${evidenceWindow} · outline:${outline.length} mục).`,
         editedByUserId: actor.id,
       },
     });

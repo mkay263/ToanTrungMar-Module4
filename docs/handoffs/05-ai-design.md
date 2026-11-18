@@ -32,3 +32,20 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
    - Tuyệt đối không gửi thông tin cá nhân khách hàng (SĐT, email, tên công ty) sang AI bên thứ 3.
    - Gồm 2 bảng thuộc Nhóm 5: `design_requests` (hỗ trợ `lead_id` tùy chọn cho Banner độc lập, `version`, `approved_version_id`, `total_cost_micros BigInt?`) và `design_asset_versions` (`@@unique([design_request_id, version_number])`, lưu đầy đủ từng phiên bản nháp AI và bản hoàn thiện Designer).
    - Nhật ký từng lượt gọi AI (kể cả lỗi/timeout) dùng bảng chung `ai_usage_logs` tại `core.prisma` thông qua contract `recordAiUsageAttempt`. Quy tắc bắt buộc gắn Lead cho riêng phối cảnh 3D và điểm tạo ticket theo dõi tại [Q14](../decisions/OPEN_QUESTIONS.md#q14).
+
+---
+
+## 3. Nâng cấp MK01–MK07: 4 Tác vụ tường minh, AI Model Registry & Lineage (18/11/2026)
+1. **Phân chia 4 tác vụ thiết kế tường minh**:
+   - `banner_generate`: Tạo banner / poster truyền thông từ brief và kích thước kênh.
+   - `design_edit`: Chỉnh sửa trên phiên bản/ảnh tham chiếu gốc (`parentVersionId`), chuyển trực tiếp buffer vào `/images/edits`, tuyệt đối không fallback ngầm về tạo mới.
+   - `perspective_compose`: Dựng phối cảnh màn hình LED lên ảnh công trình.
+   - `brief_analyze`: Phân tích brief & tư vấn thông số bằng mô hình ngôn ngữ/vision (Gemini Flash), không sinh ảnh và không tốn phí ảnh.
+2. **AI Model Registry (MK03)**:
+   - Tự động khám phá danh mục model từ upstream (Google Gemini/Imagen, OpenAI Gateway) với phân trang an toàn SSRF.
+   - Cơ chế gắn cờ taxonomy: `verified`, `listed_unverified`, `blocked_permission`, `blocked_quota_billing`, `deprecated`, `unsupported`.
+   - Giới hạn ngân sách probe tối đa $0.08, bảo mật tuyệt đối không trả raw API Key ra frontend hoặc localStorage.
+3. **Truy xuất nguồn gốc & Closed-Loop Lineage (MK04–MK05)**:
+   - Ghi nhận `requestedModel`, `reportedModel` (cảnh báo alias gateway), `generationOrigin` (`AI_PLUS_LAYOUT`, `CLOUD_AI`).
+   - Xuất file ZIP chứa đầy đủ file ảnh, file thiết kế và file metadata `design-brief-and-lineage.json`.
+

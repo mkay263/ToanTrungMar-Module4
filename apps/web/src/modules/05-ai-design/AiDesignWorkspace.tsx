@@ -5,10 +5,13 @@ import {
   DESIGN_STATUS_LABELS,
   DESIGN_TYPE_LABELS,
   hasBaPermission,
+  type AiModelRegistrySnapshotDto,
   type AiProviderCatalogItemDto,
   type AiProviderId,
   type CreateDesignRequestDto,
+  type DesignBriefDto,
   type DesignRequestItemDto,
+  type DesignTaskCode,
   type DesignType,
   type QuadCoordinatesDto,
 } from '@toantrung/contracts';
@@ -51,6 +54,8 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
+import { MarketingBriefPanel } from './MarketingBriefPanel';
+import { ModelRegistryModal } from './ModelRegistryModal';
 
 interface LeadOpt {
   id: number;
@@ -78,6 +83,7 @@ interface ProviderStatusInfo {
   defaultModelId?: string;
   autoFallbackToLocal?: boolean;
   availableProviders?: AiProviderCatalogItemDto[];
+  modelRegistry?: AiModelRegistrySnapshotDto;
 }
 
 type UniversalUseCaseCategory =
@@ -158,6 +164,14 @@ export function AiDesignWorkspace() {
   const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'perspective' | 'assistant' | 'specs'>('perspective');
   // Side dock tab when viewing Phối cảnh on wide desktop
   const [sideDockTab, setSideDockTab] = useState<'assistant' | 'specs'>('assistant');
+
+  // MK04: 4-Task Workflow, Structured Brief & Server Registry Modal
+  const [activeTaskCode, setActiveTaskCode] = useState<DesignTaskCode>('perspective_compose');
+  const [activeBrief, setActiveBrief] = useState<DesignBriefDto>({});
+  const [applyLayoutOverlay, setApplyLayoutOverlay] = useState<boolean>(false);
+  const [savingBrief, setSavingBrief] = useState<boolean>(false);
+  const [showModelRegistryModal, setShowModelRegistryModal] = useState<boolean>(false);
+  const [tabletDrawerOpen, setTabletDrawerOpen] = useState<boolean>(false);
 
   // Canvas View Mode: 'original' (Ảnh gốc) | 'result' (Kết quả AI) | 'live_3d' (Chấm điểm & Ghép 3D $0) | 'compare' (So sánh Trước/Sau) | 'bom' (Sơ đồ Cabin & BOM)
   const [viewMode, setViewMode] = useState<'original' | 'result' | 'live_3d' | 'compare' | 'bom'>('result');
@@ -352,11 +366,64 @@ export function AiDesignWorkspace() {
       const savedCustom = window.localStorage.getItem('toantrung_custom_ai_models_v1');
       if (savedCustom) {
         const parsed = JSON.parse(savedCustom);
-        if (Array.isArray(parsed)) setCustomAiModels(parsed);
+        if (Array.isArray(parsed)) {
+          // Security hygiene: never persist raw API keys in client localStorage
+          const scrubbed = parsed.map((item: Record<string, unknown>) => {
+            const { apiKey: _droppedKey, ...safeItem } = item;
+            return safeItem;
+          }) as typeof customAiModels;
+          setCustomAiModels(scrubbed);
+          window.localStorage.setItem('toantrung_custom_ai_models_v1', JSON.stringify(scrubbed));
+        }
       }
       const savedStrat = window.localStorage.getItem('toantrung_taoanh_strategy_v1');
       if (savedStrat === 'smart_hybrid' || savedStrat === 'cloud_direct') {
         setTaoAnhExecStrategy(savedStrat);
+      }
+
+      // Auto-prefill Marketing Brief from Reports / Tracking / SEO AI URL query parameters
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('fromBrief') === '1') {
+        const tc = urlParams.get('taskCode') as DesignTaskCode | null;
+        if (
+          tc === 'banner_generate' ||
+          tc === 'design_edit' ||
+          tc === 'perspective_compose' ||
+          tc === 'brief_analyze'
+        ) {
+          setActiveTaskCode(tc);
+        } else {
+          setActiveTaskCode('banner_generate');
+        }
+        const dom = urlParams.get('websiteDomain') || undefined;
+        const wid = urlParams.get('websiteId') || undefined;
+        const cid = urlParams.get('campaignId') || undefined;
+        const cname = urlParams.get('campaignName') || undefined;
+        const df = urlParams.get('dateFrom') || undefined;
+        const dt = urlParams.get('dateTo') || undefined;
+        const srcMod = (urlParams.get('sourceModule') as 'reports' | 'tracking' | 'seo_ai' | 'leads' | 'design' | null) || 'reports';
+        const snapId = urlParams.get('snapshotId') || undefined;
+        setActiveBrief({
+          websiteId: wid && wid !== 'all' ? wid : null,
+          websiteDomain: dom || null,
+          campaignId: cid || null,
+          campaignName: cname || null,
+          outputWidthPx: 1536,
+          outputHeightPx: 1024,
+          baselineSnapshot: {
+            capturedAt: new Date().toISOString(),
+            sourceModule: srcMod,
+            scopeLabel: `${dom || wid || 'Toàn hệ thống'}${df && dt ? ` (${df} → ${dt})` : ''}`,
+            websiteId: wid || null,
+            websiteDomain: dom || null,
+            campaignId: cid || null,
+            campaignName: cname || null,
+            dateFrom: df || null,
+            dateTo: dt || null,
+            snapshotId: snapId || null,
+          },
+        });
+        setSuccessToast('Đã nhận Brief & baseline ngữ cảnh từ phân hệ Marketing.');
       }
     } catch {
       // ignore storage errors
@@ -604,6 +671,20 @@ export function AiDesignWorkspace() {
       url.searchParams.set('projectId', String(project.id));
       window.history.replaceState({}, '', url.toString());
     }
+    if (project.taskCode) {
+      setActiveTaskCode(project.taskCode);
+    } else {
+      setActiveTaskCode(project.designType === 'banner' ? 'banner_generate' : 'perspective_compose');
+    }
+    setActiveBrief(project.designBrief || {
+      websiteId: project.websiteId ?? null,
+      websiteDomain: project.websiteDomain ?? null,
+      campaignId: project.campaignId ?? null,
+      campaignName: project.campaignName ?? null,
+      contentId: project.contentId ?? null,
+      outputWidthPx: project.bannerWidthPx ?? 1536,
+      outputHeightPx: project.bannerHeightPx ?? 1024,
+    });
     if (project.placementQuad) {
       setQuad(project.placementQuad);
     }
@@ -2334,19 +2415,31 @@ export function AiDesignWorkspace() {
         }
       }
 
+      const parentVersionIdForEdit =
+        activeTaskCode === 'design_edit' && currentVersion
+          ? currentVersion.id
+          : viewMode === 'result' && currentVersion
+            ? currentVersion.id
+            : null;
+
       const payload = {
         action: 'chat_edit',
         prompt: finalPrompt,
+        taskCode: activeTaskCode,
         chatMode: effectiveMode,
         quality: chatQuality,
         providerId: selectedProviderId,
         modelId: effectiveMode === 'consultant_free' ? consultantModelId : selectedModelId,
         placementQuad: quad,
-        productId: Number(paramForm.productId) || 1,
-        screenWidthM: Number(paramForm.screenWidthM) || 4.8,
-        screenHeightM: Number(paramForm.screenHeightM) || 2.7,
-        bannerWidthPx: Math.round(Number(paramForm.bannerWidthPx) || 1920),
-        bannerHeightPx: Math.round(Number(paramForm.bannerHeightPx) || 1080),
+        ...(paramForm.productId ? { productId: Number(paramForm.productId) } : {}),
+        ...(paramForm.screenWidthM > 0 && activeProj.screenWidthM != null
+          ? { screenWidthM: Number(paramForm.screenWidthM) }
+          : {}),
+        ...(paramForm.screenHeightM > 0 && activeProj.screenHeightM != null
+          ? { screenHeightM: Number(paramForm.screenHeightM) }
+          : {}),
+        bannerWidthPx: Math.round(Number(activeBrief.outputWidthPx || paramForm.bannerWidthPx) || 1536),
+        bannerHeightPx: Math.round(Number(activeBrief.outputHeightPx || paramForm.bannerHeightPx) || 1024),
         aspectRatio: paramForm.aspectRatio || '16:9',
         selectedPhotoUrl: hasSurveyPhotoOnProject ? sitePhotoUrl : undefined,
         selectedPhotoId: selectedPhoto?.id ?? null,
@@ -2354,8 +2447,10 @@ export function AiDesignWorkspace() {
         referenceProductPhotoUrls: activeProductPhotos.map((p) => p.url),
         referenceProductName: activeProductPhotos[0]?.name || undefined,
         clientRenderedBase64: preRenderedCompositeB64,
-        sourceVersionId:
-          viewMode === 'result' && currentVersion ? currentVersion.id : null,
+        parentVersionId: parentVersionIdForEdit,
+        sourceVersionId: parentVersionIdForEdit,
+        applyLayoutOverlay,
+        designBrief: activeBrief,
         compositingMode:
           paramForm.editActionMode === 'inpaint_keep_bg' ? 'STRICT' : 'REALISTIC',
         triggerSource: shouldRunImageMode ? 'user_button' : 'user_input',
@@ -3039,13 +3134,14 @@ export function AiDesignWorkspace() {
       setError('Vui lòng nhập Tên hiển thị Con AI và Mã Model ID (VD: gemini-2.5-pro-exp).');
       return;
     }
+    const rawKeyOnce = newCustomAiKey.trim();
+    // Never persist raw API keys into client localStorage state
     const newItem = {
       id: `staff-ai-${Date.now()}`,
       name: newCustomAiName.trim(),
       role: newCustomAiRole,
       providerId: newCustomAiProvider,
       modelId: newCustomAiModelId.trim(),
-      apiKey: newCustomAiKey.trim() || undefined,
       apiEndpoint: newCustomAiEndpoint.trim() || undefined,
       badge:
         newCustomAiRole === 'consultant'
@@ -3061,8 +3157,8 @@ export function AiDesignWorkspace() {
       window.localStorage.setItem('toantrung_custom_ai_models_v1', JSON.stringify(nextList));
     }
 
-    // If user also provided an API Key or Endpoint for this provider, sync to backend
-    if (newItem.apiKey || newItem.apiEndpoint) {
+    // If user also provided an API Key or Endpoint for this provider, sync to backend (server-only storage)
+    if (rawKeyOnce || newItem.apiEndpoint) {
       try {
         const res = await apiRequest<{ ok: boolean; providerStatus: ProviderStatusInfo }>(
           '/api/v1/design',
@@ -3076,7 +3172,7 @@ export function AiDesignWorkspace() {
               autoFallbackToLocal: true,
               providerConfig: {
                 providerId: newItem.providerId,
-                apiKey: newItem.apiKey,
+                apiKey: rawKeyOnce || undefined,
                 apiEndpoint: newItem.apiEndpoint,
                 activeModel: newItem.modelId,
               },
@@ -4080,6 +4176,27 @@ export function AiDesignWorkspace() {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={() => setTabletDrawerOpen((prev) => !prev)}
+            className="xl:hidden hidden md:inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-1.5 text-xs font-bold text-[#1E3A8A] shadow-2xs transition hover:bg-indigo-100"
+            title="Thu gọn / mở rộng bảng Trợ lý AI trên màn hình Tablet"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            <span>{tabletDrawerOpen ? 'Ẩn Trợ lý AI' : 'Mở Trợ lý AI'}</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="open-model-registry-btn"
+            onClick={() => setShowModelRegistryModal(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50"
+            title="Xem danh mục Model & trạng thái kiểm chứng trên máy chủ"
+          >
+            <Sparkles className="h-3.5 w-3.5 text-[#1E3A8A]" />
+            <span>Model Registry</span>
+          </button>
+
+          <button
+            type="button"
             data-testid="open-multi-ai-hub-btn"
             onClick={() => {
               const currentPid = selectedProviderId || providerStatus?.defaultProviderId || 'google_imagen';
@@ -4221,12 +4338,78 @@ export function AiDesignWorkspace() {
 
       {/* 2. MAIN 3-COLUMN STUDIO BODY (MATCHING REFERENCE SCREENSHOT) */}
       <div className="relative flex flex-1 min-h-0 overflow-hidden gap-3 p-3">
-        {/* ================= LEFT COLUMN: 1. DỰ ÁN & LIÊN KẾT LEAD + 2. CHỌN / THÊM / BỚT ẢNH DỰ ÁN ================= */}
+        {/* ================= LEFT COLUMN: BRIEF + DỰ ÁN + KHO ẢNH ================= */}
         <aside
           className={`${
             mobilePane === 'projects' ? 'flex w-full' : 'hidden'
-          } ${focusCanvas ? 'md:hidden' : 'md:flex'} md:w-[278px] xl:w-[295px] shrink-0 flex-col h-full min-h-0 gap-3 overflow-hidden`}
+          } ${focusCanvas ? 'md:hidden' : 'md:flex'} md:w-[295px] xl:w-[315px] shrink-0 flex-col h-full min-h-0 gap-2.5 overflow-y-auto pr-0.5`}
         >
+          <MarketingBriefPanel
+            activeTaskCode={activeTaskCode}
+            onChangeTaskCode={(tc) => {
+              setActiveTaskCode(tc);
+              const defaultRec = providerStatus?.modelRegistry?.defaultModelByTask?.[tc];
+              if (defaultRec) {
+                if (tc === 'brief_analyze') {
+                  setConsultantModelId(defaultRec.modelId);
+                  setConsultantModelName(defaultRec.modelId);
+                } else {
+                  setSelectedProviderId(defaultRec.providerId);
+                  setSelectedModelId(defaultRec.modelId);
+                }
+              }
+            }}
+            brief={activeBrief}
+            onChangeBrief={setActiveBrief}
+            savingBrief={savingBrief}
+            onSaveBrief={
+              currentProject
+                ? async () => {
+                    setSavingBrief(true);
+                    try {
+                      await apiRequest(`/api/v1/design/${currentProject.id}`, {
+                        method: 'PATCH',
+                        csrfToken: user?.csrfToken,
+                        body: {
+                          action: 'update_project',
+                          expectedVersion: currentProject.version,
+                          taskCode: activeTaskCode,
+                          designBrief: activeBrief,
+                          websiteId: activeBrief.websiteId ?? undefined,
+                          campaignId: activeBrief.campaignId ?? undefined,
+                        },
+                      });
+                      setSuccessToast('Đã lưu Brief chiến dịch vào dự án thiết kế.');
+                      await loadData(currentProject.id);
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : 'Không thể lưu Brief.');
+                    } finally {
+                      setSavingBrief(false);
+                    }
+                  }
+                : undefined
+            }
+            applyLayoutOverlay={applyLayoutOverlay}
+            onChangeApplyLayoutOverlay={setApplyLayoutOverlay}
+            modelRegistry={providerStatus?.modelRegistry}
+            selectedProviderId={selectedProviderId}
+            selectedModelId={activeTaskCode === 'brief_analyze' ? consultantModelId : selectedModelId}
+            onSelectProviderAndModel={(pid, mid) => {
+              if (activeTaskCode === 'brief_analyze') {
+                setConsultantModelId(mid);
+                setConsultantModelName(mid);
+              } else {
+                setSelectedProviderId(pid);
+                setSelectedModelId(mid);
+              }
+            }}
+            onOpenRegistryModal={() => setShowModelRegistryModal(true)}
+            onComposePromptFromBrief={(composedPrompt) => {
+              handlePromptChange(composedPrompt);
+              setTabletDrawerOpen(true);
+            }}
+          />
+
           {/* CARD 1: "1. DỰ ÁN & LIÊN KẾT LEAD" (Supports Collapse / Expand so Card 2 stretches upward) */}
           <div
             className={`flex flex-col min-h-0 ${
@@ -5387,44 +5570,60 @@ export function AiDesignWorkspace() {
                   </div>
                 )}
 
-                {/* C11: Dải đối chiếu nguồn tham chiếu của phiên bản đang xem */}
+                {/* C11: Dải đối chiếu nguồn tham chiếu, lineage & model thực tế của phiên bản */}
                 {currentVersion && (
                   <div className="mt-2.5 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] text-slate-600 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <span>
-                        <strong className="text-slate-800">Phiên bản:</strong> v{currentVersion.versionNumber} (
-                        {currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD'
-                          ? 'Designer hoàn thiện'
-                          : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
-                              currentVersion.providerId === 'local_sandbox'
-                            ? 'Bản ghép kỹ thuật nội bộ (Studio Engine)'
-                            : `Ảnh sinh Cloud AI${currentVersion.modelUsed ? ` · ${currentVersion.modelUsed}` : ''}`}
-                        )
+                        <strong className="text-slate-800">Phiên bản:</strong> v{currentVersion.versionNumber}
+                        {currentVersion.taskCode ? ` (${currentVersion.taskCode})` : ''}
                       </span>
                       <span
                         className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
                           currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD'
                             ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                            : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
-                                currentVersion.providerId === 'local_sandbox'
-                              ? 'bg-amber-50 text-amber-800 border-amber-200'
-                              : 'bg-blue-50 text-[#1E3A8A] border-blue-200'
+                            : currentVersion.generationOrigin === 'AI_PLUS_LAYOUT'
+                              ? 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                              : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
+                                  currentVersion.providerId === 'local_sandbox'
+                                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                : 'bg-blue-50 text-[#1E3A8A] border-blue-200'
                         }`}
                       >
                         {currentVersion.sourceType === 'DESIGNER_FINAL_UPLOAD'
-                          ? 'Bản vẽ Designer tải lên'
-                          : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
-                              currentVersion.providerId === 'local_sandbox'
-                            ? 'Ghép kỹ thuật nội bộ · Không phải ảnh Cloud AI'
-                            : 'Cloud AI Image'}
+                          ? 'DESIGNER UPLOAD'
+                          : currentVersion.generationOrigin === 'AI_PLUS_LAYOUT'
+                            ? 'AI + LAYOUT'
+                            : currentVersion.generationOrigin === 'LOCAL_COMPOSITE_FALLBACK' ||
+                                currentVersion.providerId === 'local_sandbox'
+                              ? 'LOCAL COMPOSITE · Không phải ảnh Cloud AI'
+                              : 'CLOUD AI'}
+                      </span>
+                      <span>
+                        <strong className="text-slate-800">Model yêu cầu:</strong>{' '}
+                        {currentVersion.requestedModel || currentVersion.modelUsed || '—'}
+                        {currentVersion.reportedModel
+                          ? ` · Xác nhận upstream: ${currentVersion.reportedModel}`
+                          : currentVersion.reportedModelNote
+                            ? ' (Gateway không trả field model)'
+                            : ''}
+                      </span>
+                      <span>
+                        <strong className="text-slate-800">Chi phí:</strong>{' '}
+                        {currentVersion.costState === 'actual'
+                          ? currentVersion.cost?.formattedDecimal || 'Thực tế'
+                          : currentVersion.costState === 'estimated'
+                            ? `Ước tính ${currentVersion.cost?.formattedDecimal || ''}`
+                            : 'Chưa trả từ gateway'}
                       </span>
                       <span>
                         <strong className="text-slate-800">Ảnh tham chiếu:</strong>{' '}
                         {currentVersion.referenceSitePhotoId || selectedPhoto?.name || 'Ảnh công trình hiện tại'}
                       </span>
-                      {currentVersion.sourceVersionId && (
+                      {(currentVersion.parentVersionId || currentVersion.sourceVersionId) && (
                         <span>
-                          <strong className="text-slate-800">Kế thừa từ:</strong> ID #{currentVersion.sourceVersionId}
+                          <strong className="text-slate-800">Kế thừa từ:</strong> ID #
+                          {currentVersion.parentVersionId || currentVersion.sourceVersionId}
                         </span>
                       )}
                       <span>
@@ -5602,10 +5801,12 @@ export function AiDesignWorkspace() {
               </div>
             </div>
 
-            {/* ================= RIGHT COLUMN: WIDER "Ô CHAT TRỰC TIẾP VỚI AI" (md:w-[430px] xl:w-[490px]) ================= */}
+            {/* ================= RIGHT COLUMN: WIDER "Ô CHAT TRỰC TIẾP VỚI AI" (collapses cleanly below xl so tablet 1024px has wide canvas) ================= */}
             <aside
               className={`${
-                mobilePane === 'assistant' ? 'flex w-full' : 'hidden md:flex md:w-[420px] xl:w-[485px]'
+                mobilePane === 'assistant' || tabletDrawerOpen
+                  ? 'flex w-full md:w-[390px] xl:w-[465px]'
+                  : 'hidden xl:flex xl:w-[465px]'
               } my-2.5 mr-2.5 shrink-0 flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-2xs`}
             >
               {/* Header & Dual-AI Badges */}
@@ -7120,6 +7321,23 @@ export function AiDesignWorkspace() {
           </div>
         </div>
       )}
+
+      <ModelRegistryModal
+        open={showModelRegistryModal}
+        onClose={() => setShowModelRegistryModal(false)}
+        snapshot={providerStatus?.modelRegistry}
+        canAdminRefresh={Boolean(user && hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN'))}
+        canProbe={Boolean(
+          user &&
+            (hasBaPermission(user.roleCode, 'AI_DESIGN') ||
+              hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN')),
+        )}
+        onRegistryUpdated={(nextSnapshot) => {
+          setProviderStatus((prev) =>
+            prev ? { ...prev, modelRegistry: nextSnapshot } : prev,
+          );
+        }}
+      />
     </div>
   );
 }

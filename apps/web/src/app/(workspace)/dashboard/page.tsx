@@ -258,8 +258,8 @@ export default function DashboardPage() {
         title="Tổng quan điều hành"
         subtitle={
           report
-            ? `Bức tranh bao quát toàn hệ thống (${report.fromDate} → ${report.toDate})`
-            : 'Bức tranh bao quát toàn hệ thống'
+            ? `Hôm nay có gì cần chú ý? · Bức tranh bao quát toàn hệ thống (${report.fromDate} → ${report.toDate})`
+            : 'Hôm nay có gì cần chú ý? · Bức tranh bao quát toàn hệ thống'
         }
         scope={{ ...scope, websiteId: 'all' }}
         availableWebsites={report?.availableWebsites || knownWebsites}

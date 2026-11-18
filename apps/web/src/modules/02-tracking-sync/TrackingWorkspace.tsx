@@ -204,7 +204,9 @@ export function TrackingWorkspace() {
       <WebsiteDashboardHeader
         title={UI_VOCABULARY.menu.campaigns}
         subtitle={
-          data ? `${data.scope.startDate} → ${data.scope.endDate}` : undefined
+          data
+            ? `Traffic và quảng cáo nào đang có hiệu quả? · ${data.scope.startDate} → ${data.scope.endDate}`
+            : 'Traffic và quảng cáo nào đang có hiệu quả?'
         }
         scope={scope}
         availableWebsites={data?.coverage.availableWebsites || knownWebsites}
@@ -1015,13 +1017,22 @@ export function TrackingWorkspace() {
                           : 'Chưa đủ đối soát'}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => setDrawerCampaign(c)}
-                          className="min-h-8 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-[#1E3A8A] font-semibold"
-                        >
-                          {UI_VOCABULARY.actions.viewDetails}
-                        </button>
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <Link
+                            href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=tracking&websiteId=${encodeURIComponent(scope.websiteId || 'all')}&campaignId=${encodeURIComponent(c.campaignId)}&campaignName=${encodeURIComponent(c.campaignName)}${data ? `&dateFrom=${encodeURIComponent(data.scope.startDate)}&dateTo=${encodeURIComponent(data.scope.endDate)}` : ''}`}
+                            className="min-h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] font-semibold inline-flex items-center"
+                            title="Mở Brief thiết kế gắn chiến dịch & phạm vi ngày đang xem"
+                          >
+                            Tạo brief
+                          </Link>
+                          <button
+                            type="button"
+                            onClick={() => setDrawerCampaign(c)}
+                            className="min-h-8 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-[#1E3A8A] font-semibold"
+                          >
+                            {UI_VOCABULARY.actions.viewDetails}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))

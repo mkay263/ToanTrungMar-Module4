@@ -3,6 +3,7 @@ import { jsonError } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { ZipArchive } from '../../../../../core/export/xlsx-builder';
 import { getScopedReportsDashboard } from '../../../../../modules/04-reports/service';
+import { getM04ResultsReportSpec } from '../../../../../modules/04-reports/m04-spec.service';
 
 function escXml(val: unknown): string {
   if (val == null) return '';
@@ -327,59 +328,61 @@ async function handleGenerateDocx(
     const toDate = customPayload?.to || url.searchParams.get('to') || url.searchParams.get('toDate') || undefined;
 
     const dash = await getScopedReportsDashboard(auth.user, { websiteId, preset, fromDate, toDate });
+    const m04Spec = await getM04ResultsReportSpec(auth.user, {
+      websiteId: dash.websiteId || 'all',
+      from: dash.fromDate,
+      to: dash.toDate,
+    });
     const dateStamp = new Date().toISOString().slice(0, 10);
     const docCode = customPayload?.docCode || `TT-BC-${dateStamp.replace(/-/g, '')}`;
     const reportTitle =
       customPayload?.title ||
-      `Báo cáo kết quả Toàn Trung (${dash.fromDate} đến ${dash.toDate})`;
+      `Báo cáo Hiệu quả Marketing Toàn Trung (${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate})`;
 
     const kpiRows: string[][] = [
       [
+        'Chi phí quảng cáo',
+        m04Spec.metrics.attributedAdCost !== null && m04Spec.metrics.attributedAdCost !== undefined
+          ? `${m04Spec.metrics.attributedAdCost.toLocaleString('vi-VN')} ₫`
+          : 'Chưa kết nối / Chưa tách riêng website',
+        m04Spec.metrics.adReconciliationNote || 'Chi phí thực tế trong phạm vi chọn',
+      ],
+      [
         'Lead tiếp nhận (L1)',
-        String(dash.overview.totalLeadsL1),
+        String(m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount),
         'Toàn bộ Lead phát sinh trong phạm vi kỳ và website đang chọn',
       ],
       [
         'Lead hợp lệ (L2)',
-        String(dash.overview.validLeadsL2),
+        String(m04Spec.metrics.validLeadCount),
         'Lead sau khi trừ bản ghi đã xác minh là spam',
       ],
       [
-        'Lead hiệu quả (L3)',
-        String(dash.overview.effectiveLeadsL3),
-        'Đã trừ spam loại trừ quảng cáo & yêu cầu lặp ngắn hạn theo BA',
+        'CPL quảng cáo hợp lệ',
+        m04Spec.metrics.costPerValidAdLead !== null
+          ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} ₫`
+          : 'Chưa đủ dữ liệu',
+        `Chia trên ${m04Spec.metrics.validAttributedAdLeadCount ?? 0} Lead quảng cáo hợp lệ (L2) được đối soát`,
       ],
       [
-        'Đang xử lý / Báo giá chờ phản hồi',
-        `${dash.overview.activeLeadsCount ?? dash.overview.quotingCount} / ${dash.overview.quoteSentCount}`,
-        `Báo giá quá hạn >7 ngày: ${dash.overview.overdue7DaysQuoteCount}`,
+        'Chốt thành công',
+        String(m04Spec.metrics.wonLeadCount),
+        `Quá hạn báo giá >7 ngày: ${m04Spec.metrics.overdueQuoteCount}`,
       ],
       [
-        'Chốt thành công & Tỷ lệ chốt',
-        `${dash.overview.wonCount} (${dash.overview.winRateText})`,
-        'Tính trên tổng số Lead hợp lệ (L2) cùng phạm vi',
+        'Tỷ lệ chốt',
+        m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—',
+        m04Spec.metrics.winRateDefinition,
       ],
     ];
 
-    if (dash.marketingSummary.totalAdsSpend) {
-      kpiRows.push([
-        'Tổng chi phí Quảng cáo & CPL thực tế',
-        `${Number(dash.marketingSummary.totalAdsSpend.formattedDecimal).toLocaleString('vi-VN')} ₫ (CPL: ${
-          dash.marketingSummary.cplEffective
-            ? `${Math.round(Number(dash.marketingSummary.cplEffective.formattedDecimal)).toLocaleString('vi-VN')} ₫`
-            : '—'
-        })`,
-        `Chuyển đổi nền tảng: ${dash.marketingSummary.platformReportedConversions ?? 0}`,
-      ]);
-    }
-
-    const sourceRows: string[][] = (dash.marketingSummary.bySourceCampaign || []).map((s) => [
-      `${s.sourceName} (${s.campaignName})`,
-      String(s.crmValidL2),
-      String(s.crmEffectiveL3),
-      String(s.platformConversions),
-      String(s.wonCount),
-      s.crmValidL2 > 0 ? `${((s.wonCount / s.crmValidL2) * 100).toFixed(1)}%` : '0.0%',
+    const sourceRows: string[][] = m04Spec.tables.byChannel.map((ch) => [
+      ch.channel,
+      String(ch.validCount),
+      String(ch.quotedCount),
+      '—',
+      String(ch.wonCount),
+      ch.winRatePct !== null && ch.winRatePct !== undefined ? `${ch.winRatePct}%` : '—',
     ]);
 
     const salesRows: string[][] = (dash.salesPerformance || []).map((sp) => [

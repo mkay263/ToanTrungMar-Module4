@@ -1907,33 +1907,101 @@ async function syncRealSearchConsole(
   return { success: true, synced, isEmpty: synced === 0 };
 }
 
-function inferDomainFromCampaignMetadata(campaignName: string, finalUrls?: string[]): string | null {
-  const hostCounts = new Map<string, number>();
+export type CampaignAttributionStatus =
+  | 'SINGLE_WEBSITE'
+  | 'MULTI_WEBSITE_UNSPLIT'
+  | 'UNATTRIBUTED';
+
+export interface CampaignWebsiteAttributionResult {
+  status: CampaignAttributionStatus;
+  domain: string | null;
+  detectedDomains: string[];
+}
+
+export function classifyCampaignWebsiteAttribution(
+  campaignName: string,
+  finalUrls?: string[],
+  existingSlug?: string | null,
+): CampaignWebsiteAttributionResult {
+  const uniqueHosts = new Set<string>();
   for (const rawUrl of finalUrls || []) {
     try {
       const host = new URL(rawUrl).hostname.replace(/^www\./i, '').toLowerCase();
-      if (host) {
-        hostCounts.set(host, (hostCounts.get(host) || 0) + 1);
-      }
+      if (host) uniqueHosts.add(host);
     } catch {
       // ignore invalid url
     }
   }
-  if (hostCounts.size > 0) {
-    const sorted = Array.from(hostCounts.entries()).sort((a, b) => {
-      if (b[1] !== a[1]) return b[1] - a[1];
-      return a[0].localeCompare(b[0]);
-    });
-    return sorted[0][0];
+
+  const detectedFromUrls = Array.from(uniqueHosts).sort();
+  if (detectedFromUrls.length > 1) {
+    return {
+      status: 'MULTI_WEBSITE_UNSPLIT',
+      domain: null,
+      detectedDomains: detectedFromUrls,
+    };
   }
+  if (detectedFromUrls.length === 1) {
+    return {
+      status: 'SINGLE_WEBSITE',
+      domain: detectedFromUrls[0],
+      detectedDomains: detectedFromUrls,
+    };
+  }
+
+  if (existingSlug === 'multi_website_unsplit') {
+    return {
+      status: 'MULTI_WEBSITE_UNSPLIT',
+      domain: null,
+      detectedDomains: [],
+    };
+  }
+  if (existingSlug && existingSlug.startsWith('domain:')) {
+    const dom = existingSlug.slice('domain:'.length).trim().toLowerCase();
+    if (dom) {
+      return {
+        status: 'SINGLE_WEBSITE',
+        domain: dom,
+        detectedDomains: [dom],
+      };
+    }
+  }
+
   const lower = (campaignName || '').toLowerCase();
-  if (lower.includes('bangdientu')) return 'bangdientu.com.vn';
-  if (lower.includes('bangled')) return 'bangled.vn';
-  if (lower.includes('manhinhled')) return 'manhinhled.net.vn';
+  const matchedByName = new Set<string>();
+  if (lower.includes('bangdientu')) matchedByName.add('bangdientu.com.vn');
+  if (lower.includes('bangled')) matchedByName.add('bangled.vn');
+  if (lower.includes('manhinhled')) matchedByName.add('manhinhled.net.vn');
   if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt') || lower.endsWith('_tt')) {
-    return 'toantrung.com.vn';
+    matchedByName.add('toantrung.com.vn');
   }
-  return null;
+
+  const nameDomains = Array.from(matchedByName);
+  if (nameDomains.length > 1) {
+    return {
+      status: 'MULTI_WEBSITE_UNSPLIT',
+      domain: null,
+      detectedDomains: nameDomains,
+    };
+  }
+  if (nameDomains.length === 1) {
+    return {
+      status: 'SINGLE_WEBSITE',
+      domain: nameDomains[0],
+      detectedDomains: nameDomains,
+    };
+  }
+
+  return {
+    status: 'UNATTRIBUTED',
+    domain: null,
+    detectedDomains: [],
+  };
+}
+
+function inferDomainFromCampaignMetadata(campaignName: string, finalUrls?: string[]): string | null {
+  const classified = classifyCampaignWebsiteAttribution(campaignName, finalUrls);
+  return classified.status === 'SINGLE_WEBSITE' ? classified.domain : null;
 }
 
 async function fetchGoogleAdsWithFallback(
@@ -2079,10 +2147,17 @@ async function syncRealGoogleAds(
     const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
     if (!extId) continue;
 
-    const resolvedDomain = inferDomainFromCampaignMetadata(
+    const attribution = classifyCampaignWebsiteAttribution(
       campName,
       finalUrlsByCampaign.get(extId),
     );
+    const resolvedDomain = attribution.status === 'SINGLE_WEBSITE' ? attribution.domain : null;
+    const slugToPersist =
+      attribution.status === 'MULTI_WEBSITE_UNSPLIT'
+        ? 'multi_website_unsplit'
+        : resolvedDomain
+          ? `domain:${resolvedDomain}`
+          : null;
     domainByCampaignId.set(extId, resolvedDomain);
 
     const campCode = `GADS_${extId}`;
@@ -2103,7 +2178,7 @@ async function syncRealGoogleAds(
         campaignName: campName,
         isActive,
         ...(budgetMicros !== null ? { dailyBudgetMicros: budgetMicros } : {}),
-        ...(resolvedDomain ? { utmCampaignSlug: `domain:${resolvedDomain}` } : {}),
+        ...(slugToPersist ? { utmCampaignSlug: slugToPersist } : {}),
       },
       create: {
         campaignCode: campCode,
@@ -2112,7 +2187,7 @@ async function syncRealGoogleAds(
         accountExternalId: targetCustomerId,
         isActive,
         dailyBudgetMicros: budgetMicros,
-        utmCampaignSlug: resolvedDomain ? `domain:${resolvedDomain}` : null,
+        utmCampaignSlug: slugToPersist,
       },
     });
     synced += 1;

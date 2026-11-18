@@ -319,7 +319,7 @@ export function SeoKeywordsWorkspace() {
     <div className="space-y-4 pb-8">
       <WebsiteDashboardHeader
         title="Từ khóa & SEO"
-        subtitle="Hiệu quả tìm kiếm tự nhiên, trang đích SEO, kế hoạch nội dung và xu hướng nhu cầu"
+        subtitle="Trang / từ khóa nào cần cải thiện? · Tạo báo cáo AI có căn cứ và đề xuất công việc nội dung"
         scope={scope}
         availableWebsites={data?.coverage.availableWebsites || []}
         freshnessMessage={data?.freshness.statusMessage}

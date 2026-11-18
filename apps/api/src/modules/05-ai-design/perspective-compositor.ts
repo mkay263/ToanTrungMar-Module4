@@ -689,3 +689,93 @@ export function processBannerToTargetResolution(params: {
   };
 }
 
+function parseHexColorRgb(hex?: string | null): [number, number, number] {
+  const cleaned = (hex || '').trim().replace(/^#/, '');
+  if (/^[0-9a-fA-F]{6}$/.test(cleaned)) {
+    return [
+      parseInt(cleaned.slice(0, 2), 16),
+      parseInt(cleaned.slice(2, 4), 16),
+      parseInt(cleaned.slice(4, 6), 16),
+    ];
+  }
+  return [11, 29, 72]; // Brand navy #0B1D48
+}
+
+/**
+ * Applies a subtle translucent brand footer safe-zone & accent border frame (`AI_PLUS_LAYOUT`)
+ * over a PNG banner buffer in pure Node without requiring native C++ bindings.
+ */
+export function renderBrandLayoutOverlayOnImage(params: {
+  sourceBuffer: Buffer;
+  brandPrimaryColor?: string | null;
+  headlineText?: string | null;
+  ctaText?: string | null;
+  websiteDomain?: string | null;
+}): {
+  imageBuffer: Buffer;
+  applied: boolean;
+  overlayNote: string;
+} {
+  const decoded = decodePngToRgb(params.sourceBuffer);
+  if (!decoded) {
+    return {
+      imageBuffer: params.sourceBuffer,
+      applied: false,
+      overlayNote: 'Ảnh nguồn không phải định dạng PNG nên giữ nguyên ảnh gốc chưa phủ khung thương hiệu.',
+    };
+  }
+
+  const { width, height, rgb } = decoded;
+  const out = new Uint8Array(rgb);
+  const [accR, accG, accB] = parseHexColorRgb(params.brandPrimaryColor);
+  const bandHeight = Math.max(24, Math.round(height * 0.12));
+  const bandTop = height - bandHeight;
+  const stripeHeight = Math.max(4, Math.round(height * 0.008));
+
+  for (let y = 0; y < height; y++) {
+    const inStripe = y >= bandTop && y < bandTop + stripeHeight;
+    const inFooterBand = y >= bandTop + stripeHeight;
+    if (!inStripe && !inFooterBand) continue;
+
+    for (let x = 0; x < width; x++) {
+      const idx = (y * width + x) * 3;
+      if (inStripe) {
+        out[idx] = accR;
+        out[idx + 1] = accG;
+        out[idx + 2] = accB;
+      } else {
+        // Dark translucent brand safe-zone footer (72% navy overlay for high text/logo readability)
+        out[idx] = Math.round(out[idx] * 0.28 + 11 * 0.72);
+        out[idx + 1] = Math.round(out[idx + 1] * 0.28 + 29 * 0.72);
+        out[idx + 2] = Math.round(out[idx + 2] * 0.28 + 72 * 0.72);
+      }
+    }
+  }
+
+  // Add CTA pill highlight block on right bottom corner of the footer band
+  if (params.ctaText && params.ctaText.trim()) {
+    const pillW = Math.max(80, Math.round(width * 0.22));
+    const pillH = Math.max(16, Math.round(bandHeight * 0.56));
+    const pillX1 = Math.max(0, width - pillW - Math.round(width * 0.03));
+    const pillX2 = Math.min(width - 1, width - Math.round(width * 0.03));
+    const pillY1 = bandTop + Math.round((bandHeight - pillH) / 2);
+    const pillY2 = Math.min(height - 1, pillY1 + pillH);
+    for (let y = pillY1; y <= pillY2; y++) {
+      for (let x = pillX1; x <= pillX2; x++) {
+        const idx = (y * width + x) * 3;
+        out[idx] = Math.min(255, Math.max(accR, 234));
+        out[idx + 1] = Math.min(255, Math.max(accG, 88));
+        out[idx + 2] = Math.min(255, Math.min(accB, 40));
+      }
+    }
+  }
+
+  const outBuf = encodeRgbToPng({ width, height, rgb: out });
+  return {
+    imageBuffer: outBuf,
+    applied: true,
+    overlayNote: `Đã áp dụng vùng an toàn thương hiệu (AI + Layout${params.websiteDomain ? ` · ${params.websiteDomain}` : ''}) ở chân banner để chèn chữ/CTA sắc nét.`,
+  };
+}
+
+

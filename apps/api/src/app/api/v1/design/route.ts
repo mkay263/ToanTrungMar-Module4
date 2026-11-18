@@ -1,6 +1,9 @@
 import {
   ConfigureAiProvidersSchema,
   CreateDesignRequestSchema,
+  MarketingBriefSubmitSchema,
+  ProbeModelCapabilitySchema,
+  RefreshModelRegistrySchema,
   hasBaPermission,
   type AiProviderId,
 } from '@toantrung/contracts';
@@ -11,6 +14,7 @@ import { AiDesignProviderFactory } from '../../../../modules/05-ai-design/provid
 import {
   configureAiProviders,
   createDesignRequestWithAiDraft,
+  createMarketingDesignBrief,
   deleteDesignProject,
   listDesignRequestsForUser,
 } from '../../../../modules/05-ai-design/service';
@@ -67,6 +71,80 @@ export async function POST(req: Request) {
         modelId: typeof raw.modelId === 'string' ? raw.modelId : null,
       });
       return jsonSuccess(testRes);
+    }
+
+    if (raw.action === 'refresh_model_registry') {
+      if (!hasBaPermission(auth.user.roleCode, 'SYSTEM_USER_ADMIN')) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Quản trị hệ thống mới được làm mới danh mục Model AI toàn cục.',
+          403
+        );
+      }
+      const parsedRefresh = RefreshModelRegistrySchema.safeParse(raw);
+      if (!parsedRefresh.success) {
+        return jsonError(
+          'VALIDATION_ERROR',
+          parsedRefresh.error.issues[0]?.message || 'Tham số làm mới danh mục Model không hợp lệ.',
+          400
+        );
+      }
+      const modelRegistry = await AiDesignProviderFactory.getModelRegistry(
+        true,
+        parsedRefresh.data.providerId
+      );
+      return jsonSuccess({ ok: true, modelRegistry });
+    }
+
+    if (raw.action === 'probe_model_capability') {
+      if (
+        !hasBaPermission(auth.user.roleCode, 'AI_DESIGN') &&
+        !hasBaPermission(auth.user.roleCode, 'SYSTEM_USER_ADMIN')
+      ) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Quản trị viên hoặc Designer mới được kiểm tra khả năng thực thi model (Probe).',
+          403
+        );
+      }
+      const parsedProbe = ProbeModelCapabilitySchema.safeParse(raw);
+      if (!parsedProbe.success) {
+        return jsonError(
+          'VALIDATION_ERROR',
+          parsedProbe.error.issues[0]?.message || 'Thông số probe model không hợp lệ.',
+          400
+        );
+      }
+      const probeResult = await AiDesignProviderFactory.probeModelCapability(
+        parsedProbe.data.providerId,
+        parsedProbe.data.modelId,
+        parsedProbe.data.taskCode
+      );
+      return jsonSuccess(probeResult);
+    }
+
+    if (raw.action === 'submit_marketing_brief') {
+      const canSubmitBrief =
+        hasBaPermission(auth.user.roleCode, 'AI_DESIGN') ||
+        hasBaPermission(auth.user.roleCode, 'TRACKING_ADS_OPTIMIZE') ||
+        hasBaPermission(auth.user.roleCode, 'AI_MARKETING_SEO');
+      if (!canSubmitBrief) {
+        return jsonError(
+          'FORBIDDEN_PERMISSION',
+          'Chỉ Marketing, Ads, Designer hoặc Quản trị viên mới được gửi Brief thiết kế từ số liệu Marketing.',
+          403
+        );
+      }
+      const parsedBrief = MarketingBriefSubmitSchema.safeParse(raw);
+      if (!parsedBrief.success) {
+        return jsonError(
+          'VALIDATION_ERROR',
+          parsedBrief.error.issues[0]?.message || 'Nội dung Brief thiết kế không hợp lệ.',
+          400
+        );
+      }
+      const briefRes = await createMarketingDesignBrief(auth.user, parsedBrief.data);
+      return jsonSuccess(briefRes, 201);
     }
 
     if (raw.action === 'configure_ai_providers') {
