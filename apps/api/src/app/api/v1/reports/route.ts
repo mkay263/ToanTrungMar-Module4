@@ -20,7 +20,7 @@ export async function GET(request: Request) {
         preset: url.searchParams.get('preset'),
         from: url.searchParams.get('from') || url.searchParams.get('fromDate'),
         to: url.searchParams.get('to') || url.searchParams.get('toDate'),
-        page: Number(url.searchParams.get('page') || 1),
+        page: Number(url.searchParams.get('page') || url.searchParams.get('pendingPage') || 1),
         pageSize: Number(url.searchParams.get('pageSize') || 20),
       });
       return jsonSuccess(m04);

@@ -69,7 +69,7 @@ export function MarketingBriefPanel({
   const candidateModelsForTask = useMemo(() => {
     const models = modelRegistry?.models || [];
     return models.filter((m) => {
-      const st = m.taskStatuses[activeTaskCode];
+      const st = m.taskStatuses?.[activeTaskCode] || 'listed_unverified';
       return st !== 'unsupported' || m.modelId === selectedModelId;
     });
   }, [modelRegistry, activeTaskCode, selectedModelId]);
@@ -175,7 +175,7 @@ export function MarketingBriefPanel({
             </option>
           ) : (
             candidateModelsForTask.map((m) => {
-              const st = m.taskStatuses[activeTaskCode];
+              const st = m.taskStatuses?.[activeTaskCode] || 'listed_unverified';
               const blocked =
                 st === 'unsupported' ||
                 st === 'deprecated' ||

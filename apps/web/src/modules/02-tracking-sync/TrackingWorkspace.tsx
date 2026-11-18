@@ -14,11 +14,13 @@ import {
 import {
   UI_VOCABULARY,
   formatSafePeriodComparison,
+  hasBaPermission,
   type M02CampaignRowDto,
   type M02TrafficInteractionDto,
   type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
 import { apiRequest, peekApiCache } from '@/core/http/client';
+import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
@@ -52,6 +54,8 @@ function buildM02ApiPath(
 }
 
 export function TrackingWorkspace() {
+  const { user } = useSession();
+  const canDirectDesign = Boolean(user && hasBaPermission(user.roleCode, 'AI_DESIGN'));
   const { scope, hydrated, updateScope } = useDashboardScope();
   const [businessTab, setBusinessTab] = useState<MainBusinessTab>('traffic');
   const [trafficSubTab, setTrafficSubTab] = useState<TrafficTableSubTab>('channels');
@@ -59,6 +63,69 @@ export function TrackingWorkspace() {
   const [adsPage, setAdsPage] = useState(1);
   const [searchTerm, setSearchTerm] = useState('');
   const [drawerCampaign, setDrawerCampaign] = useState<M02CampaignRowDto | null>(null);
+  const [briefSubmittingId, setBriefSubmittingId] = useState<string | null>(null);
+  const [briefNotice, setBriefNotice] = useState<string | null>(null);
+
+  const handleCreateCampaignBrief = async (c: M02CampaignRowDto) => {
+    setBriefSubmittingId(c.campaignId);
+    setBriefNotice(null);
+    try {
+      const domain =
+        data?.scope.domain ||
+        (scope.websiteId && scope.websiteId !== 'all' ? scope.websiteId : 'toantrung.com.vn');
+      const res = await apiRequest<{ ok: boolean; projectId: number; message: string }>('/api/v1/design', {
+        method: 'POST',
+        csrfToken: user?.csrfToken,
+        body: {
+          action: 'submit_marketing_brief',
+          projectName: `Banner chiến dịch ${c.campaignName}`,
+          taskCode: 'banner_generate',
+          designType: 'banner',
+          sourceModule: 'tracking',
+          designBrief: {
+            objective: `Tối ưu hiệu quả quảng cáo & CPL cho chiến dịch ${c.campaignName}`,
+            websiteId: scope.websiteId !== 'all' ? scope.websiteId : domain,
+            websiteDomain: domain,
+            campaignId: c.campaignId,
+            campaignName: c.campaignName,
+            targetChannel: 'Google Ads Display / Search Landing',
+            outputFormat: 'Banner 16:9 (1536×1024 px)',
+            outputWidthPx: 1536,
+            outputHeightPx: 1024,
+            headlineText: `${c.campaignName} · Giải pháp LED Toàn Trung`,
+            ctaText: 'Nhận báo giá ngay',
+            baselineSnapshot: data
+              ? {
+                  capturedAt: new Date().toISOString(),
+                  sourceModule: 'tracking',
+                  scopeLabel: `${c.campaignName} (${data.scope.startDate} → ${data.scope.endDate})`,
+                  dateFrom: data.scope.startDate,
+                  dateTo: data.scope.endDate,
+                  websiteId: scope.websiteId || 'all',
+                  websiteDomain: domain,
+                  campaignId: c.campaignId,
+                  campaignName: c.campaignName,
+                  metrics: {
+                    adCost: c.cost,
+                    receivedLeadCount: c.attributedLeadCount,
+                    validLeadCount: c.validAttributedLeadCount,
+                    costPerValidAdLead: c.costPerValidLead,
+                    wonLeadCount: c.wonAttributedLeadCount,
+                  },
+                }
+              : null,
+          },
+        },
+      });
+      setBriefNotice(
+        res.message || `Đã gửi Brief thiết kế #${res.projectId} cho chiến dịch "${c.campaignName}" sang Studio.`,
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể gửi Brief thiết kế.');
+    } finally {
+      setBriefSubmittingId(null);
+    }
+  };
 
   const apiPath = useMemo(
     () => buildM02ApiPath(scope, page, adsPage),
@@ -253,6 +320,19 @@ export function TrackingWorkspace() {
           </>
         }
       />
+
+      {briefNotice && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3.5 py-2.5 text-xs text-emerald-800 flex items-center justify-between gap-2">
+          <span>{briefNotice}</span>
+          <button
+            type="button"
+            onClick={() => setBriefNotice(null)}
+            className="text-emerald-700 hover:text-emerald-950 font-semibold"
+          >
+            Đóng
+          </button>
+        </div>
+      )}
 
       {errorMsg && (
         <div
@@ -1018,13 +1098,25 @@ export function TrackingWorkspace() {
                       </td>
                       <td className="py-3 px-4 text-right">
                         <div className="inline-flex items-center justify-end gap-1.5">
-                          <Link
-                            href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=tracking&websiteId=${encodeURIComponent(scope.websiteId || 'all')}&campaignId=${encodeURIComponent(c.campaignId)}&campaignName=${encodeURIComponent(c.campaignName)}${data ? `&dateFrom=${encodeURIComponent(data.scope.startDate)}&dateTo=${encodeURIComponent(data.scope.endDate)}` : ''}`}
-                            className="min-h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] font-semibold inline-flex items-center"
-                            title="Mở Brief thiết kế gắn chiến dịch & phạm vi ngày đang xem"
-                          >
-                            Tạo brief
-                          </Link>
+                          {canDirectDesign ? (
+                            <Link
+                              href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=tracking&websiteId=${encodeURIComponent(scope.websiteId || 'all')}&campaignId=${encodeURIComponent(c.campaignId)}&campaignName=${encodeURIComponent(c.campaignName)}${data ? `&dateFrom=${encodeURIComponent(data.scope.startDate)}&dateTo=${encodeURIComponent(data.scope.endDate)}` : ''}`}
+                              className="min-h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] font-semibold inline-flex items-center"
+                              title="Mở Brief thiết kế gắn chiến dịch & phạm vi ngày đang xem"
+                            >
+                              Tạo brief
+                            </Link>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={briefSubmittingId === c.campaignId}
+                              onClick={() => void handleCreateCampaignBrief(c)}
+                              className="min-h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] font-semibold inline-flex items-center disabled:opacity-50"
+                              title="Gửi Brief thiết kế gắn chiến dịch sang Studio cho Designer xử lý"
+                            >
+                              {briefSubmittingId === c.campaignId ? 'Đang gửi...' : 'Tạo brief'}
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => setDrawerCampaign(c)}

@@ -2,7 +2,9 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { hasBaPermission } from '@toantrung/contracts';
 import { apiRequest } from '@/core/http/client';
+import { useSession } from '@/core/session/SessionContext';
 import {
   ArrowUpRight,
   Bold,
@@ -108,10 +110,62 @@ export function SeoAiReportPanel({
   onContentCreated?: () => void;
   onClose?: () => void;
 }) {
+  const { user } = useSession();
+  const canDirectDesign = Boolean(user && hasBaPermission(user.roleCode, 'AI_DESIGN'));
   const [website, setWebsite] = useState(initialWebsite || 'all');
   const [periodDays, setPeriodDays] = useState(initialPeriodDays || 30);
   const [activeViewTab, setActiveViewTab] = useState<'document' | 'topics'>('document');
   const [isEditingDoc, setIsEditingDoc] = useState(false);
+  const [submittingBriefKw, setSubmittingBriefKw] = useState<string | null>(null);
+
+  const handleCreateTopicBrief = async (topic: SeoTopicRecommendationRow) => {
+    setSubmittingBriefKw(topic.keyword);
+    setErrorMsg(null);
+    try {
+      const res = await apiRequest<{ ok: boolean; projectId: number; message: string }>('/api/v1/design', {
+        method: 'POST',
+        csrfToken: csrfToken || user?.csrfToken,
+        body: {
+          action: 'submit_marketing_brief',
+          projectName: `Banner minh họa SEO: ${topic.suggestedTopicTitle}`,
+          taskCode: 'banner_generate',
+          designType: 'banner',
+          sourceModule: 'seo_ai',
+          designBrief: {
+            objective: `${topic.dataEvidenceReason} (Từ khóa: "${topic.keyword}")`,
+            websiteId: topic.targetWebsite || 'toantrung.com.vn',
+            websiteDomain: topic.targetWebsite || 'toantrung.com.vn',
+            campaignName: topic.suggestedTopicTitle,
+            targetChannel: 'Ảnh Hero bài viết SEO & Social Share',
+            outputFormat: 'Banner 16:9 (1536×1024 px)',
+            outputWidthPx: 1536,
+            outputHeightPx: 1024,
+            headlineText: topic.suggestedTopicTitle,
+            ctaText: 'Xem giải pháp & báo giá',
+            baselineSnapshot: activeReport
+              ? {
+                  capturedAt: new Date().toISOString(),
+                  sourceModule: 'seo_ai',
+                  scopeLabel: `${topic.targetWebsite} (${activeReport.snapshot.current.startDate} → ${activeReport.snapshot.current.endDate})`,
+                  dateFrom: activeReport.snapshot.current.startDate,
+                  dateTo: activeReport.snapshot.current.endDate,
+                  websiteId: topic.targetWebsite,
+                  websiteDomain: topic.targetWebsite,
+                  snapshotId: activeReport.id,
+                }
+              : null,
+          },
+        },
+      });
+      setStatusMsg(
+        res.message || `Đã gửi Brief thiết kế minh họa #${res.projectId} cho chủ đề "${topic.suggestedTopicTitle}".`,
+      );
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể gửi Brief thiết kế minh họa.');
+    } finally {
+      setSubmittingBriefKw(null);
+    }
+  };
 
   useEffect(() => {
     if (initialWebsite) setWebsite(initialWebsite);
@@ -731,13 +785,27 @@ export function SeoAiReportPanel({
 
                       {canEditContent && (
                         <div className="flex flex-wrap items-center gap-1.5">
-                          <Link
-                            href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=seo_ai&websiteDomain=${encodeURIComponent(topic.targetWebsite)}&campaignName=${encodeURIComponent(topic.suggestedTopicTitle)}${activeReport ? `&snapshotId=${encodeURIComponent(activeReport.id)}` : ''}`}
-                            className="h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1"
-                            title="Mở Brief thiết kế minh họa gắn từ khóa & snapshot SEO này"
-                          >
-                            <span>Tạo brief minh họa</span>
-                          </Link>
+                          {canDirectDesign ? (
+                            <Link
+                              href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=seo_ai&websiteDomain=${encodeURIComponent(topic.targetWebsite)}&campaignName=${encodeURIComponent(topic.suggestedTopicTitle)}${activeReport ? `&snapshotId=${encodeURIComponent(activeReport.id)}` : ''}`}
+                              className="h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1"
+                              title="Mở Brief thiết kế minh họa gắn từ khóa & snapshot SEO này"
+                            >
+                              <span>Tạo brief minh họa</span>
+                            </Link>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={submittingBriefKw === topic.keyword}
+                              onClick={() => void handleCreateTopicBrief(topic)}
+                              className="h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1 disabled:opacity-50"
+                              title="Gửi Brief thiết kế minh họa sang Studio cho Designer xử lý"
+                            >
+                              <span>
+                                {submittingBriefKw === topic.keyword ? 'Đang gửi...' : 'Tạo brief minh họa'}
+                              </span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={isPlanned || isBusy}

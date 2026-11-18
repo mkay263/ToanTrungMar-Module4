@@ -274,8 +274,8 @@ export function ModelRegistryModal({
                       <td className="py-2.5 px-2 align-top">
                         <div className="flex flex-wrap gap-1.5">
                           {TASK_KEYS.map((tk) => {
-                            const st = m.taskStatuses[tk];
-                            const badge = STATUS_BADGE[st];
+                            const st = m.taskStatuses?.[tk] || 'listed_unverified';
+                            const badge = STATUS_BADGE[st] || STATUS_BADGE.listed_unverified;
                             const pKey = `${m.providerId}::${m.modelId}::${tk}`;
                             const isProbing = probingKey === pKey;
                             const canTryProbe = canProbe && st !== 'unsupported' && m.providerId !== 'local_sandbox';
@@ -285,7 +285,7 @@ export function ModelRegistryModal({
                                 className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] ${badge.cls}`}
                               >
                                 <span className="font-semibold">
-                                  {DESIGN_TASK_LABELS[tk].title.replace(/^\d+\.\s*/, '')}:
+                                  {(DESIGN_TASK_LABELS[tk]?.title || tk).replace(/^\d+\.\s*/, '')}:
                                 </span>
                                 <span>{badge.label}</span>
                                 {canTryProbe && (

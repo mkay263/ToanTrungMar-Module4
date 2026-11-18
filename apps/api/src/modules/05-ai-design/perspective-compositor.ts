@@ -701,8 +701,119 @@ function parseHexColorRgb(hex?: string | null): [number, number, number] {
   return [11, 29, 72]; // Brand navy #0B1D48
 }
 
+const BITMAP_FONT_5X7: Record<string, readonly string[]> = {
+  A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+  B: ['11110', '10001', '10001', '11110', '10001', '10001', '11110'],
+  C: ['01111', '10000', '10000', '10000', '10000', '10000', '01111'],
+  D: ['11110', '10001', '10001', '10001', '10001', '10001', '11110'],
+  E: ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+  F: ['11111', '10000', '10000', '11110', '10000', '10000', '10000'],
+  G: ['01111', '10000', '10000', '10111', '10001', '10001', '01111'],
+  H: ['10001', '10001', '10001', '11111', '10001', '10001', '10001'],
+  I: ['01110', '00100', '00100', '00100', '00100', '00100', '01110'],
+  J: ['00111', '00010', '00010', '00010', '10010', '10010', '01100'],
+  K: ['10001', '10010', '10100', '11000', '10100', '10010', '10001'],
+  L: ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+  M: ['10001', '11011', '10101', '10101', '10001', '10001', '10001'],
+  N: ['10001', '11001', '10101', '10011', '10001', '10001', '10001'],
+  O: ['01110', '10001', '10001', '10001', '10001', '10001', '01110'],
+  P: ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+  Q: ['01110', '10001', '10001', '10001', '10101', '10010', '01101'],
+  R: ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+  S: ['01111', '10000', '10000', '01110', '00001', '00001', '11110'],
+  T: ['11111', '00100', '00100', '00100', '00100', '00100', '00100'],
+  U: ['10001', '10001', '10001', '10001', '10001', '10001', '01110'],
+  V: ['10001', '10001', '10001', '10001', '10001', '01010', '00100'],
+  W: ['10001', '10001', '10001', '10101', '10101', '11011', '10001'],
+  X: ['10001', '10001', '01010', '00100', '01010', '10001', '10001'],
+  Y: ['10001', '10001', '01010', '00100', '00100', '00100', '00100'],
+  Z: ['11111', '00001', '00010', '00100', '01000', '10000', '11111'],
+  '0': ['01110', '10011', '10101', '10101', '11001', '10001', '01110'],
+  '1': ['00100', '01100', '00100', '00100', '00100', '00100', '01110'],
+  '2': ['01110', '10001', '00001', '00110', '01000', '10000', '11111'],
+  '3': ['11110', '00001', '00001', '01110', '00001', '00001', '11110'],
+  '4': ['00010', '00110', '01010', '10010', '11111', '00010', '00010'],
+  '5': ['11111', '10000', '11110', '00001', '00001', '10001', '01110'],
+  '6': ['01110', '10000', '10000', '11110', '10001', '10001', '01110'],
+  '7': ['11111', '00001', '00010', '00100', '01000', '01000', '01000'],
+  '8': ['01110', '10001', '10001', '01110', '10001', '10001', '01110'],
+  '9': ['01110', '10001', '10001', '01111', '00001', '00001', '01110'],
+  '.': ['00000', '00000', '00000', '00000', '00000', '00110', '00110'],
+  '-': ['00000', '00000', '00000', '11111', '00000', '00000', '00000'],
+  '/': ['00001', '00010', '00100', '00100', '01000', '10000', '00000'],
+  ':': ['00000', '00110', '00110', '00000', '00110', '00110', '00000'],
+  '+': ['00000', '00100', '00100', '11111', '00100', '00100', '00000'],
+  '%': ['11001', '11010', '00100', '00100', '01011', '10011', '00000'],
+  '&': ['01100', '10010', '10100', '01000', '10101', '10010', '01101'],
+  '(': ['00010', '00100', '01000', '01000', '01000', '00100', '00010'],
+  ')': ['01000', '00100', '00010', '00010', '00010', '00100', '01000'],
+  ' ': ['00000', '00000', '00000', '00000', '00000', '00000', '00000'],
+};
+
+function toBitmapAsciiUpper(input: string | null | undefined, maxChars: number): string {
+  if (!input) return '';
+  return input
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/gi, 'D')
+    .replace(/[•·|—–]/g, '-')
+    .toUpperCase()
+    .replace(/[^A-Z0-9.\-/:+%&() ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxChars);
+}
+
+function drawBitmapTextOnRgb(params: {
+  out: Uint8Array;
+  width: number;
+  height: number;
+  text: string;
+  startX: number;
+  startY: number;
+  maxX: number;
+  scale: number;
+  color: [number, number, number];
+  shadowColor?: [number, number, number];
+}): void {
+  const { out, width, height, text, startX, startY, maxX, scale, color, shadowColor } = params;
+  const charAdvance = 6 * scale;
+  let cursorX = startX;
+
+  for (let i = 0; i < text.length; i++) {
+    if (cursorX + 5 * scale > maxX) break;
+    const ch = text[i] || ' ';
+    const glyph = BITMAP_FONT_5X7[ch] || BITMAP_FONT_5X7[' '];
+    for (let gy = 0; gy < 7; gy++) {
+      const rowBits = glyph[gy] || '00000';
+      for (let gx = 0; gx < 5; gx++) {
+        if (rowBits[gx] !== '1') continue;
+        for (let sy = 0; sy < scale; sy++) {
+          for (let sx = 0; sx < scale; sx++) {
+            const px = cursorX + gx * scale + sx;
+            const py = startY + gy * scale + sy;
+            if (shadowColor && px + 1 < width && py + 1 < height && px + 1 >= 0 && py + 1 >= 0) {
+              const sIdx = ((py + 1) * width + (px + 1)) * 3;
+              out[sIdx] = shadowColor[0];
+              out[sIdx + 1] = shadowColor[1];
+              out[sIdx + 2] = shadowColor[2];
+            }
+            if (px >= 0 && px < width && py >= 0 && py < height) {
+              const idx = (py * width + px) * 3;
+              out[idx] = color[0];
+              out[idx + 1] = color[1];
+              out[idx + 2] = color[2];
+            }
+          }
+        }
+      }
+    }
+    cursorX += charAdvance;
+  }
+}
+
 /**
- * Applies a subtle translucent brand footer safe-zone & accent border frame (`AI_PLUS_LAYOUT`)
+ * Applies a subtle translucent brand footer safe-zone, accent border frame & crisp bitmap typography (`AI_PLUS_LAYOUT`)
  * over a PNG banner buffer in pure Node without requiring native C++ bindings.
  */
 export function renderBrandLayoutOverlayOnImage(params: {
@@ -744,37 +855,117 @@ export function renderBrandLayoutOverlayOnImage(params: {
         out[idx + 1] = accG;
         out[idx + 2] = accB;
       } else {
-        // Dark translucent brand safe-zone footer (72% navy overlay for high text/logo readability)
-        out[idx] = Math.round(out[idx] * 0.28 + 11 * 0.72);
-        out[idx + 1] = Math.round(out[idx + 1] * 0.28 + 29 * 0.72);
-        out[idx + 2] = Math.round(out[idx + 2] * 0.28 + 72 * 0.72);
+        // Dark translucent brand safe-zone footer (76% navy overlay for high text/logo readability)
+        out[idx] = Math.round(out[idx] * 0.24 + 11 * 0.76);
+        out[idx + 1] = Math.round(out[idx + 1] * 0.24 + 29 * 0.76);
+        out[idx + 2] = Math.round(out[idx + 2] * 0.24 + 72 * 0.76);
       }
     }
   }
 
-  // Add CTA pill highlight block on right bottom corner of the footer band
-  if (params.ctaText && params.ctaText.trim()) {
-    const pillW = Math.max(80, Math.round(width * 0.22));
-    const pillH = Math.max(16, Math.round(bandHeight * 0.56));
-    const pillX1 = Math.max(0, width - pillW - Math.round(width * 0.03));
-    const pillX2 = Math.min(width - 1, width - Math.round(width * 0.03));
-    const pillY1 = bandTop + Math.round((bandHeight - pillH) / 2);
-    const pillY2 = Math.min(height - 1, pillY1 + pillH);
+  const padX = Math.max(16, Math.round(width * 0.03));
+  const hasCta = Boolean(params.ctaText && params.ctaText.trim());
+  const pillW = hasCta ? Math.max(100, Math.round(width * 0.23)) : 0;
+  const pillH = hasCta ? Math.max(20, Math.round(bandHeight * 0.56)) : 0;
+  const pillX1 = hasCta ? Math.max(0, width - pillW - padX) : width - padX;
+  const pillX2 = hasCta ? Math.min(width - 1, width - padX) : width - padX;
+  const pillY1 = bandTop + Math.round((bandHeight - pillH) / 2);
+  const pillY2 = Math.min(height - 1, pillY1 + pillH);
+  const cornerRadius = Math.max(4, Math.round(pillH * 0.22));
+
+  // Add rounded CTA pill highlight block + centered CTA text on right bottom corner of the footer band
+  if (hasCta) {
+    const ctaBgR = Math.min(255, Math.max(accR, 234));
+    const ctaBgG = Math.min(255, Math.max(accG, 88));
+    const ctaBgB = Math.min(255, Math.min(accB, 40));
+
     for (let y = pillY1; y <= pillY2; y++) {
       for (let x = pillX1; x <= pillX2; x++) {
+        // Rounded corner check
+        const dxLeft = x - (pillX1 + cornerRadius);
+        const dxRight = x - (pillX2 - cornerRadius);
+        const dyTop = y - (pillY1 + cornerRadius);
+        const dyBot = y - (pillY2 - cornerRadius);
+        if (dxLeft < 0 && dyTop < 0 && dxLeft * dxLeft + dyTop * dyTop > cornerRadius * cornerRadius) continue;
+        if (dxRight > 0 && dyTop < 0 && dxRight * dxRight + dyTop * dyTop > cornerRadius * cornerRadius) continue;
+        if (dxLeft < 0 && dyBot > 0 && dxLeft * dxLeft + dyBot * dyBot > cornerRadius * cornerRadius) continue;
+        if (dxRight > 0 && dyBot > 0 && dxRight * dxRight + dyBot * dyBot > cornerRadius * cornerRadius) continue;
+
         const idx = (y * width + x) * 3;
-        out[idx] = Math.min(255, Math.max(accR, 234));
-        out[idx + 1] = Math.min(255, Math.max(accG, 88));
-        out[idx + 2] = Math.min(255, Math.min(accB, 40));
+        out[idx] = ctaBgR;
+        out[idx + 1] = ctaBgG;
+        out[idx + 2] = ctaBgB;
       }
     }
+
+    const ctaAscii = toBitmapAsciiUpper(params.ctaText, 22) || 'NHAN BAO GIA';
+    const ctaScale = Math.max(1, Math.min(3, Math.floor((pillW - 20) / Math.max(1, ctaAscii.length * 6))));
+    const ctaTextW = ctaAscii.length * 6 * ctaScale;
+    const ctaTextH = 7 * ctaScale;
+    const ctaStartX = Math.max(pillX1 + 8, Math.round(pillX1 + (pillW - ctaTextW) / 2));
+    const ctaStartY = Math.max(pillY1 + 4, Math.round(pillY1 + (pillH - ctaTextH) / 2));
+
+    drawBitmapTextOnRgb({
+      out,
+      width,
+      height,
+      text: ctaAscii,
+      startX: ctaStartX,
+      startY: ctaStartY,
+      maxX: pillX2 - 6,
+      scale: ctaScale,
+      color: [255, 255, 255],
+      shadowColor: [120, 35, 10],
+    });
   }
+
+  // Render Brand Kicker + Main Headline on left side of footer band
+  const textMaxX = hasCta ? pillX1 - Math.max(16, Math.round(width * 0.02)) : width - padX;
+  const domainUpper = toBitmapAsciiUpper(params.websiteDomain || 'TOANTRUNG.COM.VN', 28);
+  const kickerText = `TOAN TRUNG - ${domainUpper}`;
+  const kickerScale = Math.max(1, Math.min(2, Math.floor(bandHeight / 48)));
+  const headlineScale = Math.max(2, Math.min(4, Math.floor(bandHeight / 28)));
+  const headlineAscii =
+    toBitmapAsciiUpper(params.headlineText, 46) || 'GIAI PHAP MAN HINH LED & BANG DIEN TU TOAN TRUNG';
+
+  const contentBlockH = 7 * kickerScale + Math.max(6, Math.round(bandHeight * 0.1)) + 7 * headlineScale;
+  const kickerY = Math.max(
+    bandTop + stripeHeight + 4,
+    Math.round(bandTop + stripeHeight + (bandHeight - stripeHeight - contentBlockH) / 2),
+  );
+  const headlineY = kickerY + 7 * kickerScale + Math.max(6, Math.round(bandHeight * 0.1));
+
+  drawBitmapTextOnRgb({
+    out,
+    width,
+    height,
+    text: kickerText,
+    startX: padX,
+    startY: kickerY,
+    maxX: textMaxX,
+    scale: kickerScale,
+    color: [147, 197, 253], // #93C5FD sky-300
+    shadowColor: [7, 18, 45],
+  });
+
+  drawBitmapTextOnRgb({
+    out,
+    width,
+    height,
+    text: headlineAscii,
+    startX: padX,
+    startY: headlineY,
+    maxX: textMaxX,
+    scale: headlineScale,
+    color: [255, 255, 255],
+    shadowColor: [7, 18, 45],
+  });
 
   const outBuf = encodeRgbToPng({ width, height, rgb: out });
   return {
     imageBuffer: outBuf,
     applied: true,
-    overlayNote: `Đã áp dụng vùng an toàn thương hiệu (AI + Layout${params.websiteDomain ? ` · ${params.websiteDomain}` : ''}) ở chân banner để chèn chữ/CTA sắc nét.`,
+    overlayNote: `Đã áp dụng vùng an toàn thương hiệu (AI + Layout${params.websiteDomain ? ` · ${params.websiteDomain}` : ''}) ở chân banner kèm tiêu đề & nút CTA sắc nét.`,
   };
 }
 

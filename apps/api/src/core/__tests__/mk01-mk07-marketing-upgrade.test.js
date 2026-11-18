@@ -214,6 +214,9 @@ test('MK03: URL SSRF validation, upstream HTTP error taxonomy & vision-vs-image 
 test('MK03 Pagination & Probe Budget Guard (simulated fetch fixture — zero network)', async () => {
   const cacheFile = path.join(V2_ROOT, 'storage_independent_v2/config/ai-model-registry-cache.json');
   const prevCacheBackup = fs.existsSync(cacheFile) ? fs.readFileSync(cacheFile, 'utf8') : null;
+  if (fs.existsSync(cacheFile)) {
+    fs.unlinkSync(cacheFile);
+  }
   const originalFetch = global.fetch;
   let requestedUrls = [];
   let probeHttpCalls = 0;
