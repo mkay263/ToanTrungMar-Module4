@@ -16,8 +16,8 @@ interface CacheEntry {
   timestamp: number;
 }
 
-const GET_CACHE_FRESH_TTL_MS = 30_000;
-const GET_CACHE_STALE_TTL_MS = 120_000;
+const GET_CACHE_FRESH_TTL_MS = 90_000;
+const GET_CACHE_STALE_TTL_MS = 300_000;
 
 const apiGetCache = new Map<string, CacheEntry>();
 const inflightGetRequests = new Map<string, Promise<unknown>>();
@@ -68,6 +68,19 @@ export function invalidateApiCache(pathPrefix?: string): void {
       apiGetCache.delete(key);
     }
   }
+}
+
+export function prefetchApiCache(path: string): void {
+  if (typeof window === 'undefined') return;
+  const scopedKey = buildScopedCacheKey(path);
+  const existing = apiGetCache.get(scopedKey);
+  if (existing && Date.now() - existing.timestamp <= GET_CACHE_FRESH_TTL_MS) {
+    return;
+  }
+  if (inflightGetRequests.has(scopedKey)) {
+    return;
+  }
+  void apiRequest(path).catch(() => {});
 }
 
 async function performNetworkFetch<T>(

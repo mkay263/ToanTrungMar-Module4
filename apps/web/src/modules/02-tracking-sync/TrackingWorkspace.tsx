@@ -19,7 +19,7 @@ import {
   type M02TrafficInteractionDto,
   type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
-import { apiRequest, peekApiCache } from '@/core/http/client';
+import { apiRequest, peekApiCache, prefetchApiCache } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
@@ -157,11 +157,47 @@ export function TrackingWorkspace() {
         setKnownWebsites(cached.coverage.availableWebsites);
       }
       setLoading(false);
+      setRefreshing(false);
     } else {
-      setData(null);
-      setLoading(true);
+      // Giữ nguyên dữ liệu hiện tại trên màn hình khi chuyển ngày/website để không bị nháy trắng trống
+      setRefreshing(true);
     }
   }, [apiPath]);
+
+  // Nạp trước ngầm (prefetch) các mốc ngày còn lại & Module 3 (Từ khóa & SEO) để chuyển tab tức thì
+  useEffect(() => {
+    if (!hydrated || !data) return;
+    const timer = window.setTimeout(() => {
+      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
+      for (const preset of presets) {
+        if (preset === scope.preset) continue;
+        prefetchApiCache(
+          buildM02ApiPath(
+            { websiteId: scope.websiteId || 'all', preset, from: '', to: '' },
+            1,
+            1,
+          ),
+        );
+      }
+      const m03Qs = new URLSearchParams({
+        view: 'spec',
+        websiteId: scope.websiteId || 'all',
+        preset: scope.preset || '7D',
+        page: '1',
+        pageSize: '20',
+        contentPage: '1',
+        contentPageSize: '12',
+        minImpressions: '30',
+        maxCtrPct: '3',
+      });
+      if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+        m03Qs.set('from', scope.from);
+        m03Qs.set('to', scope.to);
+      }
+      prefetchApiCache(`/api/v1/ads?${m03Qs.toString()}`);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [hydrated, Boolean(data), scope.websiteId, scope.preset, scope.from, scope.to]);
 
   const loadData = useCallback(
     async (opts?: { manual?: boolean; signal?: AbortSignal }) => {
@@ -193,7 +229,7 @@ export function TrackingWorkspace() {
                 .then((freshRes) => {
                   if (!opts?.signal?.aborted) setData(freshRes);
                 })
-                .catch(() => {});
+                .catch(() => { });
             }
           }, 2000);
         }

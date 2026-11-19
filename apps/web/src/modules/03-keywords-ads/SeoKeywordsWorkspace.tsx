@@ -22,7 +22,7 @@ import {
   type M03AdsSeoDashboardDto,
   type SeoArticleStatus,
 } from '@toantrung/contracts';
-import { apiRequest, clearAllApiCache, peekApiCache } from '@/core/http/client';
+import { apiRequest, clearAllApiCache, peekApiCache, prefetchApiCache } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
@@ -127,8 +127,7 @@ export function SeoKeywordsWorkspace() {
       if (cached) {
         setData(cached);
         setLoading(false);
-      } else if (!forceFresh) {
-        setLoading(true);
+        setRefreshing(false);
       } else {
         setRefreshing(true);
       }
@@ -159,6 +158,41 @@ export function SeoKeywordsWorkspace() {
     void fetchDashboard(false, controller.signal);
     return () => controller.abort();
   }, [fetchDashboard, hydrated]);
+
+  // Nạp trước ngầm (prefetch) các mốc ngày còn lại & Module 2 (Chiến dịch) để chuyển qua lại tức thì
+  useEffect(() => {
+    if (!hydrated || !data) return;
+    const timer = window.setTimeout(() => {
+      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
+      for (const preset of presets) {
+        if (preset === scope.preset) continue;
+        prefetchApiCache(
+          buildM03ApiPath(
+            { websiteId: scope.websiteId || 'all', preset, from: '', to: '' },
+            1,
+            1,
+            appliedMinImpr,
+            appliedMaxCtr,
+          ),
+        );
+      }
+      const m02Qs = new URLSearchParams({
+        view: 'spec',
+        websiteId: scope.websiteId || 'all',
+        preset: scope.preset || '7D',
+        page: '1',
+        pageSize: '20',
+        adsPage: '1',
+        adsPageSize: '20',
+      });
+      if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+        m02Qs.set('from', scope.from);
+        m02Qs.set('to', scope.to);
+      }
+      prefetchApiCache(`/api/v1/tracking?${m02Qs.toString()}`);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [hydrated, Boolean(data), scope.websiteId, scope.preset, scope.from, scope.to, appliedMinImpr, appliedMaxCtr]);
 
   const seo = data?.seo;
   const clicksComparison = formatSafePeriodComparison(

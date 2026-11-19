@@ -506,7 +506,7 @@ export async function getGa4LivePropertySnapshot(
     const fastFresh = await Promise.race([
       refreshPromise,
       new Promise<Ga4PropertyPeriodSnapshot | null>((resolve) =>
-        setTimeout(() => resolve(null), 2500),
+        setTimeout(() => resolve(null), 1200),
       ),
     ]);
     return fastFresh || nearestFallback;

@@ -30,7 +30,7 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { apiRequest, peekApiCache } from '@/core/http/client';
+import { apiRequest, peekApiCache, prefetchApiCache } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
@@ -181,8 +181,7 @@ export function ReportsWorkspace() {
       if (cached) {
         setData(cached);
         setLoading(false);
-      } else if (!forceFresh) {
-        setLoading(true);
+        setRefreshing(false);
       } else {
         setRefreshing(true);
       }
@@ -213,6 +212,26 @@ export function ReportsWorkspace() {
     void loadReports(false, controller.signal);
     return () => controller.abort();
   }, [hydrated, loadReports]);
+
+  // Nạp trước ngầm các mốc ngày còn lại để bấm Hôm nay / Hôm qua / 7 ngày / 30 ngày lên số tức thì
+  useEffect(() => {
+    if (!hydrated || !data) return;
+    const timer = window.setTimeout(() => {
+      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
+      for (const preset of presets) {
+        if (preset === scope.preset) continue;
+        const qs = new URLSearchParams({
+          view: 'spec',
+          websiteId: scope.websiteId || 'all',
+          preset,
+          pendingPage: '1',
+          pageSize: '20',
+        });
+        prefetchApiCache(`/api/v1/reports?${qs.toString()}`);
+      }
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [hydrated, Boolean(data), scope.websiteId, scope.preset]);
 
   useEffect(() => {
     setPendingPage(1);

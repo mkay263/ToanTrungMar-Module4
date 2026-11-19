@@ -171,13 +171,64 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
   }, [points, mode]);
 
   if (loading && points.length === 0) {
-    return <div className="h-[290px] rounded-xl bg-slate-50 animate-pulse" />;
+    return (
+      <div className="h-[140px] rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-center text-xs text-slate-500 animate-pulse">
+        Đang tải biểu đồ lưu lượng...
+      </div>
+    );
   }
 
   if (points.length === 0) {
     return (
-      <div className="h-[270px] rounded-xl bg-slate-50 border border-dashed border-slate-200 grid place-items-center text-xs text-slate-500">
+      <div className="h-[120px] rounded-xl bg-slate-50 border border-dashed border-slate-200 grid place-items-center text-xs text-slate-500">
         Chưa có dữ liệu lưu lượng trong khoảng ngày đang chọn.
+      </div>
+    );
+  }
+
+  // Khi xem 1 ngày đơn lẻ (Hôm nay / Hôm qua): hiển thị thanh chỉ số gọn thay vì khung SVG trống 248px
+  if (points.length === 1) {
+    const pt = points[0];
+    const sVal = pt.sessions ?? 0;
+    const pvVal = pt.pageViews ?? 0;
+    const depth = sVal > 0 ? (pvVal / sVal).toFixed(2) : '0.00';
+    const maxBar = Math.max(1, sVal, pvVal);
+    return (
+      <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <span className="font-bold text-[#0F275C]">
+            Tổng hợp ngày {pt.date.slice(8, 10)}/{pt.date.slice(5, 7)}/{pt.date.slice(0, 4)}
+          </span>
+          <span className="px-2.5 py-1 rounded-lg bg-sky-50 text-sky-900 border border-sky-200/70 font-semibold tabular-nums">
+            Chiều sâu: <strong>{depth}</strong> trang/phiên
+          </span>
+        </div>
+        <div className="space-y-2.5 text-xs">
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="font-medium text-slate-600">Phiên truy cập</span>
+              <strong className="font-bold text-[#0F275C] tabular-nums">{sVal.toLocaleString('vi-VN')} phiên</strong>
+            </div>
+            <div className="h-2.5 w-full rounded-full bg-slate-200/80 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-[#0F275C] transition-all"
+                style={{ width: `${Math.max(sVal > 0 ? 6 : 0, Math.round((sVal / maxBar) * 100))}%` }}
+              />
+            </div>
+          </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <span className="font-medium text-slate-600">Lượt xem trang</span>
+              <strong className="font-bold text-sky-700 tabular-nums">{pvVal.toLocaleString('vi-VN')} lượt</strong>
+            </div>
+            <div className="h-2.5 w-full rounded-full bg-slate-200/80 overflow-hidden">
+              <div
+                className="h-full rounded-full bg-sky-500 transition-all"
+                style={{ width: `${Math.max(pvVal > 0 ? 6 : 0, Math.round((pvVal / maxBar) * 100))}%` }}
+              />
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
