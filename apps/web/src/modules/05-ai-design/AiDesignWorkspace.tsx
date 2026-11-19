@@ -54,7 +54,6 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
-import { MarketingBriefPanel } from './MarketingBriefPanel';
 import { ModelRegistryModal } from './ModelRegistryModal';
 
 interface LeadOpt {
@@ -4337,78 +4336,12 @@ export function AiDesignWorkspace() {
 
       {/* 2. MAIN 3-COLUMN STUDIO BODY (MATCHING REFERENCE SCREENSHOT) */}
       <div className="relative flex flex-1 min-h-0 overflow-hidden gap-3 p-3">
-        {/* ================= LEFT COLUMN: BRIEF + DỰ ÁN + KHO ẢNH ================= */}
+        {/* ================= LEFT COLUMN: DỰ ÁN + KHO ẢNH ================= */}
         <aside
           className={`${
             mobilePane === 'projects' ? 'flex w-full' : 'hidden'
-          } ${focusCanvas ? 'md:hidden' : 'md:flex'} md:w-[295px] xl:w-[315px] shrink-0 flex-col h-full min-h-0 gap-2.5 overflow-y-auto pr-0.5`}
+          } ${focusCanvas ? 'md:hidden' : 'md:flex'} md:w-[295px] xl:w-[315px] shrink-0 flex-col h-full min-h-0 gap-2.5`}
         >
-          <MarketingBriefPanel
-            activeTaskCode={activeTaskCode}
-            onChangeTaskCode={(tc) => {
-              setActiveTaskCode(tc);
-              const defaultRec = providerStatus?.modelRegistry?.defaultModelByTask?.[tc];
-              if (defaultRec) {
-                if (tc === 'brief_analyze') {
-                  setConsultantModelId(defaultRec.modelId);
-                  setConsultantModelName(defaultRec.modelId);
-                } else {
-                  setSelectedProviderId(defaultRec.providerId);
-                  setSelectedModelId(defaultRec.modelId);
-                }
-              }
-            }}
-            brief={activeBrief}
-            onChangeBrief={setActiveBrief}
-            savingBrief={savingBrief}
-            onSaveBrief={
-              currentProject
-                ? async () => {
-                    setSavingBrief(true);
-                    try {
-                      await apiRequest(`/api/v1/design/${currentProject.id}`, {
-                        method: 'PATCH',
-                        csrfToken: user?.csrfToken,
-                        body: {
-                          action: 'update_project',
-                          expectedVersion: currentProject.version,
-                          taskCode: activeTaskCode,
-                          designBrief: activeBrief,
-                          websiteId: activeBrief.websiteId ?? undefined,
-                          campaignId: activeBrief.campaignId ?? undefined,
-                        },
-                      });
-                      setSuccessToast('Đã lưu Brief chiến dịch vào dự án thiết kế.');
-                      await loadData(currentProject.id);
-                    } catch (err) {
-                      setError(err instanceof Error ? err.message : 'Không thể lưu Brief.');
-                    } finally {
-                      setSavingBrief(false);
-                    }
-                  }
-                : undefined
-            }
-            applyLayoutOverlay={applyLayoutOverlay}
-            onChangeApplyLayoutOverlay={setApplyLayoutOverlay}
-            modelRegistry={providerStatus?.modelRegistry}
-            selectedProviderId={selectedProviderId}
-            selectedModelId={activeTaskCode === 'brief_analyze' ? consultantModelId : selectedModelId}
-            onSelectProviderAndModel={(pid, mid) => {
-              if (activeTaskCode === 'brief_analyze') {
-                setConsultantModelId(mid);
-                setConsultantModelName(mid);
-              } else {
-                setSelectedProviderId(pid);
-                setSelectedModelId(mid);
-              }
-            }}
-            onOpenRegistryModal={() => setShowModelRegistryModal(true)}
-            onComposePromptFromBrief={(composedPrompt) => {
-              handlePromptChange(composedPrompt);
-              setTabletDrawerOpen(true);
-            }}
-          />
-
           {/* CARD 1: "1. DỰ ÁN & LIÊN KẾT LEAD" (Supports Collapse / Expand so Card 2 stretches upward) */}
           <div
             className={`flex flex-col min-h-0 ${
