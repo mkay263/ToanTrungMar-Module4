@@ -63,6 +63,27 @@ function getRoleDefaultDepartment(roleCode?: string): string {
   return 'KINH_DOANH';
 }
 
+function getVnYmdDate(d = new Date()): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(d);
+  } catch {
+    return new Date(d.getTime() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  }
+}
+
+function sanitizeReportHtml(rawHtml: string): string {
+  return (rawHtml || '')
+    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+    .replace(/<(iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+    .replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/javascript:/gi, '#blocked:');
+}
+
 export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
   const { unreadCount, setUnreadCountState } = useSession();
   const isDirectorOrAdmin = user?.roleCode === 'BOD' || user?.roleCode === 'ADMIN';
@@ -83,10 +104,14 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
   const [dispatchError, setDispatchError] = useState<string | null>(null);
   const [dispatching, setDispatching] = useState(false);
   const [savingDraft, setSavingDraft] = useState(false);
+  const [exportingDocx, setExportingDocx] = useState(false);
   const [activeDraftId, setActiveDraftId] = useState<number | null>(null);
+  const isDirtyDraftRef = useRef<boolean>(false);
 
   const initialHtml = useMemo(() => {
-    const todayStr = new Date().toLocaleDateString('vi-VN');
+    const todayStr = new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }).format(
+      new Date(),
+    );
     const f = data.overview;
     return `
       <h2>1. Tóm tắt Chỉ số Trọng yếu</h2>
@@ -107,6 +132,7 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
   }, [data]);
 
   const editorRef = useRef<HTMLDivElement | null>(null);
+  const editorBootstrappedRef = useRef<boolean>(false);
   const [docHtml, setDocHtml] = useState<string>(initialHtml);
   const [archivedReports, setArchivedReports] = useState<DispatchedReportItem[]>(
     data.dispatchedReports || [],
@@ -114,15 +140,23 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
   const [activeArchivedId, setActiveArchivedId] = useState<number | null>(null);
 
   useEffect(() => {
+    if (editorRef.current && !editorBootstrappedRef.current) {
+      editorBootstrappedRef.current = true;
+      editorRef.current.innerHTML = sanitizeReportHtml(docHtml);
+    }
+  }, [docHtml]);
+
+  useEffect(() => {
     if (data.dispatchedReports) {
       setArchivedReports(data.dispatchedReports);
       const latestDraft = data.dispatchedReports.find((r) => r.status === 'DRAFT');
-      if (latestDraft && !activeArchivedId) {
+      if (latestDraft && !activeArchivedId && !isDirtyDraftRef.current) {
+        const cleanHtml = sanitizeReportHtml(latestDraft.contentHtml);
         setActiveDraftId(latestDraft.id);
         setDocTitle(latestDraft.title);
-        setDocHtml(latestDraft.contentHtml);
+        setDocHtml(cleanHtml);
         if (editorRef.current) {
-          editorRef.current.innerHTML = latestDraft.contentHtml;
+          editorRef.current.innerHTML = cleanHtml;
         }
       }
     }
@@ -135,22 +169,26 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
     if (Number.isInteger(viewId) && viewId > 0) {
       const found = archivedReports.find((r) => r.id === viewId);
       if (found) {
+        const cleanHtml = sanitizeReportHtml(found.contentHtml);
         setActiveArchivedId(found.id);
         setDocTitle(found.title);
-        setDocHtml(found.contentHtml);
+        setDocHtml(cleanHtml);
+        isDirtyDraftRef.current = false;
         if (editorRef.current) {
-          editorRef.current.innerHTML = found.contentHtml;
+          editorRef.current.innerHTML = cleanHtml;
         }
       }
     }
   }, [archivedReports]);
 
   const handleLoadArchivedReport = (item: DispatchedReportItem) => {
+    const cleanHtml = sanitizeReportHtml(item.contentHtml);
     setActiveArchivedId(item.id);
     setDocTitle(item.title);
-    setDocHtml(item.contentHtml);
+    setDocHtml(cleanHtml);
+    isDirtyDraftRef.current = false;
     if (editorRef.current) {
-      editorRef.current.innerHTML = item.contentHtml;
+      editorRef.current.innerHTML = cleanHtml;
     }
   };
 
@@ -159,7 +197,9 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
     setSavingDraft(true);
     setDispatchError(null);
     try {
-      const currentContent = editorRef.current ? editorRef.current.innerHTML : docHtml;
+      const currentContent = sanitizeReportHtml(
+        editorRef.current ? editorRef.current.innerHTML : docHtml,
+      );
       const targetDeptList =
         isDirectorOrAdmin && dispatchScope === 'BROADCAST_ALL'
           ? ['ALL']
@@ -179,12 +219,13 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
           action: 'save_draft',
           draftId: activeDraftId,
           title: docTitle,
-          summary: `Bản nháp lưu lúc ${new Date().toLocaleTimeString('vi-VN')}`,
+          summary: `Bản nháp lưu lúc ${new Date().toLocaleTimeString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}`,
           contentHtml: currentContent,
           targetDepartments: targetDeptList,
           reportingPeriod: `${data.fromDate} → ${data.toDate}`,
         },
       });
+      isDirtyDraftRef.current = false;
       setActiveDraftId(res.id);
       const draftEntry: DispatchedReportItem = {
         id: res.id,
@@ -210,8 +251,13 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
   };
 
   const handleExportWordDoc = async () => {
-    const currentContent = editorRef.current ? editorRef.current.innerHTML : docHtml;
-    const dateStamp = new Date().toISOString().slice(0, 10);
+    if (exportingDocx) return;
+    setExportingDocx(true);
+    setDispatchError(null);
+    const currentContent = sanitizeReportHtml(
+      editorRef.current ? editorRef.current.innerHTML : docHtml,
+    );
+    const dateStamp = getVnYmdDate();
     try {
       const res = await fetch('/api/v1/reports/docx', {
         method: 'POST',
@@ -242,6 +288,8 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
       setDispatchError(
         err instanceof Error ? err.message : 'Không thể kết xuất tệp Word (.docx).'
       );
+    } finally {
+      setExportingDocx(false);
     }
   };
 
@@ -459,12 +507,13 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
             </button>
             <button
               type="button"
+              disabled={exportingDocx}
               onClick={() => void handleExportWordDoc()}
-              className="h-9 px-3.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-600 text-sm font-bold text-emerald-800 hover:text-white inline-flex items-center gap-1.5 transition"
+              className="h-9 px-3.5 rounded-xl border border-emerald-300 bg-emerald-50 hover:bg-emerald-600 text-sm font-bold text-emerald-800 hover:text-white inline-flex items-center gap-1.5 transition disabled:opacity-50"
               title="Tải xuống toàn văn báo cáo định dạng Microsoft Word chuẩn OpenXML (.docx)"
             >
               <Download className="w-4 h-4" />
-              <span>Xuất Word (.docx)</span>
+              <span>{exportingDocx ? 'Đang xuất Word...' : 'Xuất Word (.docx)'}</span>
             </button>
             <button
               type="button"
@@ -514,14 +563,17 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
                   return (
                     <label
                       key={dept.id}
-                      onClick={() => handleToggleDepartment(dept.id)}
                       className={`p-2.5 rounded-xl border cursor-pointer flex items-center gap-2 font-semibold transition ${
                         checked
                           ? 'bg-blue-50 border-[#2563EB] text-[#1E3A8A]'
                           : 'bg-white border-slate-200 text-slate-600'
                       }`}
                     >
-                      <input type="checkbox" checked={checked} readOnly />
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => handleToggleDepartment(dept.id)}
+                      />
                       <span>{dept.label}</span>
                     </label>
                   );
@@ -694,12 +746,17 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
                   CÔNG TY CỔ PHẦN ĐIỆN TỬ VIỄN THÔNG TOÀN TRUNG
                 </p>
                 <p className="text-[11px] text-slate-500">
-                  Hệ thống Báo cáo Nội bộ · Mã tài liệu: TT-RPT-{new Date().toISOString().slice(0, 10)}
+                  Hệ thống Báo cáo Nội bộ · Mã tài liệu: TT-RPT-{getVnYmdDate()}
                 </p>
               </div>
             </div>
             <div className="text-left sm:text-right text-[11px] text-slate-500">
-              <p>TP. Hồ Chí Minh, ngày {new Date().toLocaleDateString('vi-VN')}</p>
+              <p>
+                TP. Hồ Chí Minh, ngày{' '}
+                {new Intl.DateTimeFormat('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }).format(
+                  new Date(),
+                )}
+              </p>
               <p className="font-semibold text-slate-700">Người lập: {user?.fullName}</p>
             </div>
           </div>
@@ -708,7 +765,10 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
           <input
             type="text"
             value={docTitle}
-            onChange={(e) => setDocTitle(e.target.value)}
+            onChange={(e) => {
+              isDirtyDraftRef.current = true;
+              setDocTitle(e.target.value);
+            }}
             className="w-full font-display font-extrabold text-lg sm:text-xl text-center text-[#1E3A8A] mb-6 pb-2 border-b border-dashed border-slate-200 focus:border-[#2563EB] outline-none"
           />
 
@@ -717,8 +777,10 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
             ref={editorRef}
             contentEditable
             suppressContentEditableWarning
-            onInput={(e) => setDocHtml((e.currentTarget as HTMLDivElement).innerHTML)}
-            dangerouslySetInnerHTML={{ __html: initialHtml }}
+            onInput={(e) => {
+              isDirtyDraftRef.current = true;
+              setDocHtml((e.currentTarget as HTMLDivElement).innerHTML);
+            }}
             className="prose prose-slate max-w-none min-h-[540px] focus:outline-none leading-relaxed text-sm space-y-3"
           />
         </div>
@@ -749,7 +811,7 @@ export function ReportDocComposer({ user, data }: ReportDocComposerProps) {
                 </h1>
                 <div
                   className="prose prose-slate max-w-none text-sm leading-relaxed space-y-3"
-                  dangerouslySetInnerHTML={{ __html: docHtml }}
+                  dangerouslySetInnerHTML={{ __html: sanitizeReportHtml(docHtml) }}
                 />
               </div>
             </div>

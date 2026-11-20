@@ -13,6 +13,8 @@ import {
   paginateArray,
   resolveDashboardScope,
 } from '../../core/website-catalog';
+import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
+import { getVietnamDateParts } from '../../core/reporting-dates';
 import {
   shouldAnonymizeLeadForRole,
 } from '../01-leads/service';
@@ -33,6 +35,7 @@ export async function getM04ResultsReportSpec(
     to?: string | null;
     page?: number;
     pageSize?: number;
+    bypassCache?: boolean;
   },
 ): Promise<M04ResultsReportDto> {
   const scope = await resolveDashboardScope(params);
@@ -41,7 +44,14 @@ export async function getM04ResultsReportSpec(
   const roleLeadFilter =
     user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
 
-  const [
+  const cacheResult = await getOrComputeScopedCache<M04ResultsReportDto>({
+    key: `m04-spec:${user.roleCode === 'SALES' ? user.id : user.roleCode}:${anonymized ? 'anon' : 'full'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}`,
+    domains: ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'seo_reports', 'design', 'websites'],
+    ttlMs: 30_000,
+    bypassCache: params?.bypassCache,
+    compute: async () => {
+      const checkedAt = new Date().toISOString();
+      const [
     rawLeads,
     prevRawLeads,
     adsCampaignMetrics,
@@ -124,6 +134,7 @@ export async function getM04ResultsReportSpec(
         impressions: true,
         clicks: true,
         conversionsMicros: true,
+        metricDate: true,
         pageUrlRaw: true,
         campaign: {
           select: {
@@ -975,6 +986,20 @@ export async function getM04ResultsReportSpec(
     }
   }
 
+  const latestLeadDate = leads.length > 0 ? getVietnamDateParts(leads[0].createdAt).dateStr : null;
+  let latestAdsMetricDate: string | null = null;
+  for (const m of adsCampaignMetrics) {
+    if (m.metricDate && (!latestAdsMetricDate || m.metricDate > latestAdsMetricDate)) {
+      latestAdsMetricDate = m.metricDate;
+    }
+  }
+  const actualDataThrough =
+    latestLeadDate && latestAdsMetricDate
+      ? (latestLeadDate > latestAdsMetricDate ? latestLeadDate : latestAdsMetricDate)
+      : latestLeadDate || latestAdsMetricDate;
+  const hasAnyData = leads.length > 0 || adsCampaignMetrics.length > 0 || receivedInPeriodCount > 0;
+  const realLastSuccessAt = latestSync?.completedAt ? latestSync.completedAt.toISOString() : null;
+
   return {
     scope: {
       websiteId: scope.websiteId,
@@ -990,13 +1015,25 @@ export async function getM04ResultsReportSpec(
       previousEndDate: scope.prevEndDateStr,
     },
     freshness: {
-      lastCheckedAt: new Date().toISOString(),
-      lastSuccessAt: latestSync?.completedAt?.toISOString() || new Date().toISOString(),
-      dataThrough: scope.endDateStr,
-      state: scope.isTodayIncluded ? 'PRELIMINARY' : 'FINALIZED',
-      statusMessage: scope.isTodayIncluded
-        ? 'Số liệu trong ngày đang tạm tính.'
-        : `Dữ liệu đến ${scope.endDateStr}`,
+      lastCheckedAt: checkedAt,
+      checkedAt,
+      lastSuccessAt: realLastSuccessAt,
+      lastSyncedAt: realLastSuccessAt,
+      dataThrough: actualDataThrough,
+      latestSourceDataAt: actualDataThrough,
+      fromCache: false,
+      state: !hasAnyData
+        ? 'NO_DATA'
+        : scope.isTodayIncluded
+          ? 'PRELIMINARY'
+          : 'FINALIZED',
+      statusMessage: !hasAnyData
+        ? 'Chưa có phát sinh Lead hoặc dữ liệu đối soát Ads trong kỳ đang chọn.'
+        : scope.isTodayIncluded
+          ? 'Số liệu trong ngày đang tạm tính.'
+          : actualDataThrough
+            ? `Dữ liệu đến ${actualDataThrough}`
+            : `Phạm vi ${scope.startDateStr} → ${scope.endDateStr}`,
     },
     coverage: {
       availableWebsites: scope.availableWebsites,
@@ -1122,4 +1159,19 @@ export async function getM04ResultsReportSpec(
       ),
     },
   };
+    },
+  });
+
+  if (cacheResult.fromCache) {
+    return {
+      ...cacheResult.data,
+      freshness: {
+        ...cacheResult.data.freshness,
+        lastCheckedAt: new Date().toISOString(),
+        checkedAt: new Date().toISOString(),
+        fromCache: true,
+      },
+    };
+  }
+  return cacheResult.data;
 }

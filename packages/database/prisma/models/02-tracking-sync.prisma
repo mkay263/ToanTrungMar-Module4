@@ -65,6 +65,8 @@ model MarketingTracking {
   @@index([gclid])
   @@index([isUnknownCampaign, trackedAt])
   @@index([trackedAt])
+  @@index([externalSubmissionId])
+  @@index([intakeSourceProvider])
   @@map("marketing_tracking")
 }
 
@@ -110,8 +112,10 @@ model PlatformDailyMetric {
   @@unique([platform, accountPropertyId, metricDate, grain, campaignExternalId, keywordMatchType, keywordTextNorm, pagePathNorm], name: "uq_platform_metric_scope")
   @@index([platform, metricDate, grain])
   @@index([platform, grain, metricDate])
+  @@index([platform, grain, accountPropertyId, metricDate])
   @@index([campaignId, metricDate])
   @@index([campaignId, grain])
+  @@index([platform, accountPropertyId, grain, clicks])
   @@index([keywordTextNorm, metricDate])
   @@map("platform_daily_metrics")
 }
@@ -131,6 +135,10 @@ model PlatformSyncLog {
   completedAt         DateTime? @map("completed_at")
 
   @@index([platform, accountPropertyId, startedAt])
+  @@index([startedAt])
+  @@index([status, completedAt])
+  @@index([platform, startedAt])
+  @@index([runType, completedAt])
   @@map("platform_sync_logs")
 }
 

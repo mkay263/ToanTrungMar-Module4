@@ -1,6 +1,7 @@
 import { hasBaPermission } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import {
   fetchGoogleVietnamSuggestions,
   getGoogleTrendsLiveSnapshot,
@@ -69,6 +70,7 @@ export async function POST(req: Request) {
       const keyword = String(raw.keyword || '').trim();
       const dateRange = typeof raw.dateRange === 'string' ? raw.dateRange : 'today 1-m';
       const result = await syncKeywordInterestViaSerpApi({ keyword, geo: 'VN', dateRange });
+      bumpDomainRevisions(['ads', 'reports'], 'sync_serpapi_trends');
       return jsonSuccess(result);
     }
 
@@ -78,6 +80,7 @@ export async function POST(req: Request) {
         return jsonError('VALIDATION_ERROR', 'Nội dung CSV trống.', 400);
       }
       const result = await importGoogleTrendsTimelineCsv(csvText);
+      bumpDomainRevisions(['ads', 'reports'], 'import_trends_csv');
       return jsonSuccess(result);
     }
 

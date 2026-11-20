@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 import type { M02ChannelRowDto, M02TrafficSeriesPointDto } from '@toantrung/contracts';
 import { TrendingUp } from 'lucide-react';
 
@@ -58,6 +58,13 @@ function buildSmoothSvgSegments(
 export function MarketingTrafficChart({ points, loading }: MarketingTrafficChartProps) {
   const [mode, setMode] = useState<ChartFocusMode>('combo');
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const chartUid = useId().replace(/:/g, '');
+  const pvGradId = `mktPvGrad-${chartUid}`;
+  const sessGradId = `mktSessGrad-${chartUid}`;
+
+  useEffect(() => {
+    setHoverIdx(null);
+  }, [points]);
 
   const summary = useMemo(() => {
     const validPts = points.filter((p) => !p.isMissingData);
@@ -330,11 +337,11 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
           aria-label="Biểu đồ xu hướng lưu lượng chiến dịch marketing"
         >
           <defs>
-            <linearGradient id="mktPvGrad" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={pvGradId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#38BDF8" stopOpacity="0.28" />
               <stop offset="100%" stopColor="#38BDF8" stopOpacity="0.02" />
             </linearGradient>
-            <linearGradient id="mktSessGrad" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={sessGradId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#1E3A8A" stopOpacity="0.26" />
               <stop offset="100%" stopColor="#1E3A8A" stopOpacity="0.01" />
             </linearGradient>

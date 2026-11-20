@@ -1,9 +1,34 @@
 import { prisma } from '@toantrung/database';
 import type { M03TrendRowDto } from '@toantrung/contracts';
+import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
 
 const SETTING_TRENDS_LIVE_CACHE = 'google_trends_vn_live_cache_v1';
 const SETTING_TRENDS_SERPAPI_KEY = 'google_trends_serpapi_api_key_v1';
 const TRENDS_CACHE_TTL_MS = 15 * 60 * 1000; // 15 phút
+const SUGGEST_CACHE_TTL_MS = 10 * 60 * 1000;
+
+const globalTrendsStore = globalThis as unknown as {
+  __toantrungTrendsMemCache?: {
+    expiresAt: number;
+    payload: GoogleTrendsLiveCachePayload;
+  } | null;
+  __toantrungTrendsInFlight?: Promise<GoogleTrendsLiveCachePayload> | null;
+  __toantrungSuggestCache?: Map<string, { expiresAt: number; items: string[] }>;
+  __toantrungSuggestInFlight?: Map<string, Promise<string[]>>;
+};
+
+function getSuggestCache() {
+  if (!globalTrendsStore.__toantrungSuggestCache) {
+    globalTrendsStore.__toantrungSuggestCache = new Map();
+  }
+  if (!globalTrendsStore.__toantrungSuggestInFlight) {
+    globalTrendsStore.__toantrungSuggestInFlight = new Map();
+  }
+  return {
+    cache: globalTrendsStore.__toantrungSuggestCache,
+    inflight: globalTrendsStore.__toantrungSuggestInFlight,
+  };
+}
 
 const DEFAULT_LED_SEED_TERMS = [
   'màn hình led',
@@ -22,13 +47,6 @@ export interface GoogleTrendsLiveCachePayload {
   }>;
   errorMessage?: string | null;
 }
-
-let memoryTrendsCache: {
-  expiresAt: number;
-  payload: GoogleTrendsLiveCachePayload;
-} | null = null;
-
-let inflightTrendsRefresh: Promise<GoogleTrendsLiveCachePayload> | null = null;
 
 function decodeXmlEntities(raw: string): string {
   return raw
@@ -112,17 +130,40 @@ export async function fetchGoogleTrendsVietnamRss(): Promise<M03TrendRowDto[]> {
 export async function fetchGoogleVietnamSuggestions(seedQuery: string): Promise<string[]> {
   const q = seedQuery.trim();
   if (!q) return [];
-  const url = `https://suggestqueries.google.com/complete/search?client=firefox&hl=vi&gl=vn&q=${encodeURIComponent(q)}`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ToanTrungAnalytics/2.0)' },
-    signal: AbortSignal.timeout(6000),
-  });
-  if (!res.ok) return [];
-  const json = (await res.json()) as unknown;
-  if (!Array.isArray(json) || !Array.isArray(json[1])) return [];
-  return (json[1] as unknown[])
-    .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-    .map((s) => s.trim());
+  const norm = q.toLowerCase();
+  const { cache, inflight } = getSuggestCache();
+  const hit = cache.get(norm);
+  if (hit && hit.expiresAt > Date.now()) {
+    return hit.items;
+  }
+  const existingFlight = inflight.get(norm);
+  if (existingFlight) return existingFlight;
+
+  const p = (async () => {
+    try {
+      const url = `https://suggestqueries.google.com/complete/search?client=firefox&hl=vi&gl=vn&q=${encodeURIComponent(q)}`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ToanTrungAnalytics/2.0)' },
+        signal: AbortSignal.timeout(6000),
+      });
+      if (!res.ok) return [];
+      const json = (await res.json()) as unknown;
+      if (!Array.isArray(json) || !Array.isArray(json[1])) return [];
+      const items = (json[1] as unknown[])
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map((s) => s.trim());
+      if (cache.size > 200) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
+      cache.set(norm, { expiresAt: Date.now() + SUGGEST_CACHE_TTL_MS, items });
+      return items;
+    } finally {
+      inflight.delete(norm);
+    }
+  })();
+  inflight.set(norm, p);
+  return p;
 }
 
 async function refreshGoogleTrendsCacheInternal(): Promise<GoogleTrendsLiveCachePayload> {
@@ -153,7 +194,7 @@ async function refreshGoogleTrendsCacheInternal(): Promise<GoogleTrendsLiveCache
     errorMessage,
   };
 
-  memoryTrendsCache = {
+  globalTrendsStore.__toantrungTrendsMemCache = {
     expiresAt: Date.now() + TRENDS_CACHE_TTL_MS,
     payload,
   };
@@ -169,6 +210,7 @@ async function refreshGoogleTrendsCacheInternal(): Promise<GoogleTrendsLiveCache
     })
     .catch(() => {});
 
+  bumpDomainRevisions(['ads'], 'google_trends_refreshed');
   return payload;
 }
 
@@ -200,9 +242,19 @@ export async function getGoogleTrendsLiveSnapshot(
   forceRefresh = false,
 ): Promise<GoogleTrendsLiveCachePayload> {
   const now = Date.now();
-  if (!forceRefresh && memoryTrendsCache && memoryTrendsCache.expiresAt > now) {
-    return memoryTrendsCache.payload;
+  const mem = globalTrendsStore.__toantrungTrendsMemCache;
+  if (!forceRefresh && mem && mem.expiresAt > now) {
+    return mem.payload;
   }
+
+  const triggerBackground = () => {
+    if (process.env.NODE_TEST_CONTEXT) return;
+    if (!globalTrendsStore.__toantrungTrendsInFlight) {
+      globalTrendsStore.__toantrungTrendsInFlight = refreshGoogleTrendsCacheInternal().finally(() => {
+        globalTrendsStore.__toantrungTrendsInFlight = null;
+      });
+    }
+  };
 
   if (!forceRefresh) {
     const dbRow = await prisma.systemSetting
@@ -212,28 +264,33 @@ export async function getGoogleTrendsLiveSnapshot(
       try {
         const parsed = JSON.parse(dbRow.value) as GoogleTrendsLiveCachePayload;
         const ageMs = now - new Date(parsed.fetchedAt).getTime();
-        memoryTrendsCache = {
+        globalTrendsStore.__toantrungTrendsMemCache = {
           expiresAt: now + Math.max(30_000, TRENDS_CACHE_TTL_MS - ageMs),
           payload: parsed,
         };
-        if (ageMs > TRENDS_CACHE_TTL_MS && !inflightTrendsRefresh) {
-          inflightTrendsRefresh = refreshGoogleTrendsCacheInternal().finally(() => {
-            inflightTrendsRefresh = null;
-          });
+        if (ageMs > TRENDS_CACHE_TTL_MS) {
+          triggerBackground();
         }
         return parsed;
       } catch {
-        // tiếp tục làm mới bên dưới
+        // fall through to non-blocking placeholder + background refresh
       }
     }
+    triggerBackground();
+    return {
+      fetchedAt: '',
+      dailyRssTrends: [],
+      industrySuggestions: [],
+      errorMessage: 'Đang tải xu hướng Google Trends trong nền...',
+    };
   }
 
-  if (!inflightTrendsRefresh) {
-    inflightTrendsRefresh = refreshGoogleTrendsCacheInternal().finally(() => {
-      inflightTrendsRefresh = null;
+  if (!globalTrendsStore.__toantrungTrendsInFlight) {
+    globalTrendsStore.__toantrungTrendsInFlight = refreshGoogleTrendsCacheInternal().finally(() => {
+      globalTrendsStore.__toantrungTrendsInFlight = null;
     });
   }
-  return inflightTrendsRefresh;
+  return globalTrendsStore.__toantrungTrendsInFlight;
 }
 
 /**

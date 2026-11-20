@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Calendar, Check, Clock, Globe } from 'lucide-react';
 import {
   UI_VOCABULARY,
@@ -18,6 +18,11 @@ interface WebsiteDashboardHeaderProps {
   selectedWebsiteLabel?: string;
   comparisonLabel?: string | null;
   freshnessMessage?: string;
+  freshnessDetail?: {
+    checkedAt?: string | null;
+    lastSyncedAt?: string | null;
+    latestSourceDataAt?: string | null;
+  };
   freshnessTone?: 'ok' | 'warning' | 'error' | 'updating';
   hideWebsiteTabs?: boolean;
   actions?: React.ReactNode;
@@ -39,6 +44,7 @@ export function WebsiteDashboardHeader({
   availableWebsites,
   comparisonLabel,
   freshnessMessage,
+  freshnessDetail,
   freshnessTone = 'ok',
   hideWebsiteTabs = false,
   actions,
@@ -48,15 +54,23 @@ export function WebsiteDashboardHeader({
   const [localFrom, setLocalFrom] = useState(scope.from || '');
   const [localTo, setLocalTo] = useState(scope.to || '');
 
-  // C01 #5 & C04: Nhãn "Đang xem" tính đồng bộ từ scope.websiteId hiện tại, không bao giờ hiển thị nhãn cũ khi đang tải
+  useEffect(() => {
+    setLocalFrom(scope.from || '');
+    setLocalTo(scope.to || '');
+    if (scope.preset !== 'CUSTOM') {
+      setCustomOpen(false);
+    }
+  }, [scope.preset, scope.from, scope.to]);
+
+  // Nhãn "Đang xem" tính đồng bộ từ scope.websiteId hiện tại
   const activeWebsiteDisplay = hideWebsiteTabs
     ? 'Toàn hệ thống (Tất cả website)'
     : resolveWebsiteScopeDisplay(scope.websiteId, availableWebsites);
 
   const handlePresetChange = (nextPreset: DashboardDatePreset) => {
     if (nextPreset === 'CUSTOM') {
-      setCustomOpen(true);
-      onChangeScope({ preset: 'CUSTOM' });
+      // Only open date pickers until user commits valid bounds via "Áp dụng"
+      setCustomOpen((prev) => !prev || scope.preset !== 'CUSTOM');
       return;
     }
     setCustomOpen(false);
@@ -64,9 +78,39 @@ export function WebsiteDashboardHeader({
   };
 
   const applyCustomDates = () => {
-    if (!localFrom || !localTo) return;
-    onChangeScope({ preset: 'CUSTOM', from: localFrom, to: localTo });
+    if (!localFrom && !localTo) return;
+    const rawFrom = localFrom || localTo;
+    const rawTo = localTo || localFrom;
+    const [f, t] = rawFrom <= rawTo ? [rawFrom, rawTo] : [rawTo, rawFrom];
+    setLocalFrom(f);
+    setLocalTo(t);
+    onChangeScope({ preset: 'CUSTOM', from: f, to: t });
   };
+
+  const formatHm = (iso?: string | null) => {
+    if (!iso) return null;
+    try {
+      return new Intl.DateTimeFormat('vi-VN', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        hour: '2-digit',
+        minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+      }).format(new Date(iso));
+    } catch {
+      return iso;
+    }
+  };
+
+  const freshnessTooltip = freshnessDetail
+    ? [
+        freshnessDetail.checkedAt ? `Kiểm tra lúc: ${formatHm(freshnessDetail.checkedAt)}` : null,
+        freshnessDetail.lastSyncedAt ? `Đồng bộ thành công: ${formatHm(freshnessDetail.lastSyncedAt)}` : null,
+        freshnessDetail.latestSourceDataAt ? `Dữ liệu mới nhất nguồn: ${formatHm(freshnessDetail.latestSourceDataAt)}` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : undefined;
 
   const statusDotClass =
     freshnessTone === 'error'
@@ -85,7 +129,10 @@ export function WebsiteDashboardHeader({
     >
       <Calendar aria-hidden="true" className="w-3.5 h-3.5 text-slate-500 ml-1.5 mr-1 shrink-0" />
       {PRESET_OPTIONS.map((opt) => {
-        const active = scope.preset === opt.id;
+        const active =
+          opt.id === 'CUSTOM'
+            ? scope.preset === 'CUSTOM' || customOpen
+            : !customOpen && scope.preset === opt.id;
         return (
           <button
             key={opt.id}
@@ -143,7 +190,11 @@ export function WebsiteDashboardHeader({
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
               {subtitle && <span>{subtitle}</span>}
               {freshnessMessage && (
-                <span aria-live="off" className="inline-flex items-center gap-1.5 text-slate-600">
+                <span
+                  aria-live="off"
+                  title={freshnessTooltip}
+                  className="inline-flex items-center gap-1.5 text-slate-600"
+                >
                   <span aria-hidden="true" className={`w-2 h-2 rounded-full shrink-0 ${statusDotClass}`} />
                   <Clock aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                   <span>{freshnessMessage}</span>

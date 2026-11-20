@@ -19,6 +19,7 @@ import type {
   ConfigureAiProvidersDto,
   DesignTaskCode,
 } from '@toantrung/contracts';
+import { bumpDomainRevisions } from '../../../core/cache/server-data-cache';
 import { APP_CONFIG } from '../../../core/config';
 import { GoogleImagenProvider } from './google-imagen.provider';
 import { OpenAiImageProvider } from './openai-image.provider';
@@ -72,9 +73,16 @@ const DEFAULT_MULTI_AI_CONFIG: StoredMultiAiConfig = {
   providers: {},
 };
 
+const globalForMultiAiConfig = globalThis as unknown as {
+  __toantrungMultiAiConfigCache?: {
+    filePath: string;
+    mtimeMs: number;
+    config: StoredMultiAiConfig;
+  } | null;
+};
+
 function getConfigFilePath(): string {
   const dir = path.join(APP_CONFIG.getStorageRoot(), 'config');
-  fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, 'multi-ai-providers.json');
 }
 
@@ -84,13 +92,24 @@ function readStoredConfig(): StoredMultiAiConfig {
     if (!fs.existsSync(file)) {
       return { ...DEFAULT_MULTI_AI_CONFIG, providers: {} };
     }
+    const stat = fs.statSync(file);
+    const cached = globalForMultiAiConfig.__toantrungMultiAiConfigCache;
+    if (cached && cached.filePath === file && cached.mtimeMs === stat.mtimeMs) {
+      return cached.config;
+    }
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<StoredMultiAiConfig>;
-    return {
+    const normalized: StoredMultiAiConfig = {
       defaultProviderId: parsed.defaultProviderId || 'google_imagen',
       defaultModelId: parsed.defaultModelId || 'imagen-3.0-generate-002',
       autoFallbackToLocal: parsed.autoFallbackToLocal ?? true,
       providers: parsed.providers || {},
     };
+    globalForMultiAiConfig.__toantrungMultiAiConfigCache = {
+      filePath: file,
+      mtimeMs: stat.mtimeMs,
+      config: normalized,
+    };
+    return normalized;
   } catch {
     return { ...DEFAULT_MULTI_AI_CONFIG, providers: {} };
   }
@@ -99,7 +118,15 @@ function readStoredConfig(): StoredMultiAiConfig {
 function writeStoredConfig(config: StoredMultiAiConfig): void {
   try {
     const file = getConfigFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8');
+    const stat = fs.statSync(file);
+    globalForMultiAiConfig.__toantrungMultiAiConfigCache = {
+      filePath: file,
+      mtimeMs: stat.mtimeMs,
+      config,
+    };
+    bumpDomainRevisions(['design'], 'ai_provider_config_saved');
   } catch {
     // Ignore write failure in read-only test environments
   }

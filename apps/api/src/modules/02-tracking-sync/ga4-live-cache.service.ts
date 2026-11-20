@@ -1,6 +1,10 @@
 import { prisma } from '@toantrung/database';
 import { getValidAccessToken } from './google-oauth.service';
 import { resolveDashboardScope } from '../../core/website-catalog';
+import {
+  bumpDomainRevisions,
+  runWithConcurrency,
+} from '../../core/cache/server-data-cache';
 import type {
   DashboardDatePreset,
   M03SiteStatusRowDto,
@@ -58,10 +62,9 @@ export interface Ga4PropertyPeriodSnapshot {
   }>;
 }
 
-const MEM_CACHE = new Map<string, { expiresAt: number; data: Ga4PropertyPeriodSnapshot }>();
-const IN_FLIGHT = new Map<string, Promise<Ga4PropertyPeriodSnapshot | null>>();
-const BACKOFF_UNTIL = new Map<string, { untilMs: number; failures: number }>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const REALTIME_TTL_MS = 90 * 1000;
+const MAX_PERIOD_CACHE_ENTRIES = 60;
 const DB_CACHE_KEY = 'ga4_live_snapshot_cache_v2';
 const DB_REALTIME_CACHE_KEY = 'ga4_realtime_snapshot_cache_v1';
 const GSC_INSPECT_CACHE_KEY = 'gsc_url_inspection_cache_v1';
@@ -73,13 +76,63 @@ export interface Ga4RealtimePropSnapshot {
   minutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
 }
 
-const REALTIME_MEM = new Map<string, { expiresAt: number; data: Ga4RealtimePropSnapshot }>();
-const REALTIME_IN_FLIGHT = new Map<string, Promise<Ga4RealtimePropSnapshot | null>>();
-const REALTIME_TTL_MS = 90 * 1000;
+interface GlobalGa4LiveCacheStore {
+  memCache: Map<string, { expiresAt: number; data: Ga4PropertyPeriodSnapshot }>;
+  inFlight: Map<string, Promise<Ga4PropertyPeriodSnapshot | null>>;
+  backoffUntil: Map<string, { untilMs: number; failures: number }>;
+  realtimeMem: Map<string, { expiresAt: number; data: Ga4RealtimePropSnapshot }>;
+  realtimeInFlight: Map<string, Promise<Ga4RealtimePropSnapshot | null>>;
+  realtimeBackoffUntil: Map<string, { untilMs: number; failures: number }>;
+  gscInspectMem: Map<string, { expiresAt: number; rows: M03SiteStatusRowDto[] }>;
+  dbCacheHydrated: boolean;
+  dbGscHydrated: boolean;
+  warmerStarted: boolean;
+  warmerRunning: boolean;
+  persistTimer: ReturnType<typeof setTimeout> | null;
+}
 
-let dbCacheHydrated = false;
-let warmerStarted = false;
-let warmerRunning = false;
+const globalGa4Store = globalThis as unknown as {
+  __toantrungGa4LiveCache?: GlobalGa4LiveCacheStore;
+};
+
+function getGa4Store(): GlobalGa4LiveCacheStore {
+  if (!globalGa4Store.__toantrungGa4LiveCache) {
+    globalGa4Store.__toantrungGa4LiveCache = {
+      memCache: new Map(),
+      inFlight: new Map(),
+      backoffUntil: new Map(),
+      realtimeMem: new Map(),
+      realtimeInFlight: new Map(),
+      realtimeBackoffUntil: new Map(),
+      gscInspectMem: new Map(),
+      dbCacheHydrated: false,
+      dbGscHydrated: false,
+      warmerStarted: false,
+      warmerRunning: false,
+      persistTimer: null,
+    };
+  }
+  return globalGa4Store.__toantrungGa4LiveCache;
+}
+
+const MEM_CACHE = getGa4Store().memCache;
+const IN_FLIGHT = getGa4Store().inFlight;
+const BACKOFF_UNTIL = getGa4Store().backoffUntil;
+const REALTIME_MEM = getGa4Store().realtimeMem;
+const REALTIME_IN_FLIGHT = getGa4Store().realtimeInFlight;
+const REALTIME_BACKOFF_UNTIL = getGa4Store().realtimeBackoffUntil;
+const GSC_INSPECT_MEM = getGa4Store().gscInspectMem;
+
+export function invalidateGa4LiveCaches(): void {
+  const store = getGa4Store();
+  store.memCache.clear();
+  store.realtimeMem.clear();
+  store.gscInspectMem.clear();
+  store.backoffUntil.clear();
+  store.realtimeBackoffUntil.clear();
+  store.dbCacheHydrated = false;
+  store.dbGscHydrated = false;
+}
 
 function formatGa4Date(raw: string): string {
   // YYYYMMDD -> YYYY-MM-DD
@@ -90,8 +143,9 @@ function formatGa4Date(raw: string): string {
 }
 
 async function hydrateFromDbIfNeeded(): Promise<void> {
-  if (dbCacheHydrated) return;
-  dbCacheHydrated = true;
+  const store = getGa4Store();
+  if (store.dbCacheHydrated) return;
+  store.dbCacheHydrated = true;
   try {
     const [row, rtRow] = await Promise.all([
       prisma.systemSetting.findUnique({ where: { key: DB_CACHE_KEY } }),
@@ -134,8 +188,24 @@ async function hydrateFromDbIfNeeded(): Promise<void> {
   }
 }
 
+function pruneMemCache(): void {
+  const now = Date.now();
+  for (const [k, v] of MEM_CACHE.entries()) {
+    const fetchedMs = new Date(v.data.fetchedAt).getTime();
+    if (!Number.isFinite(fetchedMs) || now - fetchedMs > 24 * 60 * 60 * 1000) {
+      MEM_CACHE.delete(k);
+    }
+  }
+  while (MEM_CACHE.size > MAX_PERIOD_CACHE_ENTRIES) {
+    const oldestKey = MEM_CACHE.keys().next().value;
+    if (oldestKey === undefined) break;
+    MEM_CACHE.delete(oldestKey);
+  }
+}
+
 async function persistMemCacheToDb(): Promise<void> {
   try {
+    pruneMemCache();
     const out: Record<string, Ga4PropertyPeriodSnapshot> = {};
     for (const [k, entry] of MEM_CACHE.entries()) {
       out[k] = entry.data;
@@ -148,6 +218,16 @@ async function persistMemCacheToDb(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+function schedulePersistMemCache(): void {
+  const store = getGa4Store();
+  if (store.persistTimer) return;
+  store.persistTimer = setTimeout(() => {
+    store.persistTimer = null;
+    void persistMemCacheToDb();
+  }, 1500);
+  store.persistTimer.unref?.();
 }
 
 async function persistRealtimeCacheToDb(): Promise<void> {
@@ -431,8 +511,11 @@ function triggerPropertyRefreshSingleflight(
       const fresh = await fetchPropertyPeriodFromGa4(propertyId, startDate, endDate, token);
       if (fresh) {
         BACKOFF_UNTIL.delete(key);
+        MEM_CACHE.delete(key);
         MEM_CACHE.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, data: fresh });
-        void persistMemCacheToDb();
+        pruneMemCache();
+        schedulePersistMemCache();
+        bumpDomainRevisions(['tracking', 'reports', 'ads'], 'ga4_live_snapshot_refreshed');
         return fresh;
       }
       const prevFails = (BACKOFF_UNTIL.get(key)?.failures || 0) + 1;
@@ -446,36 +529,6 @@ function triggerPropertyRefreshSingleflight(
 
   IN_FLIGHT.set(key, promise);
   return promise;
-}
-
-function getDayWindowSpan(startDate: string, endDate: string): number {
-  const s = new Date(`${startDate}T00:00:00Z`).getTime();
-  const e = new Date(`${endDate}T00:00:00Z`).getTime();
-  if (!Number.isFinite(s) || !Number.isFinite(e)) return 0;
-  return Math.max(1, Math.round((e - s) / 86_400_000) + 1);
-}
-
-function findNearestCachedSnapshotForProperty(
-  propertyId: string,
-  startDate: string,
-  endDate: string,
-): Ga4PropertyPeriodSnapshot | null {
-  const targetSpan = getDayWindowSpan(startDate, endDate);
-  let best: Ga4PropertyPeriodSnapshot | null = null;
-  let bestFetchedMs = -1;
-  for (const [k, entry] of MEM_CACHE.entries()) {
-    if (!k.startsWith(`${propertyId}:`)) continue;
-    const snap = entry.data;
-    const span = getDayWindowSpan(snap.startDate, snap.endDate);
-    if (Math.abs(span - targetSpan) <= 1) {
-      const fMs = new Date(snap.fetchedAt).getTime();
-      if (fMs > bestFetchedMs) {
-        bestFetchedMs = fMs;
-        best = snap;
-      }
-    }
-  }
-  return best;
 }
 
 export async function getGa4LivePropertySnapshot(
@@ -493,23 +546,13 @@ export async function getGa4LivePropertySnapshot(
     return cached.data;
   }
 
-  // C02 & C10: Khi đã có cache của đúng kỳ thì trả ngay và làm mới ngầm; khi cache của khung ngày mới sau 00:00 chưa kịp có thì chờ tối đa 2.5s hoặc dùng snapshot gần nhất cùng độ dài kỳ
+  // Non-blocking on page load: return exact-scope cached snapshot if available;
+  // NEVER return a different date window's snapshot and NEVER block UI waiting for external GA4 HTTP calls.
   if (!forceBlocking) {
-    const refreshPromise = triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
-    if (cached) {
-      return cached.data;
+    if (!process.env.NODE_TEST_CONTEXT) {
+      void triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
     }
-    const nearestFallback = findNearestCachedSnapshotForProperty(propertyId, startDate, endDate);
-    if (process.env.NODE_TEST_CONTEXT) {
-      return nearestFallback;
-    }
-    const fastFresh = await Promise.race([
-      refreshPromise,
-      new Promise<Ga4PropertyPeriodSnapshot | null>((resolve) =>
-        setTimeout(() => resolve(null), 1200),
-      ),
-    ]);
-    return fastFresh || nearestFallback;
+    return cached?.data || null;
   }
 
   return triggerPropertyRefreshSingleflight(propertyId, startDate, endDate);
@@ -607,16 +650,28 @@ function triggerRealtimePropRefreshSingleflight(propId: string): Promise<Ga4Real
   const existing = REALTIME_IN_FLIGHT.get(propId);
   if (existing) return existing;
 
+  const backoff = REALTIME_BACKOFF_UNTIL.get(propId);
+  if (backoff && backoff.untilMs > Date.now()) {
+    return Promise.resolve(REALTIME_MEM.get(propId)?.data || null);
+  }
+
   const p = (async () => {
     try {
       const token = await getValidAccessToken();
       if (!token) return REALTIME_MEM.get(propId)?.data || null;
       const snap = await fetchRealtimePropFromGa4(propId, token);
       if (snap) {
+        REALTIME_BACKOFF_UNTIL.delete(propId);
         REALTIME_MEM.set(propId, { expiresAt: Date.now() + REALTIME_TTL_MS, data: snap });
         void persistRealtimeCacheToDb();
+        bumpDomainRevisions(['tracking'], 'ga4_realtime_refreshed');
         return snap;
       }
+      const prevFails = (REALTIME_BACKOFF_UNTIL.get(propId)?.failures || 0) + 1;
+      REALTIME_BACKOFF_UNTIL.set(propId, {
+        untilMs: Date.now() + Math.min(5 * 60 * 1000, 30_000 * Math.pow(2, prevFails - 1)),
+        failures: prevFails,
+      });
       return REALTIME_MEM.get(propId)?.data || null;
     } finally {
       REALTIME_IN_FLIGHT.delete(propId);
@@ -679,8 +734,6 @@ export async function getGa4RealtimeSnapshotNonBlocking(propertyIds: string[]): 
 // GSC URL Inspection Background Cache (for M03 Tình trạng trang)
 // ============================================================================
 
-const GSC_INSPECT_MEM = new Map<string, { expiresAt: number; rows: M03SiteStatusRowDto[] }>();
-
 async function inspectUrlWithGsc(
   siteUrl: string,
   inspectionUrl: string,
@@ -733,7 +786,9 @@ export async function getCachedGscSiteStatus(
   gscSiteUrls: string[],
 ): Promise<M03SiteStatusRowDto[]> {
   if (gscSiteUrls.length === 0) return [];
-  if (GSC_INSPECT_MEM.size === 0) {
+  const store = getGa4Store();
+  if (!store.dbGscHydrated && GSC_INSPECT_MEM.size === 0) {
+    store.dbGscHydrated = true;
     try {
       const row = await prisma.systemSetting.findUnique({ where: { key: GSC_INSPECT_CACHE_KEY } });
       if (row?.value) {
@@ -822,8 +877,9 @@ async function warmGscInspectionInBackground(websites: WebsiteConfigItemDto[], a
 // ============================================================================
 
 export async function warmAllDashboardDataInBackground(): Promise<void> {
-  if (warmerRunning) return;
-  warmerRunning = true;
+  const store = getGa4Store();
+  if (store.warmerRunning) return;
+  store.warmerRunning = true;
   try {
     const token = await getValidAccessToken();
     if (!token) return;
@@ -842,48 +898,59 @@ export async function warmAllDashboardDataInBackground(): Promise<void> {
       presets.map((preset) => resolveDashboardScope({ websiteId: 'all', preset })),
     );
 
-    const tasks: Array<Promise<void>> = [];
+    const periodTargets: Array<{ pid: string; startDate: string; endDate: string; key: string }> = [];
     for (const sc of presetScopes) {
       for (const pid of propIds) {
         const key = `${pid}:${sc.startDateStr}:${sc.endDateStr}`;
         const cached = MEM_CACHE.get(key);
         if (!cached || cached.expiresAt <= Date.now()) {
-          tasks.push(
-            fetchPropertyPeriodFromGa4(pid, sc.startDateStr, sc.endDateStr, token).then((fresh) => {
-              if (fresh) {
-                MEM_CACHE.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, data: fresh });
-              }
-            }),
-          );
+          periodTargets.push({ pid, startDate: sc.startDateStr, endDate: sc.endDateStr, key });
         }
       }
     }
-    for (const pid of propIds) {
-      const rtCached = REALTIME_MEM.get(pid);
-      if (!rtCached || rtCached.expiresAt <= Date.now()) {
-        tasks.push(
-          fetchRealtimePropFromGa4(pid, token).then((rtSnap) => {
-            if (rtSnap) {
-              REALTIME_MEM.set(pid, { expiresAt: Date.now() + REALTIME_TTL_MS, data: rtSnap });
-            }
-          }),
-        );
-      }
-    }
-    await Promise.all(tasks);
 
-    await Promise.all([persistMemCacheToDb(), persistRealtimeCacheToDb()]);
+    const rtTargets = propIds.filter((pid) => {
+      const rtCached = REALTIME_MEM.get(pid);
+      return !rtCached || rtCached.expiresAt <= Date.now();
+    });
+
+    let changedCount = 0;
+    await Promise.all([
+      runWithConcurrency(periodTargets, 4, async (item) => {
+        const fresh = await fetchPropertyPeriodFromGa4(item.pid, item.startDate, item.endDate, token);
+        if (fresh) {
+          MEM_CACHE.delete(item.key);
+          MEM_CACHE.set(item.key, { expiresAt: Date.now() + CACHE_TTL_MS, data: fresh });
+          changedCount += 1;
+        }
+      }),
+      runWithConcurrency(rtTargets, 4, async (pid) => {
+        const rtSnap = await fetchRealtimePropFromGa4(pid, token);
+        if (rtSnap) {
+          REALTIME_MEM.set(pid, { expiresAt: Date.now() + REALTIME_TTL_MS, data: rtSnap });
+          changedCount += 1;
+        }
+      }),
+    ]);
+
+    if (changedCount > 0) {
+      pruneMemCache();
+      await Promise.all([persistMemCacheToDb(), persistRealtimeCacheToDb()]);
+      bumpDomainRevisions(['tracking', 'reports', 'ads'], 'background_ga4_warmer');
+    }
     await warmGscInspectionInBackground(baseScope.availableWebsites, token);
   } catch {
     // non-fatal background warm
   } finally {
-    warmerRunning = false;
+    store.warmerRunning = false;
   }
 }
 
 export function ensureM02M04BackgroundWarmerStarted(): void {
-  if (warmerStarted) return;
-  warmerStarted = true;
+  if (process.env.NODE_TEST_CONTEXT) return;
+  const store = getGa4Store();
+  if (store.warmerStarted) return;
+  store.warmerStarted = true;
 
   // Warm immediately after server boot (500ms delay)
   const initialTimer = setTimeout(() => {

@@ -1,3 +1,4 @@
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import {
@@ -65,6 +66,7 @@ export async function POST(req: Request) {
           typeof body.onlyLeadKeywords === 'boolean' ? body.onlyLeadKeywords : undefined,
       });
       const status = await getGmailLeadSyncStatus();
+      bumpDomainRevisions(['leads'], 'gmail_sync_save_config');
       return jsonSuccess({ ...status, config: updatedConfig });
     }
 

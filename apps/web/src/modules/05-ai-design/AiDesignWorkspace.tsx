@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import {
   DESIGN_STATUS_LABELS,
   DESIGN_TYPE_LABELS,
@@ -52,9 +53,15 @@ import {
   MessageSquare,
   Minimize2,
 } from 'lucide-react';
-import { apiRequest } from '@/core/http/client';
+import { apiRequest, peekApiCacheEntry } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
+import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useSession } from '@/core/session/SessionContext';
-import { ModelRegistryModal } from './ModelRegistryModal';
+
+const ModelRegistryModal = dynamic(
+  () => import('./ModelRegistryModal').then((m) => m.ModelRegistryModal),
+  { ssr: false, loading: () => null }
+);
 
 interface LeadOpt {
   id: number;
@@ -148,6 +155,23 @@ export function AiDesignWorkspace() {
   const [providerStatus, setProviderStatus] = useState<ProviderStatusInfo | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
+  const selectedIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  const isParamFormDirtyRef = useRef(false);
+  const fromBriefAppliedRef = useRef(false);
+  const handledLeadIdRef = useRef<number | null>(null);
+  const providerInitializedRef = useRef(false);
+  const hasInitializedProjectRef = useRef(false);
+  const loadReqSeqRef = useRef(0);
+  const loadAbortRef = useRef<AbortController | null>(null);
+  const projectListScrollRef = useRef<HTMLDivElement>(null);
+  const pendingScrollRestoreRef = useRef<number | null>(null);
+  const submitLockRef = useRef(false);
+  const activeAttemptKeyRef = useRef<{ sig: string; key: string } | null>(null);
+  const [elapsedJobSec, setElapsedJobSec] = useState(0);
+  const [retryingJob, setRetryingJob] = useState(false);
 
   // UI state
   const [loading, setLoading] = useState(true);
@@ -163,6 +187,7 @@ export function AiDesignWorkspace() {
   const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'perspective' | 'assistant' | 'specs'>('perspective');
   // Side dock tab when viewing Phối cảnh on wide desktop
   const [sideDockTab, setSideDockTab] = useState<'assistant' | 'specs'>('assistant');
+  const [photoVaultTab, setPhotoVaultTab] = useState<'site_photos' | 'company_products'>('site_photos');
 
   // MK04: 4-Task Workflow, Structured Brief & Server Registry Modal
   const [activeTaskCode, setActiveTaskCode] = useState<DesignTaskCode>('perspective_compose');
@@ -383,6 +408,7 @@ export function AiDesignWorkspace() {
       // Auto-prefill Marketing Brief from Reports / Tracking / SEO AI URL query parameters
       const urlParams = new URLSearchParams(window.location.search);
       if (urlParams.get('fromBrief') === '1') {
+        fromBriefAppliedRef.current = true;
         const tc = urlParams.get('taskCode') as DesignTaskCode | null;
         if (
           tc === 'banner_generate' ||
@@ -423,6 +449,31 @@ export function AiDesignWorkspace() {
           },
         });
         setSuccessToast('Đã nhận Brief & baseline ngữ cảnh từ phân hệ Marketing.');
+      } else {
+        const savedRoute = loadRouteState<{
+          selectedId?: number | null;
+          activeWorkspaceArea?: 'perspective' | 'assistant' | 'specs';
+          photoVaultTab?: 'site_photos' | 'company_products';
+          searchProject?: string;
+          projectListScrollTop?: number;
+        }>('design:workspace');
+        if (savedRoute) {
+          if (savedRoute.activeWorkspaceArea) {
+            setActiveWorkspaceArea(savedRoute.activeWorkspaceArea);
+          }
+          if (savedRoute.photoVaultTab) {
+            setPhotoVaultTab(savedRoute.photoVaultTab);
+          }
+          if (typeof savedRoute.searchProject === 'string') {
+            setSearchProject(savedRoute.searchProject);
+          }
+          if (typeof savedRoute.projectListScrollTop === 'number' && savedRoute.projectListScrollTop > 0) {
+            pendingScrollRestoreRef.current = savedRoute.projectListScrollTop;
+          }
+          if (!urlParams.get('projectId') && !urlParams.get('leadId') && savedRoute.selectedId) {
+            selectedIdRef.current = savedRoute.selectedId;
+          }
+        }
       }
     } catch {
       // ignore storage errors
@@ -662,28 +713,36 @@ export function AiDesignWorkspace() {
     return () => window.clearTimeout(timer);
   }, [successToast]);
 
-  const syncProjectSelection = useCallback((project: DesignRequestItemDto) => {
+  const syncProjectSelection = useCallback((project: DesignRequestItemDto, options?: { preserveFromBrief?: boolean }) => {
     setSelectedId(project.id);
+    selectedIdRef.current = project.id;
+    hasInitializedProjectRef.current = true;
+    isParamFormDirtyRef.current = false;
     if (typeof window !== 'undefined') {
       window.localStorage.setItem(STORAGE_SELECTED_PROJECT_KEY, String(project.id));
       const url = new URL(window.location.href);
       url.searchParams.set('projectId', String(project.id));
       window.history.replaceState({}, '', url.toString());
     }
-    if (project.taskCode) {
-      setActiveTaskCode(project.taskCode);
+    if (options?.preserveFromBrief && fromBriefAppliedRef.current) {
+      fromBriefAppliedRef.current = false;
     } else {
-      setActiveTaskCode(project.designType === 'banner' ? 'banner_generate' : 'perspective_compose');
+      fromBriefAppliedRef.current = false;
+      if (project.taskCode) {
+        setActiveTaskCode(project.taskCode);
+      } else {
+        setActiveTaskCode(project.designType === 'banner' ? 'banner_generate' : 'perspective_compose');
+      }
+      setActiveBrief(project.designBrief || {
+        websiteId: project.websiteId ?? null,
+        websiteDomain: project.websiteDomain ?? null,
+        campaignId: project.campaignId ?? null,
+        campaignName: project.campaignName ?? null,
+        contentId: project.contentId ?? null,
+        outputWidthPx: project.bannerWidthPx ?? 1536,
+        outputHeightPx: project.bannerHeightPx ?? 1024,
+      });
     }
-    setActiveBrief(project.designBrief || {
-      websiteId: project.websiteId ?? null,
-      websiteDomain: project.websiteDomain ?? null,
-      campaignId: project.campaignId ?? null,
-      campaignName: project.campaignName ?? null,
-      contentId: project.contentId ?? null,
-      outputWidthPx: project.bannerWidthPx ?? 1536,
-      outputHeightPx: project.bannerHeightPx ?? 1024,
-    });
     if (project.placementQuad) {
       setQuad(project.placementQuad);
     }
@@ -752,86 +811,132 @@ export function AiDesignWorkspace() {
     });
   }, []);
 
-  // Load Data from API
+  type DesignListPayload = {
+    requests: DesignRequestItemDto[];
+    leadOptions: LeadOpt[];
+    productOptions: ProductOpt[];
+    providerStatus: ProviderStatusInfo;
+  };
+
+  const applyLoadedPayload = useCallback(
+    (data: DesignListPayload, preferredProjectId: number | undefined, isBackground: boolean) => {
+      const list: DesignRequestItemDto[] = data.requests || [];
+      setRequests(list);
+      setLeadOptions(data.leadOptions || []);
+      setProductOptions(data.productOptions || []);
+      setProviderStatus(data.providerStatus || null);
+
+      if (data.providerStatus && !providerInitializedRef.current) {
+        providerInitializedRef.current = true;
+        const defPid = data.providerStatus.defaultProviderId || data.providerStatus.provider || 'google_imagen';
+        setSelectedProviderId(defPid);
+        setConfigModalProviderId(defPid);
+        const defModel = data.providerStatus.defaultModelId || data.providerStatus.activeModel || 'imagen-3.0-generate-002';
+        setSelectedModelId(defModel);
+        if (!data.providerStatus.isConfigured) {
+          setConsultantModelName('Chưa kết nối khóa AI (Dựng nội bộ)');
+        } else if (defModel.startsWith('gemini-')) {
+          setConsultantModelId(defModel);
+          setConsultantModelName(`Google ${defModel}`);
+        } else {
+          setConsultantModelName(data.providerStatus.providerName || defModel);
+        }
+        setAutoFallbackToLocal(data.providerStatus.autoFallbackToLocal ?? true);
+        const activeCat = data.providerStatus.availableProviders?.find((p) => p.providerId === defPid);
+        if (activeCat) {
+          setConfigEndpointInput(activeCat.apiEndpoint || '');
+          setConfigCustomModelInput(activeCat.activeModel || '');
+        }
+      }
+
+      if (list.length > 0) {
+        const currentSelectedId = selectedIdRef.current;
+        let targetId = preferredProjectId ?? currentSelectedId;
+        if (!targetId && typeof window !== 'undefined') {
+          const urlParams = new URLSearchParams(window.location.search);
+          const fromUrl = Number(urlParams.get('projectId'));
+          const fromStorage = Number(window.localStorage.getItem(STORAGE_SELECTED_PROJECT_KEY));
+          if (Number.isInteger(fromUrl) && fromUrl > 0) {
+            targetId = fromUrl;
+          } else if (Number.isInteger(fromStorage) && fromStorage > 0) {
+            targetId = fromStorage;
+          }
+        }
+        const currentReq = (targetId ? list.find((r) => r.id === targetId) : null) || list[0];
+        const mustSelect =
+          !hasInitializedProjectRef.current ||
+          currentSelectedId === null ||
+          !list.some((r) => r.id === currentSelectedId) ||
+          (preferredProjectId !== undefined && preferredProjectId !== currentSelectedId);
+
+        if (mustSelect && (!isBackground || !isParamFormDirtyRef.current)) {
+          syncProjectSelection(currentReq, { preserveFromBrief: fromBriefAppliedRef.current });
+        }
+      }
+    },
+    [syncProjectSelection]
+  );
+
+  // Load Data from API (uses scoped client cache + non-blocking SWR revalidation)
   const loadData = useCallback(
     async (preferredProjectId?: number, silent?: boolean) => {
+      const reqSeq = ++loadReqSeqRef.current;
+      loadAbortRef.current?.abort();
+      const controller = new AbortController();
+      loadAbortRef.current = controller;
+
       if (!silent) {
-        setLoading(true);
+        const cached = peekApiCacheEntry<DesignListPayload>('/api/v1/design');
+        if (cached?.data) {
+          applyLoadedPayload(cached.data, preferredProjectId, false);
+          setLoading(false);
+        } else {
+          setLoading((prev) => prev && !hasInitializedProjectRef.current);
+        }
       }
       setError(null);
       try {
-        const data = await apiRequest<{
-          requests: DesignRequestItemDto[];
-          leadOptions: LeadOpt[];
-          productOptions: ProductOpt[];
-          providerStatus: ProviderStatusInfo;
-        }>('/api/v1/design', { skipCache: Boolean(silent) });
-        const list: DesignRequestItemDto[] = data.requests || [];
-        setRequests(list);
-        setLeadOptions(data.leadOptions || []);
-        setProductOptions(data.productOptions || []);
-        setProviderStatus(data.providerStatus || null);
-        if (data.providerStatus && !silent) {
-          const defPid = data.providerStatus.defaultProviderId || data.providerStatus.provider || 'google_imagen';
-          setSelectedProviderId(defPid);
-          setConfigModalProviderId(defPid);
-          const defModel = data.providerStatus.defaultModelId || data.providerStatus.activeModel || 'imagen-3.0-generate-002';
-          setSelectedModelId(defModel);
-          if (!data.providerStatus.isConfigured) {
-            setConsultantModelName('Chưa kết nối khóa AI (Dựng nội bộ)');
-          } else if (defModel.startsWith('gemini-')) {
-            setConsultantModelId(defModel);
-            setConsultantModelName(`Google ${defModel}`);
-          } else {
-            setConsultantModelName(data.providerStatus.providerName || defModel);
-          }
-          setAutoFallbackToLocal(data.providerStatus.autoFallbackToLocal ?? true);
-          const activeCat = data.providerStatus.availableProviders?.find((p) => p.providerId === defPid);
-          if (activeCat) {
-            setConfigEndpointInput(activeCat.apiEndpoint || '');
-            setConfigCustomModelInput(activeCat.activeModel || '');
-          }
-        }
-
-        if (list.length > 0) {
-          let targetId = preferredProjectId ?? selectedId;
-          if (!targetId && typeof window !== 'undefined') {
-            const urlParams = new URLSearchParams(window.location.search);
-            const fromUrl = Number(urlParams.get('projectId'));
-            const fromStorage = Number(window.localStorage.getItem(STORAGE_SELECTED_PROJECT_KEY));
-            if (Number.isInteger(fromUrl) && fromUrl > 0) {
-              targetId = fromUrl;
-            } else if (Number.isInteger(fromStorage) && fromStorage > 0) {
-              targetId = fromStorage;
+        const data = await apiRequest<DesignListPayload>('/api/v1/design', {
+          signal: controller.signal,
+          skipCache: Boolean(silent),
+          onRevalidated: (freshData) => {
+            if (loadReqSeqRef.current === reqSeq && !controller.signal.aborted) {
+              applyLoadedPayload(freshData, preferredProjectId, true);
             }
-          }
-          const currentReq = (targetId ? list.find((r) => r.id === targetId) : null) || list[0];
-          if (!silent || currentReq.id !== selectedId) {
-            syncProjectSelection(currentReq);
-          }
-        }
+          },
+        });
+        if (loadReqSeqRef.current !== reqSeq || controller.signal.aborted) return;
+        applyLoadedPayload(data, preferredProjectId, Boolean(silent));
       } catch (err) {
+        if ((err as Error)?.name === 'AbortError' || controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : 'Không thể tải dữ liệu Studio thiết kế.');
       } finally {
-        if (!silent) {
+        if (!silent && loadReqSeqRef.current === reqSeq && !controller.signal.aborted) {
           setLoading(false);
         }
       }
     },
-    [selectedId, syncProjectSelection]
+    [applyLoadedPayload]
   );
 
   useEffect(() => {
     void loadData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const unsubSync = subscribeDataSync(['design', 'leads'], () => {
+      void loadData(undefined, true);
+    });
+    return () => {
+      unsubSync();
+      loadAbortRef.current?.abort();
+    };
+  }, [loadData]);
 
-  // Auto-select or prefill project when navigated with ?leadId=<id> from LeadsWorkspace
+  // Auto-select or prefill project ONCE when navigated with ?leadId=<id> from LeadsWorkspace
   useEffect(() => {
     if (typeof window === 'undefined' || loading) return;
     const params = new URLSearchParams(window.location.search);
     const leadIdParam = Number(params.get('leadId'));
-    if (Number.isInteger(leadIdParam) && leadIdParam > 0) {
+    if (Number.isInteger(leadIdParam) && leadIdParam > 0 && handledLeadIdRef.current !== leadIdParam) {
+      handledLeadIdRef.current = leadIdParam;
       const existingReq = requests.find((r) => r.leadId === leadIdParam);
       if (existingReq) {
         syncProjectSelection(existingReq);
@@ -859,13 +964,20 @@ export function AiDesignWorkspace() {
     [currentProject, selectedVersionId]
   );
 
-  // Rời trang không làm mất job đang chạy: tự động poll DB mỗi 2.5s khi activeJob === 'running'
-  const prevActiveJobRef = useRef<{ jobId: string; status: string } | null>(null);
+  // Rời trang không làm mất job đang chạy: theo dõi chuyển trạng thái của activeJob
+  const prevActiveJobRef = useRef<{ projectId: number; jobId: string; status: string } | null>(null);
   useEffect(() => {
     const job = currentProject?.activeJob;
     if (!currentProject || !job) return;
     const prev = prevActiveJobRef.current;
-    if (prev && prev.jobId === job.jobId && prev.status === 'running' && job.status === 'succeeded') {
+    if (
+      prev &&
+      prev.projectId === currentProject.id &&
+      prev.jobId === job.jobId &&
+      prev.status === 'running' &&
+      job.status === 'succeeded'
+    ) {
+      activeAttemptKeyRef.current = null;
       const latestVer = currentProject.assetVersions[currentProject.assetVersions.length - 1];
       if (latestVer) {
         setSelectedVersionId(latestVer.id);
@@ -877,25 +989,88 @@ export function AiDesignWorkspace() {
           ? `Đã hoàn tất bản phối cảnh kỹ thuật nội bộ v${job.resultVersionNo ?? ''} (Studio Engine).`
           : `Đã hoàn tất phiên bản Thiết kế AI v${job.resultVersionNo ?? ''}.`
       );
+    } else if (
+      prev &&
+      prev.projectId === currentProject.id &&
+      prev.jobId === job.jobId &&
+      prev.status === 'running' &&
+      job.status === 'failed'
+    ) {
+      setError(job.message || 'Tiến trình AI không thành công. Bạn có thể bấm thử lại.');
     }
-    prevActiveJobRef.current = { jobId: job.jobId, status: job.status };
+    prevActiveJobRef.current = { projectId: currentProject.id, jobId: job.jobId, status: job.status };
   }, [currentProject]);
 
+  // Real elapsed seconds ticker while currentProject?.activeJob?.status === 'running' (no fake ETA)
+  useEffect(() => {
+    const job = currentProject?.activeJob;
+    if (!job || job.status !== 'running') {
+      setElapsedJobSec(0);
+      return;
+    }
+    const computeElapsed = () => {
+      const startedMs = Date.parse(job.startedAt);
+      if (!Number.isFinite(startedMs)) return 0;
+      return Math.max(0, Math.floor((Date.now() - startedMs) / 1000));
+    };
+    setElapsedJobSec(computeElapsed());
+    const timer = window.setInterval(() => {
+      setElapsedJobSec(computeElapsed());
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [currentProject?.id, currentProject?.activeJob]);
+
+  // Project-scoped 2s background poller ONLY for the active running project (never full list)
   useEffect(() => {
     if (currentProject?.activeJob?.status !== 'running') return;
     const pid = currentProject.id;
-    const timer = window.setInterval(() => {
-      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-        void loadData(pid, true);
-      }
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [currentProject?.id, currentProject?.activeJob?.status, loadData]);
+    let activeController: AbortController | null = null;
+    let disposed = false;
 
-  // Two distinct photo vaults in Left Sidebar Card 2:
-  // 1) 'site_photos': Ảnh Công trình của dự án đang chọn (Up hàng loạt khi đi chụp thực tế)
-  // 2) 'company_products': Kho Sản phẩm Công ty dùng chung cho mọi dự án (Chèn/ghép vào ảnh công trình hoặc Banner)
-  const [photoVaultTab, setPhotoVaultTab] = useState<'site_photos' | 'company_products'>('site_photos');
+    const pollProjectStatus = async () => {
+      if (disposed) return;
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      activeController?.abort();
+      const ctrl = new AbortController();
+      activeController = ctrl;
+      try {
+        const res = await apiRequest<{ project: DesignRequestItemDto; designContext: unknown }>(
+          `/api/v1/design/${pid}`,
+          { skipCache: true, signal: ctrl.signal }
+        );
+        if (disposed || ctrl.signal.aborted || !res?.project) return;
+        setRequests((prev) => {
+          const exists = prev.some((r) => r.id === res.project.id);
+          return exists
+            ? prev.map((r) => (r.id === res.project.id ? res.project : r))
+            : prev;
+        });
+      } catch {
+        // Silent poll retry on next tick unless unmounted
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void pollProjectStatus();
+    }, 2000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void pollProjectStatus();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      activeController?.abort();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+      }
+    };
+  }, [currentProject?.id, currentProject?.activeJob?.status]);
 
   // Sync with Top Header Global Scoped Search Bar
   useEffect(() => {
@@ -915,12 +1090,27 @@ export function AiDesignWorkspace() {
       setSearchProject(typeof custom.detail === 'string' ? custom.detail : '');
     };
     window.addEventListener('tt-global-search', handleGlobalSearch as EventListener);
-    window.addEventListener('tt-lead-search', handleGlobalSearch as EventListener);
     return () => {
       window.removeEventListener('tt-global-search', handleGlobalSearch as EventListener);
-      window.removeEventListener('tt-lead-search', handleGlobalSearch as EventListener);
     };
   }, []);
+
+  // Save/restore workspace route state & project list scroll position across transitions
+  useEffect(() => {
+    saveRouteState('design:workspace', {
+      selectedId,
+      activeWorkspaceArea,
+      photoVaultTab,
+      searchProject,
+      projectListScrollTop: projectListScrollRef.current?.scrollTop ?? 0,
+    });
+  }, [selectedId, activeWorkspaceArea, photoVaultTab, searchProject]);
+
+  useEffect(() => {
+    if (loading || pendingScrollRestoreRef.current === null || !projectListScrollRef.current) return;
+    projectListScrollRef.current.scrollTop = pendingScrollRestoreRef.current;
+    pendingScrollRestoreRef.current = null;
+  }, [loading, requests.length]);
 
   // Site photos belonging to the currently active project (filtered when searching)
   const currentSitePhotos = useMemo(() => {
@@ -1336,6 +1526,7 @@ export function AiDesignWorkspace() {
         },
       });
 
+      isParamFormDirtyRef.current = false;
       setSuccessToast(`Đã lưu thông số dự án "${paramForm.projectName.trim()}" (áp dụng cho mọi trường hợp).`);
       await loadData(currentProject.id, true);
     } catch (err) {
@@ -2301,10 +2492,76 @@ export function AiDesignWorkspace() {
     return () => window.clearTimeout(timer);
   }, [currentProject?.id, currentProject?.chatMessages.length, pendingUserPrompt, submitting]);
 
+  // Retry failed background job with asyncMode: true
+  const handleRetryLastFailedJob = async () => {
+    if (!currentProject || retryingJob || submitLockRef.current) return;
+    if (currentProject.activeJob?.status === 'running') return;
+    const pid = currentProject.id;
+    submitLockRef.current = true;
+    setRetryingJob(true);
+    setError(null);
+    try {
+      const data = await apiRequest<{
+        accepted?: boolean;
+        asyncQueued?: boolean;
+        jobId?: string;
+        activeJob?: DesignRequestItemDto['activeJob'];
+        status?: 'running' | 'succeeded' | 'failed';
+        versionNumber?: number;
+        versionId?: number;
+      }>(`/api/v1/design/${pid}`, {
+        method: 'PATCH',
+        csrfToken: user?.csrfToken,
+        body: {
+          action: 'retry_last_failed',
+          asyncMode: true,
+        },
+      });
+
+      if (data.accepted || data.asyncQueued || data.status === 'running') {
+        setRequests((prev) =>
+          prev.map((r) =>
+            r.id === pid
+              ? {
+                  ...r,
+                  activeJob: data.activeJob || {
+                    jobId: data.jobId || `job-retry-${pid}`,
+                    status: 'running',
+                    action: 'RETRY',
+                    providerId: selectedProviderId,
+                    modelId: selectedModelId,
+                    startedAt: new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    progressStage: 'queued',
+                    message: 'Đã xếp hàng thử lại tác vụ trên máy chủ AI...',
+                  },
+                }
+              : r
+          )
+        );
+        setSuccessToast(
+          `Đã khởi động lại tác vụ AI (${data.jobId || 'async'}). Có thể chuyển trang trong lúc máy chủ xử lý.`
+        );
+      } else {
+        await loadData(pid, true);
+        if (data.versionId) {
+          setSelectedVersionId(data.versionId);
+          setViewMode('result');
+        }
+        setSuccessToast(`Đã thử lại và hoàn tất phiên bản v${data.versionNumber ?? ''}.`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể thử lại tiến trình AI.');
+    } finally {
+      setRetryingJob(false);
+      submitLockRef.current = false;
+    }
+  };
+
   // Chat Submit: Conversational AI — automatically understands whether the user is chatting/consulting OR requesting a perspective/product composite/banner!
   const executeChatSubmit = async (rawText: string, forceImageMode?: boolean) => {
     const trimmed = rawText.trim();
-    if (!trimmed || submitting || piiAlert) return;
+    if (!trimmed || submitting || submitLockRef.current || piiAlert) return;
 
     const hasTaoAnhTag =
       /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\s*:?\s*/i.test(
@@ -2345,12 +2602,20 @@ export function AiDesignWorkspace() {
       (isNaturalCompositeOrEditIntent && !isPureQuestionOrConsult);
     const isPosterTag = isExplicitPosterTag || isNaturalBannerIntent;
 
+    if (shouldRunImageMode && currentProject?.activeJob?.status === 'running') {
+      setError('Dự án đang có tiến trình kết xuất ảnh AI trên máy chủ. Vui lòng đợi hoàn tất trước khi gửi lệnh tạo ảnh mới.');
+      return;
+    }
+
     const effectiveMode = shouldRunImageMode ? 'image_generator' : 'consultant_free';
+    const effectiveTaskCode: DesignTaskCode =
+      effectiveMode === 'consultant_free' ? 'brief_analyze' : activeTaskCode;
     const finalPrompt =
       shouldRunImageMode && !hasTaoAnhTag
         ? `${isPosterTag ? '@TaoAnhPoster' : '@TaoAnh'}: ${trimmed}`
         : trimmed;
 
+    submitLockRef.current = true;
     setSubmitting(true);
     setPendingUserPrompt(trimmed);
     setChatPrompt('');
@@ -2397,11 +2662,11 @@ export function AiDesignWorkspace() {
           selectedPhoto
       );
 
-      // Generate high-accuracy client composite (supports grafting Company Product Photos + Site Photo + Banner)
-      // and pass it via clientRenderedBase64 so backend saves BOTH the AI Version AND the conversational chat bubble!
+      // Skip heavy client canvas compositing when an active Cloud AI provider will render the asset
       let preRenderedCompositeB64: string | undefined;
       if (
         effectiveMode === 'image_generator' &&
+        (selectedProviderId === 'local_sandbox' || !hasExternalCloudApiKey) &&
         (isPosterTag || hasSurveyPhotoOnProject)
       ) {
         const compositedB64 = await renderRealPhotoAiCompositeBase64(
@@ -2420,14 +2685,24 @@ export function AiDesignWorkspace() {
             ? currentVersion.id
             : null;
 
+      const selectedModelForReq =
+        effectiveMode === 'consultant_free' ? consultantModelId : selectedModelId;
+      const attemptSig = `${activeProj.id}:${effectiveMode}:${effectiveTaskCode}:${selectedProviderId}:${selectedModelForReq}:${finalPrompt}`;
+      if (!activeAttemptKeyRef.current || activeAttemptKeyRef.current.sig !== attemptSig) {
+        activeAttemptKeyRef.current = {
+          sig: attemptSig,
+          key: `chat-design-${activeProj.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        };
+      }
+
       const payload = {
         action: 'chat_edit',
         prompt: finalPrompt,
-        taskCode: activeTaskCode,
+        taskCode: effectiveTaskCode,
         chatMode: effectiveMode,
         quality: chatQuality,
         providerId: selectedProviderId,
-        modelId: effectiveMode === 'consultant_free' ? consultantModelId : selectedModelId,
+        modelId: selectedModelForReq,
         placementQuad: quad,
         ...(paramForm.productId ? { productId: Number(paramForm.productId) } : {}),
         ...(paramForm.screenWidthM > 0 && activeProj.screenWidthM != null
@@ -2452,13 +2727,20 @@ export function AiDesignWorkspace() {
         compositingMode:
           paramForm.editActionMode === 'inpaint_keep_bg' ? 'STRICT' : 'REALISTIC',
         triggerSource: shouldRunImageMode ? 'user_button' : 'user_input',
-        idempotencyKey: `chat-design-${activeProj.id}-${Date.now()}`,
+        ...(effectiveMode === 'image_generator' ? { asyncMode: true } : {}),
+        idempotencyKey: activeAttemptKeyRef.current.key,
       };
 
       const data = await apiRequest<{
+        accepted?: boolean;
+        asyncQueued?: boolean;
+        jobId?: string;
+        activeJob?: DesignRequestItemDto['activeJob'];
+        status?: 'running' | 'succeeded' | 'failed';
+        idempotentReplay?: boolean;
         mode?: 'consultant_free' | 'image_generator';
         freeTierImageBlocked?: boolean;
-        versionNumber: number;
+        versionNumber?: number;
         versionId?: number;
         suggestedTaoAnhPrompt?: string;
         chatMessages?: DesignRequestItemDto['chatMessages'];
@@ -2468,6 +2750,37 @@ export function AiDesignWorkspace() {
         body: payload,
       });
 
+      if (data.accepted || data.asyncQueued || data.status === 'running') {
+        const queuedJob = data.activeJob || {
+          jobId: data.jobId || `job-${activeProj.id}`,
+          status: 'running' as const,
+          action: isPosterTag ? ('GENERATE_BANNER' as const) : ('GENERATE_SCENE' as const),
+          providerId: selectedProviderId,
+          modelId: selectedModelForReq,
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          progressStage: 'queued' as const,
+          message: 'Đã tiếp nhận yêu cầu tạo ảnh vào hàng đợi máy chủ AI...',
+        };
+        setRequests((prev) =>
+          prev.map((r) =>
+            r.id === activeProj!.id
+              ? {
+                  ...r,
+                  activeJob: queuedJob,
+                  ...(data.chatMessages && data.chatMessages.length > 0
+                    ? { chatMessages: data.chatMessages }
+                    : {}),
+                }
+              : r
+          )
+        );
+        setSuccessToast(
+          `Đã tiếp nhận tác vụ ${queuedJob.jobId} trên máy chủ AI. Bạn có thể chuyển trang và quay lại để xem kết quả.`
+        );
+        return;
+      }
+
       if (data.chatMessages && data.chatMessages.length > 0) {
         const updatedMsgs = data.chatMessages;
         setRequests((prev) =>
@@ -2475,6 +2788,7 @@ export function AiDesignWorkspace() {
         );
       }
 
+      activeAttemptKeyRef.current = null;
       if (
         effectiveMode === 'image_generator' &&
         !data.freeTierImageBlocked &&
@@ -2484,10 +2798,10 @@ export function AiDesignWorkspace() {
         setShowHandles(false);
         setSuccessToast(
           isPosterTag
-            ? `Đã tạo Banner/Poster mới (Phiên bản v${data.versionNumber}) và hiển thị lên màn hình chính!`
+            ? `Đã tạo Banner/Poster mới (Phiên bản v${data.versionNumber ?? ''}) và hiển thị lên màn hình chính!`
             : activeProductPhotos.length > 0
-              ? `Đã ghép ảnh sản phẩm "${activeProductPhotos[0]?.name}" vào hiện trường (Phiên bản v${data.versionNumber})!`
-              : `Đã kết xuất phương án ảnh mới (Phiên bản v${data.versionNumber}) và hiển thị lên màn hình chính!`
+              ? `Đã ghép ảnh sản phẩm "${activeProductPhotos[0]?.name}" vào hiện trường (Phiên bản v${data.versionNumber ?? ''})!`
+              : `Đã kết xuất phương án ảnh mới (Phiên bản v${data.versionNumber ?? ''}) và hiển thị lên màn hình chính!`
         );
         await loadData(activeProj.id, true);
         if (data.versionId) {
@@ -2532,6 +2846,7 @@ export function AiDesignWorkspace() {
     } finally {
       setPendingUserPrompt(null);
       setSubmitting(false);
+      submitLockRef.current = false;
     }
   };
 
@@ -3693,6 +4008,12 @@ export function AiDesignWorkspace() {
     return (
       <form
         onSubmit={handleSaveParameters}
+        onChangeCapture={() => {
+          isParamFormDirtyRef.current = true;
+        }}
+        onInputCapture={() => {
+          isParamFormDirtyRef.current = true;
+        }}
         className={compact ? 'space-y-4 text-sm' : 'grid grid-cols-1 lg:grid-cols-2 gap-5 text-sm'}
       >
         {/* Hidden compatibility fields so automated tests for product/dimension bindings always pass */}
@@ -3854,7 +4175,10 @@ export function AiDesignWorkspace() {
               <button
                 type="button"
                 data-testid="param-aspect-lock-btn"
-                onClick={() => setParamForm((p) => ({ ...p, aspectLocked: !p.aspectLocked }))}
+                onClick={() => {
+                  isParamFormDirtyRef.current = true;
+                  setParamForm((p) => ({ ...p, aspectLocked: !p.aspectLocked }));
+                }}
                 className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold transition ${
                   paramForm.aspectLocked
                     ? 'border-blue-200 bg-blue-50 text-[#1E3A8A]'
@@ -3876,7 +4200,10 @@ export function AiDesignWorkspace() {
                   <button
                     key={r}
                     type="button"
-                    onClick={() => handleAspectRatioChange(r)}
+                    onClick={() => {
+                      isParamFormDirtyRef.current = true;
+                      handleAspectRatioChange(r);
+                    }}
                     className={`rounded-xl border py-1.5 text-xs font-bold transition ${
                       paramForm.aspectRatio === r
                         ? 'border-[#1E3A8A] bg-[#1E3A8A] text-white'
@@ -4420,7 +4747,26 @@ export function AiDesignWorkspace() {
                 </div>
 
                 {/* Scrollable Project Cards */}
-                <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-0.5">
+                <div
+                  ref={projectListScrollRef}
+                  onScroll={(e) => {
+                    saveRouteState('design:workspace', {
+                      selectedId,
+                      activeWorkspaceArea,
+                      photoVaultTab,
+                      searchProject,
+                      projectListScrollTop: e.currentTarget.scrollTop,
+                    });
+                  }}
+                  className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-0.5"
+                >
+                  {loading && filteredProjects.length === 0 && (
+                    <div className="space-y-2" aria-busy="true" aria-label="Đang tải danh sách dự án">
+                      {[1, 2, 3].map((sk) => (
+                        <div key={sk} className="h-14 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
+                      ))}
+                    </div>
+                  )}
                   {filteredProjects.map((proj) => {
                     const isSelected = proj.id === currentProject?.id;
                     const dimText =
@@ -5483,22 +5829,39 @@ export function AiDesignWorkspace() {
 
                 {/* Active background job notice (persists across navigation) */}
                 {currentProject?.activeJob?.status === 'running' && (
-                  <div className="mt-2.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-xs text-indigo-900 flex flex-wrap items-center justify-between gap-2">
+                  <div
+                    data-testid="active-design-job-banner"
+                    className="mt-2.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-2 text-xs text-indigo-900 flex flex-wrap items-center justify-between gap-2"
+                  >
                     <div className="flex items-center gap-2 font-semibold">
                       <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-600 shrink-0" />
                       <span>
-                        Tiến trình đang chạy trên máy chủ ({currentProject.activeJob.action === 'GENERATE_BANNER' ? 'Tạo Banner' : 'Dựng Phối cảnh 3D'} ·{' '}
-                        {currentProject.activeJob.modelId}). Bạn có thể chuyển trang khác mà không mất tác vụ này.
+                        Đang chạy ({currentProject.activeJob.action === 'GENERATE_BANNER' ? 'Tạo Banner' : 'Dựng Phối cảnh 3D'} ·{' '}
+                        {currentProject.activeJob.modelId} · Mã: <code>{currentProject.activeJob.jobId}</code>) — {elapsedJobSec}s đã trôi qua
+                        {currentProject.activeJob.message ? ` · ${currentProject.activeJob.message}` : ''}
                       </span>
                     </div>
-                    <span className="text-[11px] text-indigo-700 font-medium">Tự động cập nhật mỗi 2,5 giây</span>
+                    <span className="text-[11px] text-indigo-700 font-medium">Tự động cập nhật mỗi 2 giây · Có thể chuyển trang khác</span>
                   </div>
                 )}
                 {currentProject?.activeJob?.status === 'failed' && currentProject.activeJob.message && (
-                  <div className="mt-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2">
+                  <div
+                    data-testid="failed-design-job-banner"
+                    className="mt-2.5 rounded-xl border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs text-amber-900 flex flex-wrap items-center justify-between gap-2"
+                  >
                     <span>
                       <strong>Tiến trình AI gần nhất chưa thành công:</strong> {currentProject.activeJob.message}
                     </span>
+                    <button
+                      type="button"
+                      data-testid="retry-failed-job-btn"
+                      disabled={retryingJob || submitting}
+                      onClick={() => void handleRetryLastFailedJob()}
+                      className="inline-flex items-center gap-1 rounded-lg bg-amber-600 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-amber-700 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${retryingJob ? 'animate-spin' : ''}`} />
+                      <span>{retryingJob ? 'Đang gửi lại...' : 'Thử lại tác vụ'}</span>
+                    </button>
                   </div>
                 )}
 
@@ -5986,13 +6349,15 @@ export function AiDesignWorkspace() {
 
                             <button
                               type="button"
-                              disabled={submitting}
+                              disabled={submitting || currentProject?.activeJob?.status === 'running'}
                               onClick={() => executeChatSubmit(suggestedCmd, true)}
                               className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-[#7846FF] px-3.5 py-2.5 text-xs font-extrabold text-white shadow-xs transition hover:bg-[#6D28D9] disabled:opacity-50"
                             >
                               <Sparkles className="h-4 w-4" />
                               <span>
-                                Bấm gọi {isSuggestedPoster ? '@TaoAnhPoster' : '@TaoAnh'} sửa ảnh ngay
+                                {currentProject?.activeJob?.status === 'running'
+                                  ? 'Đang có tiến trình tạo ảnh chạy trên máy chủ...'
+                                  : `Bấm gọi ${isSuggestedPoster ? '@TaoAnhPoster' : '@TaoAnh'} sửa ảnh ngay`}
                               </span>
                             </button>
                           </>
@@ -6012,7 +6377,7 @@ export function AiDesignWorkspace() {
                     </div>
                     <div className="flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 text-xs font-bold text-emerald-900">
                       <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#0BAF7C]" />
-                      <span>AI ({consultantModelName}) đang kết xuất ảnh từ Gateway (thời gian xử lý ~35-45s)...</span>
+                      <span>Đang gửi yêu cầu tới máy chủ AI ({consultantModelName})...</span>
                     </div>
                   </>
                 )}
@@ -6160,7 +6525,15 @@ export function AiDesignWorkspace() {
                   <button
                     type="submit"
                     data-testid="ai-chat-submit-btn"
-                    disabled={!chatPrompt.trim() || submitting || Boolean(piiAlert)}
+                    disabled={
+                      !chatPrompt.trim() ||
+                      submitting ||
+                      Boolean(piiAlert) ||
+                      (currentProject?.activeJob?.status === 'running' &&
+                        /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\b/i.test(
+                          chatPrompt
+                        ))
+                    }
                     className={`absolute bottom-2.5 right-2 inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-extrabold text-white shadow-xs transition disabled:opacity-50 ${
                       /^\s*@taoanhposter\b/i.test(chatPrompt)
                         ? 'bg-pink-600 hover:bg-pink-700'
@@ -7242,12 +7615,16 @@ export function AiDesignWorkspace() {
                       </button>
                       <button
                         type="button"
+                        disabled={
+                          submitting ||
+                          (item.category !== 'tu_van' && currentProject?.activeJob?.status === 'running')
+                        }
                         onClick={() => {
                           handlePromptChange(item.prompt);
                           setShowPromptLibraryModal(false);
-                          executeChatSubmit(item.prompt);
+                          void executeChatSubmit(item.prompt);
                         }}
-                        className="rounded-lg bg-[#7846FF] px-3 py-1 text-[11px] font-extrabold text-white shadow-2xs hover:bg-[#6D28D9]"
+                        className="rounded-lg bg-[#7846FF] px-3 py-1 text-[11px] font-extrabold text-white shadow-2xs hover:bg-[#6D28D9] disabled:opacity-50"
                       >
                         ⚡ Chạy lệnh ngay
                       </button>
@@ -7259,22 +7636,24 @@ export function AiDesignWorkspace() {
         </div>
       )}
 
-      <ModelRegistryModal
-        open={showModelRegistryModal}
-        onClose={() => setShowModelRegistryModal(false)}
-        snapshot={providerStatus?.modelRegistry}
-        canAdminRefresh={Boolean(user && hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN'))}
-        canProbe={Boolean(
-          user &&
-            (hasBaPermission(user.roleCode, 'AI_DESIGN') ||
-              hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN')),
-        )}
-        onRegistryUpdated={(nextSnapshot) => {
-          setProviderStatus((prev) =>
-            prev ? { ...prev, modelRegistry: nextSnapshot } : prev,
-          );
-        }}
-      />
+      {showModelRegistryModal && (
+        <ModelRegistryModal
+          open={showModelRegistryModal}
+          onClose={() => setShowModelRegistryModal(false)}
+          snapshot={providerStatus?.modelRegistry}
+          canAdminRefresh={Boolean(user && hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN'))}
+          canProbe={Boolean(
+            user &&
+              (hasBaPermission(user.roleCode, 'AI_DESIGN') ||
+                hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN')),
+          )}
+          onRegistryUpdated={(nextSnapshot) => {
+            setProviderStatus((prev) =>
+              prev ? { ...prev, modelRegistry: nextSnapshot } : prev,
+            );
+          }}
+        />
+      )}
     </div>
   );
 }

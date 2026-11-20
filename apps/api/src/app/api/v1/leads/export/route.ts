@@ -1,5 +1,6 @@
 import zlib from 'node:zlib';
 import { prisma } from '@toantrung/database';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { buildStandardXlsxBuffer } from '../../../../../core/export/xlsx-builder';
@@ -458,6 +459,8 @@ export async function GET(request: Request) {
     const missingProductOnly = url.searchParams.get('missingProduct') === '1';
     const salesIdParam = url.searchParams.get('salesId') || undefined;
     const productIdParam = url.searchParams.get('productId') || undefined;
+    const fromDateParam = url.searchParams.get('fromDate') || url.searchParams.get('from') || undefined;
+    const toDateParam = url.searchParams.get('toDate') || url.searchParams.get('to') || undefined;
 
     const isAnonymized = shouldAnonymizeLeadForRole(auth.user.roleCode);
 
@@ -472,6 +475,8 @@ export async function GET(request: Request) {
       missingProductOnly,
       salesId: salesIdParam,
       productId: productIdParam,
+      fromDateStr: fromDateParam,
+      toDateStr: toDateParam,
     });
 
     const dateStamp = new Date().toISOString().slice(0, 10);
@@ -832,6 +837,10 @@ export async function POST(request: Request) {
         }),
       },
     });
+
+    if (createdLeads.length > 0) {
+      bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'import_leads_xlsx');
+    }
 
     return jsonSuccess({
       createdCount: createdLeads.length,

@@ -9,6 +9,7 @@ import {
   getVietnamDateParts,
   resolveDatePresetRange,
 } from './reporting-dates';
+import { bumpDomainRevisions } from './cache/server-data-cache';
 
 const SENSITIVE_QUERY_PARAMS = new Set([
   'token',
@@ -79,15 +80,18 @@ function resolveFriendlyWebsiteName(domain: string, fallbackName?: string | null
   return domain;
 }
 
-let websitesMemCache: { expiresAt: number; items: WebsiteConfigItemDto[] } | null = null;
+const globalWebsites = globalThis as unknown as {
+  __toantrungWebsitesCache?: { expiresAt: number; items: WebsiteConfigItemDto[] } | null;
+};
 
 export function invalidateConfiguredWebsitesCache(): void {
-  websitesMemCache = null;
+  globalWebsites.__toantrungWebsitesCache = null;
+  bumpDomainRevisions(['websites', 'tracking', 'ads', 'reports'], 'websites_cache_invalidated');
 }
 
 export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
-  if (websitesMemCache && websitesMemCache.expiresAt > Date.now()) {
-    return websitesMemCache.items;
+  if (globalWebsites.__toantrungWebsitesCache && globalWebsites.__toantrungWebsitesCache.expiresAt > Date.now()) {
+    return globalWebsites.__toantrungWebsitesCache.items;
   }
 
   const byDomain = new Map<string, WebsiteConfigItemDto>();
@@ -170,7 +174,7 @@ export async function getConfiguredWebsites(): Promise<WebsiteConfigItemDto[]> {
   }
 
   const items = Array.from(byDomain.values());
-  websitesMemCache = { expiresAt: Date.now() + 60_000, items };
+  globalWebsites.__toantrungWebsitesCache = { expiresAt: Date.now() + 60_000, items };
   return items;
 }
 

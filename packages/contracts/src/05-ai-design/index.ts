@@ -285,6 +285,7 @@ export interface DesignActiveJobDto {
   finishedAt?: string | null;
   resultVersionNo?: number | null;
   fallbackUsed?: boolean;
+  idempotencyKey?: string | null;
   message?: string | null;
 }
 
@@ -537,6 +538,7 @@ export const ChatDesignRequestSchema = z.object({
   simulateAiTimeout: z.boolean().optional(),
   disableLocalFallback: z.boolean().optional(),
   idempotencyKey: z.string().trim().max(120).optional(),
+  asyncMode: z.boolean().optional(),
 });
 
 export type ChatDesignRequestDto = z.infer<typeof ChatDesignRequestSchema>;
@@ -554,6 +556,8 @@ export const RegenerateDesignDraftSchema = z.object({
   aspectRatio: z.string().trim().max(30).optional().nullable(),
   quality: z.enum(['draft', 'high_quality']).optional(),
   simulateAiTimeout: z.boolean().optional(),
+  asyncMode: z.boolean().optional(),
+  idempotencyKey: z.string().trim().max(120).optional(),
 });
 
 export type RegenerateDesignDraftDto = z.infer<typeof RegenerateDesignDraftSchema>;

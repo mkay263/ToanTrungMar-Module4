@@ -15,6 +15,7 @@ import {
   resolveDashboardScope,
   sanitizeLandingPageUrl,
 } from '../../core/website-catalog';
+import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import {
   classifyGscDateBySourceMetadata,
   getGoogleAdsApiConfig,
@@ -59,9 +60,19 @@ export async function getM03AdsSeoDashboardSpec(params?: {
   minImpr?: number;
   maxCtr?: number;
   roleCode?: RoleCode;
+  bypassCache?: boolean;
 }): Promise<M03AdsSeoDashboardDto> {
   const scope = await resolveDashboardScope(params);
-  const [googleConn, adsCfg, realAdsCatalogCount] = await Promise.all([
+  const cacheKey = `m03-spec:${params?.roleCode || 'ANON'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.contentPage || 1}:${params?.minImpr ?? 30}:${params?.maxCtr ?? 3}`;
+
+  const cached = await getOrComputeScopedCache<M03AdsSeoDashboardDto>({
+    key: cacheKey,
+    domains: ['ads', 'seo_articles', 'seo_reports', 'tracking', 'leads', 'websites'],
+    ttlMs: 30_000,
+    bypassCache: params?.bypassCache,
+    compute: async () => {
+      const checkedAt = new Date().toISOString();
+      const [googleConn, adsCfg, realAdsCatalogCount] = await Promise.all([
     getGoogleConnection(),
     getGoogleAdsApiConfig(),
     prisma.campaign.count({
@@ -515,9 +526,25 @@ export async function getM03AdsSeoDashboardSpec(params?: {
 
   const gscLogs = syncLogs.filter((s) => s.platform === 'search_console');
   const lastGscLog = gscLogs[0] || null;
-  const lastGscSuccess = gscLogs.find((s) => s.status === 'success') || null;
+  const lastGscSuccess = gscLogs.find((s) => s.status === 'success' || s.status === 'partial') || null;
   const isError = lastGscLog?.status === 'failed' && !hasGscData;
   const latestDataThrough = gscAccountCur[gscAccountCur.length - 1]?.metricDate || null;
+  const realLastSuccessAt = lastGscSuccess?.completedAt?.toISOString() || null;
+
+  // Derive FINALIZED / PRELIMINARY honestly from GSC dataState metadata when available
+  let hasPreliminaryGsc = false;
+  if (hasGscData && latestDataThrough) {
+    for (const sUrl of gscSites) {
+      const meta = gscMetaMap[sUrl] || null;
+      const cls = classifyGscDateBySourceMetadata(latestDataThrough, meta);
+      if (cls !== 'FINALIZED') {
+        hasPreliminaryGsc = true;
+        break;
+      }
+    }
+  } else if (scope.isTodayIncluded) {
+    hasPreliminaryGsc = true;
+  }
 
   return {
     scope: {
@@ -534,14 +561,18 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       previousEndDate: scope.prevEndDateStr,
     },
     freshness: {
-      lastCheckedAt: lastGscLog?.startedAt?.toISOString() || new Date().toISOString(),
-      lastSuccessAt: lastGscSuccess?.completedAt?.toISOString() || null,
+      lastCheckedAt: checkedAt,
+      checkedAt,
+      lastSuccessAt: realLastSuccessAt,
+      lastSyncedAt: realLastSuccessAt,
       dataThrough: latestDataThrough,
+      latestSourceDataAt: latestDataThrough,
+      fromCache: false,
       state: isError
         ? 'ERROR'
         : !hasGscData
           ? 'NO_DATA'
-          : scope.isTodayIncluded
+          : hasPreliminaryGsc || scope.isTodayIncluded
             ? 'PRELIMINARY'
             : 'FINALIZED',
       statusMessage: isError
@@ -690,4 +721,19 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       };
     })(),
   };
+    },
+  });
+
+  if (cached.fromCache) {
+    return {
+      ...cached.data,
+      freshness: {
+        ...cached.data.freshness,
+        lastCheckedAt: new Date().toISOString(),
+        checkedAt: new Date().toISOString(),
+        fromCache: true,
+      },
+    };
+  }
+  return cached.data;
 }

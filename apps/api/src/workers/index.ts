@@ -13,14 +13,11 @@ import path from 'node:path';
 import { prisma } from '@toantrung/database';
 import { AiDesignProviderFactory } from '../modules/05-ai-design/providers';
 import { upsertActionableNotification } from '../core/notifications/service';
+import { bumpDomainRevisions, getVietnamDateKey } from '../core/cache/server-data-cache';
 import {
   retryUnresolvedGclids,
   triggerPlatformSyncExecution,
 } from '../modules/02-tracking-sync/service';
-import {
-  getGoogleConnection,
-  syncAllGoogleDataAcrossModules,
-} from '../modules/02-tracking-sync/google-oauth.service';
 import {
   publishArticleViaWordPressAdapter,
   refreshKeywordDerivedCacheFromCanonicalMetrics,
@@ -34,12 +31,6 @@ import {
  * 1. Đồng bộ D3 đầy đủ (02:00) hoặc nhẹ (11:00 / 17:00)
  */
 export async function runScheduledD3SyncJob(slot: 'FULL_0200' | 'LIGHT_1100' | 'LIGHT_1700') {
-  const googleConn = await getGoogleConnection();
-  if (googleConn?.connected) {
-    // If Google OAuth is connected, sync using OAuth tokens
-    await syncAllGoogleDataAcrossModules(slot);
-  }
-
   const result = await triggerPlatformSyncExecution({
     scheduleSlot: slot,
     platforms: ['GOOGLE_ADS', 'GA4', 'SEARCH_CONSOLE', 'FANPAGE', 'GOOGLE_TRENDS'],
@@ -48,10 +39,7 @@ export async function runScheduledD3SyncJob(slot: 'FULL_0200' | 'LIGHT_1100' | '
   });
 
   await refreshKeywordDerivedCacheFromCanonicalMetrics({ force: true });
-
-  if (slot === 'FULL_0200') {
-    await runDailyGoogleLeadFormReconciliationJob();
-  }
+  bumpDomainRevisions(['tracking', 'ads', 'reports', 'leads', 'websites'], `d3_sync_${slot}`);
 
   return result;
 }
@@ -60,7 +48,11 @@ export async function runScheduledD3SyncJob(slot: 'FULL_0200' | 'LIGHT_1100' | '
  * 2. Tra lại gclid mỗi giờ cho Lead <= 7 ngày (UC03 A2)
  */
 export async function runHourlyGclidRetryJob() {
-  return retryUnresolvedGclids();
+  const res = await retryUnresolvedGclids();
+  if (res.resolved > 0) {
+    bumpDomainRevisions(['leads', 'tracking', 'reports'], 'gclid_retry_resolved');
+  }
+  return res;
 }
 
 /**
@@ -181,6 +173,10 @@ export async function runScheduledSeoPublishJob() {
     }
   }
 
+  if (publishedCount > 0) {
+    bumpDomainRevisions(['seo_articles', 'ads', 'reports', 'notifications'], 'seo_scheduled_publish');
+  }
+
   return { scanned: dueArticles.length, publishedCount };
 }
 
@@ -232,6 +228,10 @@ export async function runDailyOverdueQuoteReminderJob() {
       where: { id: lead.id },
       data: { lastQuoteReminderAt: now },
     });
+  }
+
+  if (notifiedCount > 0) {
+    bumpDomainRevisions(['leads', 'notifications'], 'overdue_quote_reminder');
   }
 
   return { scanned: overdueLeads.length, notifiedCount };
@@ -459,5 +459,79 @@ export async function getWorkerJobsHistory(limit = 10): Promise<WorkerJobHistory
       executedAt: l.createdAt.toISOString(),
     };
   });
+}
+
+const globalForInternalWorkers = globalThis as unknown as {
+  __toantrungInternalWorkersStarted?: boolean;
+  __toantrungSeoPublishRunning?: boolean;
+  __toantrungGclidRetryRunning?: boolean;
+  __toantrungQuoteReminderRunning?: boolean;
+  __toantrungLastOverdueQuoteVnDay?: string;
+};
+
+/**
+ * Khởi chạy bộ lập lịch nội bộ độc lập với trình duyệt (mỗi timer unref() + khóa chống chạy chồng).
+ */
+export function ensureInternalWorkersSchedulerStarted(): void {
+  if (process.env.NODE_TEST_CONTEXT) return;
+  if (globalForInternalWorkers.__toantrungInternalWorkersStarted) return;
+  globalForInternalWorkers.__toantrungInternalWorkersStarted = true;
+
+  const runSeoPublishTick = async () => {
+    if (globalForInternalWorkers.__toantrungSeoPublishRunning) return;
+    globalForInternalWorkers.__toantrungSeoPublishRunning = true;
+    try {
+      await runScheduledSeoPublishJob();
+    } catch {
+      // ignore scheduler error so process stays healthy
+    } finally {
+      globalForInternalWorkers.__toantrungSeoPublishRunning = false;
+    }
+  };
+
+  const runGclidRetryTick = async () => {
+    if (globalForInternalWorkers.__toantrungGclidRetryRunning) return;
+    globalForInternalWorkers.__toantrungGclidRetryRunning = true;
+    try {
+      await runHourlyGclidRetryJob();
+    } catch {
+      // ignore scheduler error so process stays healthy
+    } finally {
+      globalForInternalWorkers.__toantrungGclidRetryRunning = false;
+    }
+  };
+
+  const runQuoteReminderTick = async () => {
+    if (globalForInternalWorkers.__toantrungQuoteReminderRunning) return;
+    const now = new Date();
+    const vnHour = (now.getUTCHours() + 7) % 24;
+    const vnDay = getVietnamDateKey(now);
+    if (vnHour !== 8 || globalForInternalWorkers.__toantrungLastOverdueQuoteVnDay === vnDay) {
+      return;
+    }
+    globalForInternalWorkers.__toantrungQuoteReminderRunning = true;
+    globalForInternalWorkers.__toantrungLastOverdueQuoteVnDay = vnDay;
+    try {
+      await runDailyOverdueQuoteReminderJob();
+    } catch {
+      // ignore scheduler error
+    } finally {
+      globalForInternalWorkers.__toantrungQuoteReminderRunning = false;
+    }
+  };
+
+  const seoTimer = setInterval(() => {
+    void runSeoPublishTick();
+  }, 5 * 60 * 1000);
+  const gclidTimer = setInterval(() => {
+    void runGclidRetryTick();
+  }, 60 * 60 * 1000);
+  const quoteTimer = setInterval(() => {
+    void runQuoteReminderTick();
+  }, 30 * 60 * 1000);
+
+  if (typeof seoTimer.unref === 'function') seoTimer.unref();
+  if (typeof gclidTimer.unref === 'function') gclidTimer.unref();
+  if (typeof quoteTimer.unref === 'function') quoteTimer.unref();
 }
 

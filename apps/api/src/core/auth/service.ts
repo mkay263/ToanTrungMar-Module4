@@ -14,6 +14,7 @@ import type {
 } from '@toantrung/contracts';
 import { APP_CONFIG } from '../config';
 import { recordAuditLog } from '../audit';
+import { bumpDomainRevisions } from '../cache/server-data-cache';
 import { validateAndSanitizeImageBuffer } from '../storage/image-validator';
 import {
   generateSessionTokens,
@@ -49,20 +50,63 @@ function getAvatarDir(): string {
 
 const SETTING_KEY_USER_COVERS = 'user_profile_covers_v1';
 
+interface CachedSessionRecord {
+  expiresAtMs: number;
+  sessionExpiresAtMs: number;
+  value: {
+    sessionId: string;
+    user: SessionUserDto;
+  };
+}
+
+const globalAuthMemo = globalThis as unknown as {
+  __toantrungCoverMapCache?: { expiresAt: number; data: Record<string, string> } | null;
+  __toantrungSessionCache?: Map<string, CachedSessionRecord>;
+};
+
+function getSessionCacheMap(): Map<string, CachedSessionRecord> {
+  if (!globalAuthMemo.__toantrungSessionCache) {
+    globalAuthMemo.__toantrungSessionCache = new Map<string, CachedSessionRecord>();
+  }
+  return globalAuthMemo.__toantrungSessionCache;
+}
+
+export function invalidateAuthRuntimeCaches(userId?: number): void {
+  const map = getSessionCacheMap();
+  if (typeof userId === 'number') {
+    for (const [k, v] of map.entries()) {
+      if (v.value.user.id === userId) {
+        map.delete(k);
+      }
+    }
+  } else {
+    map.clear();
+  }
+}
+
 export async function getUserCoverMap(): Promise<Record<string, string>> {
+  const cached = globalAuthMemo.__toantrungCoverMapCache;
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.data;
+  }
   try {
     const row = await prisma.systemSetting.findUnique({
       where: { key: SETTING_KEY_USER_COVERS },
     });
-    if (!row?.value) return {};
-    const parsed = JSON.parse(row.value) as Record<string, string>;
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    const parsed = row?.value ? (JSON.parse(row.value) as Record<string, string>) : {};
+    const out = parsed && typeof parsed === 'object' ? parsed : {};
+    globalAuthMemo.__toantrungCoverMapCache = {
+      expiresAt: Date.now() + 60_000,
+      data: out,
+    };
+    return out;
   } catch {
     return {};
   }
 }
 
 export async function setUserCoverUrl(userId: number, coverUrl: string | null): Promise<void> {
+  globalAuthMemo.__toantrungCoverMapCache = null;
   const map = await getUserCoverMap();
   if (!coverUrl) {
     delete map[String(userId)];
@@ -75,6 +119,12 @@ export async function setUserCoverUrl(userId: number, coverUrl: string | null): 
     update: { value },
     create: { key: SETTING_KEY_USER_COVERS, value },
   });
+  globalAuthMemo.__toantrungCoverMapCache = {
+    expiresAt: Date.now() + 60_000,
+    data: { ...map },
+  };
+  invalidateAuthRuntimeCaches(userId);
+  bumpDomainRevisions(['auth'], 'user_cover_updated');
 }
 
 export async function authenticateUser(input: {
@@ -161,16 +211,31 @@ export async function resolveSessionFromToken(rawToken: string | undefined | nul
 } | null> {
   if (!rawToken) return null;
   const tokenHash = hashSessionToken(rawToken);
-  const session = await findActiveSessionByTokenHash(tokenHash);
-  if (!session) return null;
-  if (session.revokedAt || session.expiresAt.getTime() <= Date.now()) {
+  const now = Date.now();
+  const sessionCache = getSessionCacheMap();
+  const cached = sessionCache.get(tokenHash);
+  if (cached && cached.expiresAtMs > now && cached.sessionExpiresAtMs > now) {
+    return cached.value;
+  }
+
+  const [session, coverMap] = await Promise.all([
+    findActiveSessionByTokenHash(tokenHash),
+    getUserCoverMap(),
+  ]);
+  if (!session) {
+    sessionCache.delete(tokenHash);
+    return null;
+  }
+  if (session.revokedAt || session.expiresAt.getTime() <= now) {
+    sessionCache.delete(tokenHash);
     return null;
   }
   if (!session.user.isActive || session.user.deletedAt) {
+    sessionCache.delete(tokenHash);
     return null;
   }
-  const coverMap = await getUserCoverMap();
-  return {
+
+  const resolved = {
     sessionId: session.id,
     user: {
       id: session.user.id,
@@ -186,11 +251,24 @@ export async function resolveSessionFromToken(rawToken: string | undefined | nul
       csrfToken: session.csrfToken,
     },
   };
+
+  if (sessionCache.size > 500) {
+    const oldestKey = sessionCache.keys().next().value;
+    if (oldestKey !== undefined) sessionCache.delete(oldestKey);
+  }
+  sessionCache.set(tokenHash, {
+    expiresAtMs: now + 10_000,
+    sessionExpiresAtMs: session.expiresAt.getTime(),
+    value: resolved,
+  });
+
+  return resolved;
 }
 
 export async function logoutByToken(rawToken: string | undefined | null, ipAddress?: string) {
   if (!rawToken) return;
   const tokenHash = hashSessionToken(rawToken);
+  getSessionCacheMap().delete(tokenHash);
   const existing = await findActiveSessionByTokenHash(tokenHash);
   await revokeSessionByTokenHash(tokenHash);
   if (existing) {
@@ -240,6 +318,8 @@ export async function updateOwnProfile(
     ipAddress,
   });
 
+  invalidateAuthRuntimeCaches(userId);
+  bumpDomainRevisions(['auth'], 'profile_updated');
   return updated;
 }
 
@@ -318,6 +398,8 @@ export async function uploadOwnAvatar(input: {
     ipAddress: input.ipAddress,
   });
 
+  invalidateAuthRuntimeCaches(input.userId);
+  bumpDomainRevisions(['auth'], 'avatar_updated');
   return updated;
 }
 
@@ -344,6 +426,7 @@ export async function changeOwnPassword(
   });
 
   await revokeAllUserSessionsExcept(userId, currentSessionId);
+  invalidateAuthRuntimeCaches(userId);
 
   await recordAuditLog({
     actorUserId: userId,
@@ -464,6 +547,9 @@ export async function createAdminUser(
     ipAddress,
   });
 
+  invalidateAuthRuntimeCaches();
+  bumpDomainRevisions(['auth', 'leads', 'notifications'], 'admin_user_created');
+
   return {
     id: created.id,
     fullName: created.fullName,
@@ -558,6 +644,8 @@ export async function updateAdminUser(
   ) {
     await revokeAllUserSessionsExcept(updated.id);
   }
+  invalidateAuthRuntimeCaches(updated.id);
+  bumpDomainRevisions(['auth', 'leads'], 'admin_user_updated');
 
   await recordAuditLog({
     actorUserId,
@@ -665,6 +753,9 @@ export async function deleteAdminUser(
     },
     ipAddress,
   });
+
+  invalidateAuthRuntimeCaches(deletedTarget.id);
+  bumpDomainRevisions(['auth', 'leads'], 'admin_user_deleted');
 
   return {
     deletedId: deletedTarget.id,

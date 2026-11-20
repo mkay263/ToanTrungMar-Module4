@@ -127,8 +127,10 @@ export async function PATCH(
     }
 
     if (action === 'retry_last_failed') {
-      const res = await retryLastFailedDesignGeneration(auth.user, requestId);
-      return jsonSuccess(res);
+      const res = await retryLastFailedDesignGeneration(auth.user, requestId, Boolean(raw.asyncMode));
+      const statusCode =
+        res && typeof res === 'object' && 'accepted' in res && res.accepted ? 202 : 200;
+      return jsonSuccess(res, statusCode);
     }
 
     if (action === 'chat_edit') {
@@ -141,7 +143,9 @@ export async function PATCH(
         );
       }
       const res = await processChatDesignRequest(auth.user, requestId, parsed.data);
-      return jsonSuccess(res);
+      const statusCode =
+        res && typeof res === 'object' && 'accepted' in res && res.accepted ? 202 : 200;
+      return jsonSuccess(res, statusCode);
     }
 
     if (action === 'approve_version' || action === 'save_finished') {
@@ -180,7 +184,9 @@ export async function PATCH(
     }
 
     const res = await regenerateDesignDraftByAi(auth.user, requestId, parsed.data);
-    return jsonSuccess(res);
+    const statusCode =
+      res && typeof res === 'object' && 'accepted' in res && res.accepted ? 202 : 200;
+    return jsonSuccess(res, statusCode);
   } catch (err) {
     if (err instanceof ForbiddenDesignProjectAccessError) {
       return jsonError('FORBIDDEN_PROJECT_ACCESS', err.message, 403);

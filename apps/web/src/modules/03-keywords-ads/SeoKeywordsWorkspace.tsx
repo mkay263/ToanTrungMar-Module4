@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import {
   AlertCircle,
@@ -21,14 +22,35 @@ import {
   formatSafePeriodComparison,
   type M03AdsSeoDashboardDto,
   type SeoArticleStatus,
+  type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
-import { apiRequest, clearAllApiCache, peekApiCache, prefetchApiCache } from '@/core/http/client';
+import { apiRequest, invalidateApiCacheByDomains, peekApiCacheEntry } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
+import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
-import { StockAreaChart } from '@/components/common/StockAreaChart';
-import { SeoAiReportPanel } from './SeoAiReportPanel';
+
+const StockAreaChart = dynamic(
+  () => import('@/components/common/StockAreaChart').then((m) => m.StockAreaChart),
+  {
+    ssr: false,
+    loading: () => <div className="h-[265px] rounded-xl bg-slate-50 animate-pulse" />,
+  },
+);
+
+const SeoAiReportPanel = dynamic(
+  () => import('./SeoAiReportPanel').then((m) => m.SeoAiReportPanel),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-2xl bg-white p-8 border border-slate-200 shadow-lg text-xs text-slate-500">
+        Đang mở trình phân tích SEO AI...
+      </div>
+    ),
+  },
+);
 
 type SeoWorkspaceTab = 'queries' | 'pages' | 'content' | 'trends';
 type SeoChartMetric = 'clicks' | 'impressions';
@@ -72,14 +94,31 @@ export function SeoKeywordsWorkspace() {
   const { scope, hydrated, updateScope } = useDashboardScope();
   const canEditContent = user?.roleCode !== 'ADS';
 
-  const [activeTab, setActiveTab] = useState<SeoWorkspaceTab>('queries');
-  const [chartMetric, setChartMetric] = useState<SeoChartMetric>('clicks');
+  const [activeTab, setActiveTab] = useState<SeoWorkspaceTab>(() => {
+    if (typeof window !== 'undefined') {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      if (t === 'queries' || t === 'pages' || t === 'content' || t === 'trends') return t;
+      const saved = loadRouteState<{ activeTab?: SeoWorkspaceTab }>('ads');
+      if (saved?.activeTab) return saved.activeTab;
+    }
+    return 'queries';
+  });
+  const [chartMetric, setChartMetric] = useState<SeoChartMetric>(
+    () => loadRouteState<{ chartMetric?: SeoChartMetric }>('ads')?.chartMetric || 'clicks',
+  );
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [showUrlInspect, setShowUrlInspect] = useState(false);
   const [showCreateContentForm, setShowCreateContentForm] = useState(false);
 
-  const [page, setPage] = useState(1);
-  const [contentPage, setContentPage] = useState(1);
+  const [queriesPage, setQueriesPage] = useState(
+    () => loadRouteState<{ queriesPage?: number }>('ads')?.queriesPage || 1,
+  );
+  const [pagesPage, setPagesPage] = useState(
+    () => loadRouteState<{ pagesPage?: number }>('ads')?.pagesPage || 1,
+  );
+  const [contentPage, setContentPage] = useState(
+    () => loadRouteState<{ contentPage?: number }>('ads')?.contentPage || 1,
+  );
   const [searchTerm, setSearchTerm] = useState('');
 
   // Ngưỡng gợi ý cơ hội cấu hình được (không hardcode cố định)
@@ -103,96 +142,165 @@ export function SeoKeywordsWorkspace() {
   const [serpApiKeyInput, setSerpApiKeyInput] = useState('');
   const [savingSerpKey, setSavingSerpKey] = useState(false);
 
+  const activeGscPage = activeTab === 'pages' ? pagesPage : queriesPage;
   const apiPath = useMemo(
-    () => buildM03ApiPath(scope, page, contentPage, appliedMinImpr, appliedMaxCtr),
-    [scope, page, contentPage, appliedMinImpr, appliedMaxCtr],
+    () => buildM03ApiPath(scope, activeGscPage, contentPage, appliedMinImpr, appliedMaxCtr),
+    [scope, activeGscPage, contentPage, appliedMinImpr, appliedMaxCtr],
   );
+  const activePathRef = useRef<string>(apiPath);
+  activePathRef.current = apiPath;
+  const reqSeqRef = useRef<number>(0);
+  const prevScopeSigRef = useRef<string>(`${scope.websiteId}|${scope.preset}|${scope.from}|${scope.to}`);
+  const scrollRestoredRef = useRef<boolean>(false);
 
-  const [data, setData] = useState<M03AdsSeoDashboardDto | null>(() =>
-    peekApiCache<M03AdsSeoDashboardDto>(apiPath),
+  const [dataState, setDataState] = useState<{
+    path: string;
+    data: M03AdsSeoDashboardDto;
+  } | null>(() => {
+    const cached = peekApiCacheEntry<M03AdsSeoDashboardDto>(apiPath);
+    return cached ? { path: apiPath, data: cached.data } : null;
+  });
+  const data = dataState && dataState.path === apiPath ? dataState.data : null;
+
+  const [knownWebsites, setKnownWebsites] = useState<WebsiteConfigItemDto[]>(
+    () => peekApiCacheEntry<M03AdsSeoDashboardDto>(apiPath)?.data.coverage.availableWebsites || [],
   );
-  const [loading, setLoading] = useState<boolean>(() => !peekApiCache<M03AdsSeoDashboardDto>(apiPath));
+  const [loading, setLoading] = useState<boolean>(
+    () => !peekApiCacheEntry<M03AdsSeoDashboardDto>(apiPath),
+  );
   const [refreshing, setRefreshing] = useState(false);
+  const [checkedAtIso, setCheckedAtIso] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    setPage(1);
-    setContentPage(1);
+    const nextSig = `${scope.websiteId}|${scope.preset}|${scope.from}|${scope.to}`;
+    if (prevScopeSigRef.current !== nextSig) {
+      prevScopeSigRef.current = nextSig;
+      setQueriesPage(1);
+      setPagesPage(1);
+      setContentPage(1);
+    }
   }, [scope.websiteId, scope.preset, scope.from, scope.to]);
 
+  useEffect(() => {
+    const entry = peekApiCacheEntry<M03AdsSeoDashboardDto>(apiPath);
+    if (entry) {
+      setDataState({ path: apiPath, data: entry.data });
+      if (entry.data.coverage.availableWebsites?.length) {
+        setKnownWebsites(entry.data.coverage.availableWebsites);
+      }
+      setCheckedAtIso(new Date(entry.timestamp).toISOString());
+      setLoading(false);
+      setRefreshing(false);
+    } else {
+      // Xóa trạng thái cũ ngay lập tức khi sang website/khoảng ngày chưa cache
+      setDataState(null);
+      setLoading(true);
+    }
+  }, [apiPath]);
+
   const fetchDashboard = useCallback(
-    async (forceFresh = false, signal?: AbortSignal) => {
+    async (opts?: { forceFresh?: boolean; silent?: boolean; signal?: AbortSignal } | boolean) => {
+      const normalized =
+        typeof opts === 'boolean' ? { forceFresh: opts } : opts || {};
       if (!hydrated) return;
-      const cached = !forceFresh ? peekApiCache<M03AdsSeoDashboardDto>(apiPath) : null;
-      if (cached) {
-        setData(cached);
-        setLoading(false);
-        setRefreshing(false);
-      } else {
+      if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
+
+      const requestPath = apiPath;
+      const seq = ++reqSeqRef.current;
+      if (normalized.forceFresh && !normalized.silent) {
         setRefreshing(true);
       }
-      setErrorMsg(null);
+      if (!normalized.silent) setErrorMsg(null);
       try {
-        const res = await apiRequest<M03AdsSeoDashboardDto>(apiPath, {
-          skipCache: forceFresh,
-          signal,
+        const res = await apiRequest<M03AdsSeoDashboardDto>(requestPath, {
+          skipCache: Boolean(normalized.forceFresh || normalized.silent),
+          signal: normalized.signal,
+          onRevalidated: (fresh) => {
+            if (activePathRef.current !== requestPath) return;
+            setDataState({ path: requestPath, data: fresh });
+            if (fresh.coverage.availableWebsites?.length) {
+              setKnownWebsites(fresh.coverage.availableWebsites);
+            }
+            setCheckedAtIso(new Date().toISOString());
+          },
         });
-        if (signal?.aborted) return;
-        setData(res);
+        if (
+          normalized.signal?.aborted ||
+          seq !== reqSeqRef.current ||
+          activePathRef.current !== requestPath
+        ) {
+          return;
+        }
+        setDataState({ path: requestPath, data: res });
+        if (res.coverage.availableWebsites?.length) {
+          setKnownWebsites(res.coverage.availableWebsites);
+        }
+        setCheckedAtIso(new Date().toISOString());
       } catch (err) {
-        if (signal?.aborted) return;
-        setErrorMsg(err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError);
+        if (
+          normalized.signal?.aborted ||
+          (err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        if (seq === reqSeqRef.current && !normalized.silent) {
+          setErrorMsg(err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError);
+        }
       } finally {
-        if (!signal?.aborted) {
+        if (!normalized.signal?.aborted && seq === reqSeqRef.current) {
           setLoading(false);
           setRefreshing(false);
         }
       }
     },
-    [apiPath, hydrated],
+    [apiPath, hydrated, scope.preset, scope.from, scope.to],
   );
 
   useEffect(() => {
     if (!hydrated) return;
-    const controller = new AbortController();
-    void fetchDashboard(false, controller.signal);
-    return () => controller.abort();
-  }, [fetchDashboard, hydrated]);
+    if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
 
-  // Nạp trước ngầm (prefetch) các mốc ngày còn lại & Module 2 (Chiến dịch) để chuyển qua lại tức thì
+    const controller = new AbortController();
+    const cached = peekApiCacheEntry<M03AdsSeoDashboardDto>(apiPath);
+    if (!cached || !cached.isFresh) {
+      void fetchDashboard({ forceFresh: false, silent: Boolean(cached), signal: controller.signal });
+    }
+
+    const unsubscribe = subscribeDataSync(
+      ['ads', 'seo_articles', 'seo_reports', 'tracking', 'websites'],
+      () => {
+        void fetchDashboard({ forceFresh: true, silent: true });
+      },
+    );
+
+    return () => {
+      controller.abort();
+      unsubscribe();
+    };
+  }, [hydrated, apiPath, scope.preset, scope.from, scope.to, fetchDashboard]);
+
   useEffect(() => {
-    if (!hydrated || !data) return;
-    const timer = window.setTimeout(() => {
-      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
-      for (const preset of presets) {
-        if (preset === scope.preset) continue;
-        prefetchApiCache(
-          buildM03ApiPath(
-            { websiteId: scope.websiteId || 'all', preset, from: '', to: '' },
-            1,
-            1,
-            appliedMinImpr,
-            appliedMaxCtr,
-          ),
-        );
+    saveRouteState('ads', { activeTab, chartMetric, queriesPage, pagesPage, contentPage });
+  }, [activeTab, chartMetric, queriesPage, pagesPage, contentPage]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const scroller = document.getElementById('main-workspace-content');
+    if (!scroller) return;
+    if (!scrollRestoredRef.current && data) {
+      scrollRestoredRef.current = true;
+      const saved = loadRouteState<{ scrollTop?: number }>('ads_scroll');
+      if (saved?.scrollTop && saved.scrollTop > 0) {
+        requestAnimationFrame(() => {
+          scroller.scrollTop = saved.scrollTop ?? 0;
+        });
       }
-      const m02Qs = new URLSearchParams({
-        view: 'spec',
-        websiteId: scope.websiteId || 'all',
-        preset: scope.preset || '7D',
-        page: '1',
-        pageSize: '20',
-        adsPage: '1',
-        adsPageSize: '20',
-      });
-      if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
-        m02Qs.set('from', scope.from);
-        m02Qs.set('to', scope.to);
-      }
-      prefetchApiCache(`/api/v1/tracking?${m02Qs.toString()}`);
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [hydrated, Boolean(data), scope.websiteId, scope.preset, scope.from, scope.to, appliedMinImpr, appliedMaxCtr]);
+    }
+    return () => {
+      saveRouteState('ads_scroll', { scrollTop: scroller.scrollTop });
+    };
+  }, [data]);
 
   const seo = data?.seo;
   const clicksComparison = formatSafePeriodComparison(
@@ -303,7 +411,6 @@ export function SeoKeywordsWorkspace() {
       setNewKeywordText('');
       setNewTopicFocus('');
       setShowCreateContentForm(false);
-      clearAllApiCache();
       await fetchDashboard(true);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Không thể tạo bản nháp nội dung.');
@@ -346,18 +453,48 @@ export function SeoKeywordsWorkspace() {
         : activeTab === 'content'
           ? seo?.tables.content?.totalRows || 0
           : 0;
-  const currentPageNum = activeTab === 'content' ? contentPage : page;
+  const currentPageNum =
+    activeTab === 'content'
+      ? contentPage
+      : activeTab === 'pages'
+        ? pagesPage
+        : queriesPage;
   const totalPages = Math.max(1, Math.ceil(activeTotalRows / 20));
 
   return (
     <div className="space-y-4 pb-8">
       <WebsiteDashboardHeader
         title="Từ khóa & SEO"
-        subtitle="Trang / từ khóa nào cần cải thiện? · Tạo báo cáo AI có căn cứ và đề xuất công việc nội dung"
+        subtitle={
+          data
+            ? `Trang / từ khóa nào cần cải thiện? · ${data.scope.startDate} → ${data.scope.endDate}`
+            : 'Trang / từ khóa nào cần cải thiện? · Tạo báo cáo AI có căn cứ và đề xuất công việc nội dung'
+        }
         scope={scope}
-        availableWebsites={data?.coverage.availableWebsites || []}
-        freshnessMessage={data?.freshness.statusMessage}
-        freshnessTone={refreshing || loading ? 'updating' : data?.freshness.state === 'ERROR' ? 'error' : 'ok'}
+        availableWebsites={data?.coverage.availableWebsites || knownWebsites}
+        freshnessMessage={
+          loading && !data
+            ? UI_VOCABULARY.freshness.updating
+            : refreshing
+              ? UI_VOCABULARY.freshness.updating
+              : data?.freshness.statusMessage
+        }
+        freshnessDetail={{
+          checkedAt: checkedAtIso,
+          lastSyncedAt: data?.freshness.lastSyncedAt || data?.freshness.lastSuccessAt || null,
+          latestSourceDataAt:
+            data?.freshness.latestSourceDataAt ||
+            data?.freshness.dataThrough ||
+            data?.scope.endDate ||
+            null,
+        }}
+        freshnessTone={
+          errorMsg || data?.freshness.state === 'ERROR'
+            ? 'error'
+            : refreshing || loading
+              ? 'updating'
+              : 'ok'
+        }
         onChangeScope={updateScope}
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -422,6 +559,7 @@ export function SeoKeywordsWorkspace() {
               csrfToken={user?.csrfToken}
               initialWebsite={scope.websiteId}
               initialPeriodDays={scope.preset === '7D' ? 7 : 30}
+              availableWebsites={data?.coverage.availableWebsites || knownWebsites}
               canEditContent={canEditContent}
               onClose={() => setShowAiPanel(false)}
               onSelectKeyword={(kw) => {
@@ -430,7 +568,6 @@ export function SeoKeywordsWorkspace() {
                 setShowAiPanel(false);
               }}
               onContentCreated={() => {
-                clearAllApiCache();
                 void fetchDashboard(true);
               }}
             />
@@ -802,7 +939,10 @@ export function SeoKeywordsWorkspace() {
       </section>
 
       {/* Bảng dữ liệu chính với 4 tab ngắn: Từ khóa · Trang · Nội dung · Xu hướng */}
-      <section className="bg-white border border-slate-200 rounded-[12px] shadow-2xs overflow-hidden">
+      <section
+        className="bg-white border border-slate-200 rounded-[12px] shadow-2xs overflow-hidden"
+        style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 380px' }}
+      >
         <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
           <div role="tablist" aria-label="Phân mục Từ khóa & SEO" className="flex flex-wrap items-center gap-1.5">
             {(
@@ -1152,7 +1292,7 @@ export function SeoKeywordsWorkspace() {
                           setContentStatusMsg(
                             `Đã nhập ${res.importedRows} mốc chỉ số Google Trends (0–100) cho: ${res.terms.join(', ')}`,
                           );
-                          clearAllApiCache();
+                          invalidateApiCacheByDomains(['ads']);
                           await fetchDashboard(true);
                         } catch (err) {
                           setErrorMsg(
@@ -1194,7 +1334,7 @@ export function SeoKeywordsWorkspace() {
                     setSerpApiKeyInput('');
                     setShowSerpKeyForm(false);
                     setContentStatusMsg('Đã lưu khóa SerpApi để đồng bộ chỉ số Google Trends 0–100 tự động.');
-                    clearAllApiCache();
+                    invalidateApiCacheByDomains(['ads']);
                     await fetchDashboard(true);
                   } catch (err) {
                     setErrorMsg(err instanceof Error ? err.message : 'Không thể lưu khóa SerpApi.');
@@ -1282,7 +1422,7 @@ export function SeoKeywordsWorkspace() {
                         setContentStatusMsg(
                           `Đã đồng bộ ${res.syncedPoints} ngày chỉ số Google Trends (0–100) cho "${trendLookupInput.trim()}".`,
                         );
-                        clearAllApiCache();
+                        invalidateApiCacheByDomains(['ads']);
                         await fetchDashboard(true);
                       } catch (err) {
                         setErrorMsg(err instanceof Error ? err.message : 'Đồng bộ SerpApi thất bại.');
@@ -1433,7 +1573,9 @@ export function SeoKeywordsWorkspace() {
                 onClick={() =>
                   activeTab === 'content'
                     ? setContentPage((p) => Math.max(1, p - 1))
-                    : setPage((p) => Math.max(1, p - 1))
+                    : activeTab === 'pages'
+                      ? setPagesPage((p) => Math.max(1, p - 1))
+                      : setQueriesPage((p) => Math.max(1, p - 1))
                 }
                 className="px-2.5 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 font-medium"
               >
@@ -1445,7 +1587,9 @@ export function SeoKeywordsWorkspace() {
                 onClick={() =>
                   activeTab === 'content'
                     ? setContentPage((p) => Math.min(totalPages, p + 1))
-                    : setPage((p) => Math.min(totalPages, p + 1))
+                    : activeTab === 'pages'
+                      ? setPagesPage((p) => Math.min(totalPages, p + 1))
+                      : setQueriesPage((p) => Math.min(totalPages, p + 1))
                 }
                 className="px-2.5 py-1 rounded border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-40 font-medium"
               >

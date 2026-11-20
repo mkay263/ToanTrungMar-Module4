@@ -6,6 +6,7 @@ import {
 } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../core/http';
 import { requirePermissionSession } from '../../../../core/permissions';
+import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   declareExternalCampaignAndRemapUtm,
   getTrackingDashboardData,
@@ -20,13 +21,10 @@ import {
   getWorkerJobsHistory,
   type WorkerJobCode,
 } from '../../../../workers';
-import { triggerBackgroundTrackingSyncIfStale } from '../../../../modules/02-tracking-sync/google-oauth.service';
 
 export async function GET(req: Request) {
   const auth = await requirePermissionSession(req, 'TRACKING_ADS_OPTIMIZE');
   if (!auth.ok) return auth.response;
-
-  triggerBackgroundTrackingSyncIfStale();
 
   try {
     const url = new URL(req.url);
@@ -94,6 +92,7 @@ export async function POST(req: Request) {
         );
       }
       const res = await declareExternalCampaignAndRemapUtm(parsed.data);
+      bumpDomainRevisions(['tracking', 'ads', 'reports', 'leads'], 'declare_campaign');
       return jsonSuccess(
         {
           campaignId: res.campaign.id,
@@ -113,6 +112,7 @@ export async function POST(req: Request) {
         );
       }
       const res = await resolveLeadReconciliationAlert(auth.user, parsed.data);
+      bumpDomainRevisions(['tracking', 'reports'], 'resolve_reconciliation');
       return jsonSuccess({ id: res.id, status: res.status });
     }
 
@@ -130,6 +130,7 @@ export async function POST(req: Request) {
         ? requestedCode
         : 'ALL_JOBS';
       const jobRes = await executeWorkerJobByCode(safeCode, auth.user.id);
+      bumpDomainRevisions(['tracking', 'ads', 'reports', 'leads', 'notifications'], `worker_${safeCode}`);
       return jsonSuccess(jobRes);
     }
 
@@ -143,6 +144,9 @@ export async function POST(req: Request) {
         );
       }
       const res = await ingestWebhookLeadWithErrorProtection(parsed.data);
+      if (!res.deduplicated) {
+        bumpDomainRevisions(['leads', 'tracking', 'reports', 'notifications'], 'simulate_webhook');
+      }
       return jsonSuccess(res, res.deduplicated ? 200 : 201);
     }
 
@@ -151,6 +155,7 @@ export async function POST(req: Request) {
       return jsonError('VALIDATION_ERROR', 'Tham số đồng bộ không hợp lệ.', 400);
     }
     const res = await triggerPlatformSyncExecution(parsed.data);
+    bumpDomainRevisions(['tracking', 'ads', 'reports', 'leads', 'websites'], 'manual_platform_sync');
     return jsonSuccess(res);
   } catch (err) {
     return jsonError(

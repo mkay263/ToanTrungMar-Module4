@@ -4,6 +4,7 @@ import {
 } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../core/http';
 import { requirePermissionSession } from '../../../../core/permissions';
+import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   createSeoKeyword,
   deleteSeoKeywordById,
@@ -60,6 +61,7 @@ export async function POST(req: Request) {
         return jsonError('VALIDATION_ERROR', 'Mã từ khóa cần xoá không hợp lệ.', 400);
       }
       await deleteSeoKeywordById(auth.user, kwId);
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'delete_seo_keyword');
       return jsonSuccess({ deletedId: kwId });
     }
 
@@ -105,6 +107,7 @@ export async function POST(req: Request) {
             ? raw.recommendedPublishWindow.trim()
             : undefined,
       });
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'upsert_seo_keyword');
       return jsonSuccess({ id: created.id, keyword: created.keyword }, 201);
     }
 
@@ -118,6 +121,7 @@ export async function POST(req: Request) {
     }
 
     const article = await generateSeoArticleDraftByAi(auth.user, parsed.data);
+    bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'generate_seo_draft');
     return jsonSuccess({ id: article.id, title: article.title }, 201);
   } catch (err) {
     return jsonError(

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Calendar, CheckCircle2, ChevronDown } from 'lucide-react';
 
 export type StandardDatePreset =
@@ -77,6 +77,11 @@ export function StandardDateRangeDropdown({
   const [localStart, setLocalStart] = useState(customStartDate);
   const [localEnd, setLocalEnd] = useState(customEndDate);
 
+  useEffect(() => {
+    setLocalStart(customStartDate);
+    setLocalEnd(customEndDate);
+  }, [customStartDate, customEndDate]);
+
   const isCustomActive = preset === 'CUSTOM' || Boolean(customStartDate || customEndDate);
   const isFiltered = preset !== 'ALL' || isCustomActive;
 
@@ -84,15 +89,21 @@ export function StandardDateRangeDropdown({
     onChangePreset(p);
     setLocalStart('');
     setLocalEnd('');
-    if (onChangeCustomRange) {
-      onChangeCustomRange('', '');
-    }
     setOpen(false);
   };
 
   const handleApplyCustom = () => {
+    if (!localStart && !localEnd) {
+      setOpen(false);
+      return;
+    }
+    const rawS = localStart || localEnd;
+    const rawE = localEnd || localStart;
+    const [s, e] = rawS <= rawE ? [rawS, rawE] : [rawE, rawS];
+    setLocalStart(s);
+    setLocalEnd(e);
     if (onChangeCustomRange) {
-      onChangeCustomRange(localStart, localEnd);
+      onChangeCustomRange(s, e);
     }
     onChangePreset('CUSTOM');
     setOpen(false);

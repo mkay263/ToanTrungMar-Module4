@@ -1,5 +1,6 @@
 import { TrackingTouchpointSchema } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { recordTrackingTouchpoint } from '../../../../../modules/02-tracking-sync/service';
 
 export async function POST(req: Request) {
@@ -25,6 +26,9 @@ export async function POST(req: Request) {
     }
 
     const res = await recordTrackingTouchpoint(parsed.data);
+    if (!res.deduplicated) {
+      bumpDomainRevisions(['tracking', 'reports'], 'touchpoint_recorded');
+    }
     return jsonSuccess(res, res.deduplicated ? 200 : 201);
   } catch (err) {
     return jsonError(

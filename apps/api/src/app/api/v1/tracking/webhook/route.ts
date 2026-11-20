@@ -1,6 +1,7 @@
 import { prisma } from '@toantrung/database';
 import { WebhookLeadIntakeSchema } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { ingestWebhookLeadWithErrorProtection } from '../../../../../modules/02-tracking-sync/service';
 
 const WEBHOOK_RATE_WINDOW_MS = 60_000;
@@ -85,6 +86,9 @@ export async function POST(req: Request) {
     }
 
     const res = await ingestWebhookLeadWithErrorProtection(parsed.data);
+    if (!res.deduplicated) {
+      bumpDomainRevisions(['leads', 'tracking', 'reports', 'notifications'], 'webhook_lead_intake');
+    }
     return jsonSuccess(res, res.deduplicated ? 200 : 201);
   } catch (err) {
     return jsonError(

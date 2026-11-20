@@ -1,5 +1,6 @@
 import { prisma } from '@toantrung/database';
 import { hasBaPermission } from '@toantrung/contracts';
+import { bumpDomainRevisions } from '../../../../../../core/cache/server-data-cache';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import { executeWorkerJobByCode, type WorkerJobCode } from '../../../../../../workers';
@@ -13,9 +14,17 @@ const ALLOWLISTED_WORKER_JOBS: readonly WorkerJobCode[] = [
   'ALL_JOBS',
 ] as const;
 
-// In-process execution lock & rate-limit tracker to prevent overlapping runs
-const activeJobLocks = new Map<string, number>();
-const lastJobCompletedAt = new Map<string, number>();
+// In-process execution lock & rate-limit tracker persisted on globalThis across Next.js route chunks
+const globalForWorkerRoute = globalThis as unknown as {
+  __toantrungWorkerLocks?: Map<string, number>;
+  __toantrungWorkerLastCompleted?: Map<string, number>;
+};
+const activeJobLocks =
+  globalForWorkerRoute.__toantrungWorkerLocks ??
+  (globalForWorkerRoute.__toantrungWorkerLocks = new Map<string, number>());
+const lastJobCompletedAt =
+  globalForWorkerRoute.__toantrungWorkerLastCompleted ??
+  (globalForWorkerRoute.__toantrungWorkerLastCompleted = new Map<string, number>());
 
 export async function POST(
   req: Request,
@@ -47,7 +56,7 @@ export async function POST(
 
   const now = Date.now();
   const existingLockStarted = activeJobLocks.get(rawCode);
-  if (existingLockStarted && now - existingLockStarted < 60_000) {
+  if (existingLockStarted && now - existingLockStarted < 300_000) {
     return jsonError(
       'WORKER_JOB_ALREADY_RUNNING',
       `Tác vụ ${rawCode} đang chạy từ ${Math.round((now - existingLockStarted) / 1000)}s trước. Đã chặn chạy chồng lấp (Lock).`,
@@ -116,6 +125,10 @@ export async function POST(
     });
 
     lastJobCompletedAt.set(`${auth.user.id}:${rawCode}`, Date.now());
+    bumpDomainRevisions(
+      ['tracking', 'ads', 'seo_articles', 'reports', 'leads', 'notifications'],
+      `worker_${rawCode}`,
+    );
 
     return jsonSuccess({
       executionId,

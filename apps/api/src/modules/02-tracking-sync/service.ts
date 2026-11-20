@@ -45,6 +45,10 @@ import {
   resolveDatePresetRange,
 } from '../../core/reporting-dates';
 import { getGmailLeadSyncStatus } from '../01-leads/gmail-sync.service';
+import {
+  bumpDomainRevisions,
+  getOrComputeScopedCache,
+} from '../../core/cache/server-data-cache';
 
 export { ALLOWED_COMPANY_GA4_PROPERTY_IDS, ALLOWED_COMPANY_GSC_SITES };
 
@@ -477,6 +481,17 @@ async function runTriggerPlatformSyncInternal(input: TriggerPlatformSyncDto) {
     ? await retryUnresolvedGclids()
     : { scanned: 0, resolved: syncRes.gclidResolved || 0 };
 
+  if (input.runReconciliation && input.scheduleSlot === 'FULL_0200') {
+    try {
+      const { runDailyGoogleLeadFormReconciliationJob } = await import('../../workers');
+      await runDailyGoogleLeadFormReconciliationJob();
+    } catch {
+      // non-fatal reconciliation guard
+    }
+  }
+
+  bumpDomainRevisions(['tracking', 'ads', 'reports', 'leads', 'websites'], `trigger_sync_${input.scheduleSlot}`);
+
   return {
     syncLogId: latestLog?.id || 0,
     recordsSynced: syncRes.syncedRecords,
@@ -501,6 +516,7 @@ export async function triggerPlatformSyncExecution(input: TriggerPlatformSyncDto
 }
 
 export function ensureTrackingBackgroundSchedulerStarted(): void {
+  if (process.env.NODE_TEST_CONTEXT) return;
   if (globalForTrackingSync.__trackingSchedulerStarted) return;
   globalForTrackingSync.__trackingSchedulerStarted = true;
 
@@ -517,8 +533,9 @@ export function ensureTrackingBackgroundSchedulerStarted(): void {
       else if (vnHour === 17 && vnMinute < 20) slot = 'LIGHT_1700';
 
       if (!slot) return;
+      const expectedRunType = slot === 'FULL_0200' ? 'full' : 'light';
       const lastSync = await prisma.platformSyncLog.findFirst({
-        where: { runType: slot },
+        where: { runType: { in: [slot, expectedRunType] } },
         orderBy: { completedAt: 'desc' },
       });
       if (lastSync?.completedAt && Date.now() - lastSync.completedAt.getTime() < 2 * 60 * 60 * 1000) {
@@ -649,96 +666,138 @@ export async function getTrackingDashboardData(
   const cutoffDateStr = dateRange.startDateStr;
   const todayStr = dateRange.endDateStr;
 
-  const [leads, campaigns, syncLogs, reconciliations, webhookErrors, touchpoints] = await Promise.all([
-    prisma.lead.findMany({
-      where: { createdAt: { gte: cutoffDate, lte: endDateTime } },
-      select: {
-        id: true,
-        leadCode: true,
-        contactChannel: true,
-        sourceWebsite: true,
-        selfReportedSource: true,
-        isSpam: true,
-        spamAdsExclusionStatus: true,
-        pipelineStatus: true,
-        createdAt: true,
-        activities: {
-          orderBy: { createdAt: 'desc' },
-          take: 3,
-          select: { actionType: true, note: true, createdAt: true },
-        },
-        tracking: {
+  const cacheResult = await getOrComputeScopedCache<TrackingDashboardDto>({
+    key: `tracking-default:${dateFilter?.preset || `${periodDays}D`}:${cutoffDateStr}:${todayStr}`,
+    domains: ['tracking', 'leads', 'ads', 'websites'],
+    ttlMs: 30_000,
+    compute: async () => {
+      const [
+        leads,
+        campaigns,
+        syncLogs,
+        reconciliations,
+        webhookErrors,
+        touchpoints,
+        trendsSetting,
+        googleConnSetting,
+        gmailStatus,
+        adsCfg,
+      ] = await Promise.all([
+        prisma.lead.findMany({
+          where: { createdAt: { gte: cutoffDate, lte: endDateTime } },
           select: {
-            marketingSource: true,
-            landingPageUrl: true,
-            externalSubmissionId: true,
-            isRepeatLead: true,
-            isUnknownSource: true,
-            isUnknownCampaign: true,
-            isUtmGclidMismatch: true,
-            isUnmatchedUtm: true,
-            campaign: {
-              select: { id: true, campaignCode: true, campaignName: true },
+            id: true,
+            leadCode: true,
+            contactChannel: true,
+            sourceWebsite: true,
+            selfReportedSource: true,
+            isSpam: true,
+            spamAdsExclusionStatus: true,
+            pipelineStatus: true,
+            createdAt: true,
+            activities: {
+              orderBy: { createdAt: 'desc' },
+              take: 3,
+              select: { actionType: true, note: true, createdAt: true },
             },
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    }),
-    prisma.campaign.findMany({
-      where: {
-        NOT: [
-          { accountExternalId: { startsWith: 'GA4-' } },
-          { campaignCode: { startsWith: 'ga4_' } },
-        ],
-      },
-      include: {
-        dailyMetrics: {
-          where: {
-            grain: 'campaign',
-            metricDate: { gte: cutoffDateStr, lte: todayStr },
-            NOT: [
-              { accountPropertyId: { startsWith: 'GA4-' } },
-              { campaignExternalId: { startsWith: 'ga4_' } },
-            ],
-          },
-          select: { grain: true, spendMicros: true },
-        },
-        trackings: {
-          where: {
-            lead: {
-              createdAt: { gte: cutoffDate },
-            },
-          },
-          select: {
-            isRepeatLead: true,
-            lead: {
+            tracking: {
               select: {
-                isSpam: true,
-                spamAdsExclusionStatus: true,
-                pipelineStatus: true,
+                marketingSource: true,
+                landingPageUrl: true,
+                externalSubmissionId: true,
+                isRepeatLead: true,
+                isUnknownSource: true,
+                isUnknownCampaign: true,
+                isUtmGclidMismatch: true,
+                isUnmatchedUtm: true,
+                campaign: {
+                  select: { id: true, campaignCode: true, campaignName: true },
+                },
               },
             },
           },
-        },
-      },
-      orderBy: { id: 'asc' },
-    }),
-    prisma.platformSyncLog.findMany({
-      orderBy: { startedAt: 'desc' },
-      take: 10,
-    }),
-    prisma.leadReconciliation.findMany({
-      include: { resolvedBy: { select: { fullName: true } } },
-      orderBy: { reconcileDate: 'desc' },
-      take: 10,
-    }),
-    prisma.webhookIntakeErrorLog.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-    }),
-    getStoredTouchpoints(),
-  ]);
+          orderBy: { createdAt: 'desc' },
+        }),
+        prisma.campaign.findMany({
+          where: {
+            NOT: [
+              { accountExternalId: { startsWith: 'GA4-' } },
+              { campaignCode: { startsWith: 'ga4_' } },
+            ],
+          },
+          include: {
+            dailyMetrics: {
+              where: {
+                grain: 'campaign',
+                metricDate: { gte: cutoffDateStr, lte: todayStr },
+                NOT: [
+                  { accountPropertyId: { startsWith: 'GA4-' } },
+                  { campaignExternalId: { startsWith: 'ga4_' } },
+                ],
+              },
+              select: { grain: true, spendMicros: true },
+            },
+            trackings: {
+              where: {
+                lead: {
+                  createdAt: { gte: cutoffDate, lte: endDateTime },
+                },
+              },
+              select: {
+                isRepeatLead: true,
+                lead: {
+                  select: {
+                    isSpam: true,
+                    spamAdsExclusionStatus: true,
+                    pipelineStatus: true,
+                  },
+                },
+              },
+            },
+          },
+          orderBy: { id: 'asc' },
+        }),
+        prisma.platformSyncLog.findMany({
+          orderBy: { startedAt: 'desc' },
+          take: 25,
+        }),
+        prisma.leadReconciliation.findMany({
+          include: { resolvedBy: { select: { fullName: true } } },
+          orderBy: { reconcileDate: 'desc' },
+          take: 10,
+        }),
+        prisma.webhookIntakeErrorLog.findMany({
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        }),
+        getStoredTouchpoints(),
+        prisma.systemSetting.findUnique({ where: { key: 'google_trends_vn_live_cache_v1' } }).catch(() => null),
+        prisma.systemSetting.findUnique({ where: { key: 'google_oauth_connection' } }).catch(() => null),
+        getGmailLeadSyncStatus().catch(() => null),
+        (async () => {
+          const { getGoogleAdsApiConfig } = await import('./google-oauth.service');
+          return getGoogleAdsApiConfig();
+        })(),
+      ]);
+
+      let trendsFetchedAt: string | null = null;
+      if (trendsSetting?.value) {
+        try {
+          const tp = JSON.parse(trendsSetting.value) as { fetchedAt?: string | null };
+          trendsFetchedAt = tp?.fetchedAt || null;
+        } catch {
+          // ignore
+        }
+      }
+
+      let googleConn: any = null;
+      if (googleConnSetting?.value) {
+        try {
+          googleConn = JSON.parse(googleConnSetting.value);
+        } catch {
+          // ignore
+        }
+      }
 
   const touchpointsInPeriod = touchpoints.filter((tp) => new Date(tp.occurredAt) >= cutoffDate);
 
@@ -918,26 +977,13 @@ export async function getTrackingDashboardData(
 
   const isSmallSample = rawLeadsL1 < 30;
 
-  let googleConn: any = null;
-  try {
-    const setting = await prisma.systemSetting.findUnique({
-      where: { key: 'google_oauth_connection' },
-    });
-    if (setting?.value) {
-      googleConn = JSON.parse(setting.value);
-    }
-  } catch {
-    // ignore
-  }
-
   const isLiveGoogle = Boolean(googleConn?.connected && !googleConn?.isSandboxDemo);
-  const googleAssetsHub = await buildGoogleAssetsHub(dateRange.totalCalendarDays);
-  const gmailStatus = await getGmailLeadSyncStatus().catch(() => null);
+  const googleAssetsHub = await buildGoogleAssetsHub(dateRange.totalCalendarDays, googleConn);
 
   const latestByPlatform = (platformKey: string) => {
     const allLogs = syncLogs.filter((s) => s.platform.toLowerCase() === platformKey);
     const lastAttempt = allLogs[0] || null;
-    const lastSuccess = allLogs.find((s) => s.status === 'success') || null;
+    const lastSuccess = allLogs.find((s) => s.status === 'success' || s.status === 'partial') || null;
     return { lastAttempt, lastSuccess };
   };
 
@@ -947,8 +993,6 @@ export async function getTrackingDashboardData(
       ? latestByPlatform('search_console')
       : latestByPlatform('google_search_console');
   const adsSync = latestByPlatform('google_ads');
-  const { getGoogleAdsApiConfig } = await import('./google-oauth.service');
-  const adsCfg = await getGoogleAdsApiConfig();
   const hasAdsToken = Boolean(adsCfg?.developerToken);
 
   const sourceStatuses = [
@@ -956,10 +1000,10 @@ export async function getTrackingDashboardData(
       sourceKey: 'CRM_LEADS',
       sourceName: 'Lead nội bộ CRM',
       connectionStatus: 'CONNECTED',
-      backendSchedule: 'Ghi nhận tức thời + UI kiểm tra mỗi 15–30 giây',
+      backendSchedule: 'Ghi nhận tức thời + kiểm tra nền mỗi 15–30 giây',
       sourceLatency: 'Thời gian thực (< 1 giây)',
-      lastAttemptAt: leads[0]?.createdAt?.toISOString() || new Date().toISOString(),
-      lastSuccessAt: leads[0]?.createdAt?.toISOString() || new Date().toISOString(),
+      lastAttemptAt: leads[0]?.createdAt?.toISOString() || null,
+      lastSuccessAt: leads[0]?.createdAt?.toISOString() || null,
       dataRangeCovered: `${cutoffDateStr} → ${todayStr}`,
       quotaOrLimitNote: 'Truy vấn DB nội bộ; không giới hạn quota Google.',
       isUsingCachedData: false,
@@ -1059,14 +1103,14 @@ export async function getTrackingDashboardData(
     {
       sourceKey: 'GOOGLE_TRENDS',
       sourceName: 'Google Trends Việt Nam',
-      connectionStatus: 'CONNECTED',
+      connectionStatus: trendsFetchedAt ? 'CONNECTED' : 'UNCONFIGURED',
       backendSchedule: 'Cache tự động 15 phút (RSS xu hướng ngày VN + Google Suggest VN) & nhập CSV / SerpApi',
       sourceLatency: 'Gần thời gian thực (TTL 15 phút)',
-      lastAttemptAt: new Date().toISOString(),
-      lastSuccessAt: new Date().toISOString(),
+      lastAttemptAt: trendsFetchedAt,
+      lastSuccessAt: trendsFetchedAt,
       dataRangeCovered: 'Xu hướng ngày Việt Nam + Chủ đề ngành LED',
       quotaOrLimitNote: 'Tích hợp trực tiếp Google Trends RSS VN + Google Suggest VN; hỗ trợ SerpApi (0–100) & multiTimeline.csv.',
-      isUsingCachedData: false,
+      isUsingCachedData: Boolean(trendsFetchedAt),
     },
   ];
 
@@ -1093,7 +1137,10 @@ export async function getTrackingDashboardData(
     liveIntegrationMode: (isLiveGoogle || process.env.GOOGLE_ADS_DEVELOPER_TOKEN)
       ? ('LIVE_CONFIGURED' as const)
       : ('FIXTURE_SIMULATION' as const),
-    lastSyncedAt: syncLogs[0]?.completedAt?.toISOString() || new Date().toISOString(),
+    lastSyncedAt:
+      syncLogs.find((s) => s.status === 'success' || s.status === 'partial')?.completedAt?.toISOString() ||
+      syncLogs[0]?.completedAt?.toISOString() ||
+      null,
     totals: {
       rawLeadsL1,
       validLeadsL2,
@@ -1148,19 +1195,24 @@ export async function getTrackingDashboardData(
       };
     }),
   };
+    },
+  });
+  return cacheResult.data;
 }
 
-async function buildGoogleAssetsHub(periodDays: number = 30) {
-  let conn: any = null;
-  try {
-    const setting = await prisma.systemSetting.findUnique({
-      where: { key: 'google_oauth_connection' },
-    });
-    if (setting?.value) {
-      conn = JSON.parse(setting.value);
+async function buildGoogleAssetsHub(periodDays: number = 30, preloadedConn?: any) {
+  let conn: any = preloadedConn ?? null;
+  if (!preloadedConn) {
+    try {
+      const setting = await prisma.systemSetting.findUnique({
+        where: { key: 'google_oauth_connection' },
+      });
+      if (setting?.value) {
+        conn = JSON.parse(setting.value);
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
 
   const dateRange = getCanonicalDateRange(periodDays);
@@ -1173,8 +1225,8 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
       ? windowStartDate
       : fallback30Range.startDateStr;
 
-  // Retrieve sync logs and combined GA4/GSC daily metrics in a single pass
-  const [ga4Logs, scLogs, combinedMetrics] = await Promise.all([
+  // Retrieve sync logs, GA4/GSC/Ads daily metrics, active Ads campaigns, and GSC metadata in parallel
+  const [ga4Logs, scLogs, combinedMetrics, gscMetadataMap, realAdsCampaigns, realAdsMetrics] = await Promise.all([
     prisma.platformSyncLog.findMany({
       where: { platform: 'ga4' },
       orderBy: { startedAt: 'desc' },
@@ -1194,6 +1246,31 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
         },
       },
       orderBy: { metricDate: 'desc' },
+    }),
+    getGscDataStateMetadataMap(),
+    prisma.campaign.findMany({
+      where: {
+        platform: 'google_ads',
+        isActive: true,
+        NOT: [
+          { accountExternalId: { startsWith: 'GA4-' } },
+          { campaignCode: { startsWith: 'ga4_' } },
+        ],
+      },
+    }),
+    prisma.platformDailyMetric.findMany({
+      where: {
+        platform: 'google_ads',
+        grain: 'campaign',
+        metricDate: {
+          gte: windowStartDate,
+          lte: todayStr,
+        },
+        NOT: [
+          { accountPropertyId: { startsWith: 'GA4-' } },
+          { campaignExternalId: { startsWith: 'ga4_' } },
+        ],
+      },
     }),
   ]);
 
@@ -1361,8 +1438,6 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
           .map((s) => s.id)
       : ['https://toantrung.com.vn/', 'https://manhinhled.net.vn/', 'https://bangled.vn/'];
 
-  const gscMetadataMap = await getGscDataStateMetadataMap();
-
   const searchConsoleSites = sitesDefs.map((siteUrl) => {
     const siteMeta = gscMetadataMap[siteUrl] || null;
     const siteRows = scMetrics.filter((m) => m.accountPropertyId === siteUrl);
@@ -1493,31 +1568,7 @@ async function buildGoogleAssetsHub(periodDays: number = 30) {
     };
   });
 
-  // Query verified Google Ads campaigns & spend (Excluding contaminated GA4 campaigns)
-  const realAdsCampaigns = await prisma.campaign.findMany({
-    where: {
-      platform: 'google_ads',
-      isActive: true,
-      NOT: [
-        { accountExternalId: { startsWith: 'GA4-' } },
-        { campaignCode: { startsWith: 'ga4_' } },
-      ],
-    },
-  });
-  const realAdsMetrics = await prisma.platformDailyMetric.findMany({
-    where: {
-      platform: 'google_ads',
-      grain: 'campaign',
-      metricDate: {
-        gte: windowStartDate,
-        lte: todayStr,
-      },
-      NOT: [
-        { accountPropertyId: { startsWith: 'GA4-' } },
-        { campaignExternalId: { startsWith: 'ga4_' } },
-      ],
-    },
-  });
+  // Aggregate Google Ads spend from parallel pre-fetched metrics
   const hasAdsMetrics = realAdsMetrics.length > 0;
   const totalAdsSpendMicros = realAdsMetrics.reduce((sum, m) => sum + (m.spendMicros || 0n), 0n);
   const totalAdsSpendVnd = hasAdsMetrics ? Number(totalAdsSpendMicros / 1_000_000n) : null;

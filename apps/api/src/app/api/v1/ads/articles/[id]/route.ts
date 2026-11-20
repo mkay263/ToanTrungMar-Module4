@@ -7,6 +7,7 @@ import {
 } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
 import { requirePermissionSession } from '../../../../../../core/permissions';
+import { bumpDomainRevisions } from '../../../../../../core/cache/server-data-cache';
 import {
   approveAndScheduleSeoArticle,
   publishSeoArticleToTargetWebsite,
@@ -40,6 +41,7 @@ export async function PATCH(
         );
       }
       await approveAndScheduleSeoArticle(auth.user, articleId, parsed.data);
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'approve_schedule_article');
       return jsonSuccess({ id: articleId, status: 'APPROVED_SCHEDULED' });
     }
 
@@ -49,6 +51,7 @@ export async function PATCH(
         return jsonError('VALIDATION_ERROR', 'Dữ liệu rút duyệt không hợp lệ.', 400);
       }
       await withdrawSeoArticleApproval(auth.user, articleId, parsed.data);
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'withdraw_approval_article');
       return jsonSuccess({ id: articleId, status: 'DRAFT' });
     }
 
@@ -58,6 +61,7 @@ export async function PATCH(
         return jsonError('VALIDATION_ERROR', 'Dữ liệu xuất bản không hợp lệ.', 400);
       }
       const res = await publishSeoArticleToTargetWebsite(auth.user, articleId, parsed.data);
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'publish_now_article');
       return jsonSuccess({ id: articleId, status: 'PUBLISHED', publishedUrl: res.publishedUrl });
     }
 
@@ -70,6 +74,7 @@ export async function PATCH(
       );
     }
     const rev = await updateSeoArticleDraftWithRevision(auth.user, articleId, parsed.data);
+    bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'update_draft_article');
     return jsonSuccess({ id: articleId, revisionNumber: rev.revisionNumber });
   } catch (err) {
     if (err instanceof ConcurrencyConflictError) {

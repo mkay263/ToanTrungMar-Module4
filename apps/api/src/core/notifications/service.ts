@@ -6,6 +6,7 @@ import {
   type NotificationDto,
   type RoleCode,
 } from '@toantrung/contracts';
+import { bumpDomainRevisions, getOrComputeScopedCache } from '../cache/server-data-cache';
 
 export type DepartmentScopeCode =
   | 'ALL'
@@ -127,9 +128,23 @@ export interface DispatchedReportItemDto {
   createdAt: string;
 }
 
+export async function countUnreadNotificationsFast(userId: number): Promise<number> {
+  const res = await getOrComputeScopedCache<number>({
+    key: `notif-unread-count:${userId}`,
+    domains: ['notifications'],
+    ttlMs: 15_000,
+    compute: () =>
+      prisma.notification.count({
+        where: { userId, isRead: false },
+      }),
+  });
+  return res.data;
+}
+
 export async function listUserNotifications(
   userId: number,
   roleCode: RoleCode,
+  options?: { summaryOnly?: boolean; bypassCache?: boolean },
 ): Promise<{
   items: Array<NotificationDto & { departmentScope?: DepartmentScopeCode; departmentLabel?: string }>;
   unreadCount: number;
@@ -138,79 +153,91 @@ export async function listUserNotifications(
   canSendFullReport: boolean;
   reports: DispatchedReportItemDto[];
 }> {
-  const userDept = getDepartmentScopeForRole(roleCode);
-  const canSendFullReport = roleCode === 'BOD' || roleCode === 'ADMIN';
+  const summaryOnly = Boolean(options?.summaryOnly);
+  const cached = await getOrComputeScopedCache({
+    key: `notif-list:${userId}:${roleCode}:${summaryOnly ? 'summary' : 'full'}`,
+    domains: ['notifications'],
+    ttlMs: 15_000,
+    bypassCache: options?.bypassCache,
+    compute: async () => {
+      const userDept = getDepartmentScopeForRole(roleCode);
+      const canSendFullReport = roleCode === 'BOD' || roleCode === 'ADMIN';
 
-  const rows = await prisma.notification.findMany({
-    where: canSendFullReport ? { userId } : { userId },
-    orderBy: { createdAt: 'desc' },
-    take: 60,
-  });
+      const [rows, allReports] = await Promise.all([
+        prisma.notification.findMany({
+          where: { userId },
+          orderBy: { createdAt: 'desc' },
+          take: summaryOnly ? 20 : 60,
+        }),
+        summaryOnly ? Promise.resolve([] as DispatchedReportItemDto[]) : listDispatchedExecutiveReports(25, userId),
+      ]);
 
-  // C10: Gộp các thông báo chưa đọc bị trùng khóa (category + title) khi hiển thị, nhưng không tự xóa bản ghi chưa đọc trong CSDL
-  const seenUnreadKeys = new Set<string>();
-  const dedupedRows = rows.filter((r) => {
-    if (r.isRead) return true;
-    const key = `${r.category.trim().toLowerCase()}::${r.title.trim().toLowerCase()}`;
-    if (seenUnreadKeys.has(key)) return false;
-    seenUnreadKeys.add(key);
-    return true;
-  });
+      // C10: Gộp các thông báo chưa đọc bị trùng khóa (category + title) khi hiển thị, nhưng không tự xóa bản ghi chưa đọc trong CSDL
+      const seenUnreadKeys = new Set<string>();
+      const dedupedRows = rows.filter((r) => {
+        if (r.isRead) return true;
+        const key = `${r.category.trim().toLowerCase()}::${r.title.trim().toLowerCase()}`;
+        if (seenUnreadKeys.has(key)) return false;
+        seenUnreadKeys.add(key);
+        return true;
+      });
 
-  const filteredItems = dedupedRows
-    .map((r) => {
-      const { cleanTitle, cleanSummary, cleanCategory } = sanitizeNotificationCopy(
-        r.title,
-        r.summary,
-        r.category,
-      );
-      const deptScope = inferNotificationDepartment(cleanCategory, cleanTitle, cleanSummary);
-      const allowed = canAccessNotificationAction(
-        roleCode,
-        r.actionUrl,
-        r.requiredPermission,
-      );
+      const filteredItems = dedupedRows
+        .map((r) => {
+          const { cleanTitle, cleanSummary, cleanCategory } = sanitizeNotificationCopy(
+            r.title,
+            r.summary,
+            r.category,
+          );
+          const deptScope = inferNotificationDepartment(cleanCategory, cleanTitle, cleanSummary);
+          const allowed = canAccessNotificationAction(
+            roleCode,
+            r.actionUrl,
+            r.requiredPermission,
+          );
+          return {
+            id: r.id,
+            title: cleanTitle,
+            summary: cleanSummary,
+            category: cleanCategory,
+            departmentScope: deptScope,
+            departmentLabel: DEPARTMENT_SCOPE_LABELS[deptScope],
+            isRead: r.isRead,
+            actionLabel: allowed ? r.actionLabel : null,
+            actionUrl: allowed ? r.actionUrl : null,
+            createdAt: r.createdAt.toISOString(),
+            readAt: r.readAt ? r.readAt.toISOString() : null,
+          };
+        })
+        .filter((item) => {
+          if (canSendFullReport) return true;
+          // Nhân sự phòng nào chỉ xem thông báo thuộc phòng đó hoặc thông báo chung từ Ban Giám đốc
+          return item.departmentScope === userDept || item.departmentScope === 'ALL';
+        });
+
+      const unreadCount = filteredItems.filter((r) => !r.isRead).length;
+      const visibleReports = allReports.filter((rpt) => {
+        if (canSendFullReport) return true;
+        if (rpt.status === 'DRAFT') return true;
+        const targets = rpt.targetDepartments || [];
+        return (
+          targets.length === 0 ||
+          targets.includes('ALL') ||
+          targets.includes(userDept)
+        );
+      });
+
       return {
-        id: r.id,
-        title: cleanTitle,
-        summary: cleanSummary,
-        category: cleanCategory,
-        departmentScope: deptScope,
-        departmentLabel: DEPARTMENT_SCOPE_LABELS[deptScope],
-        isRead: r.isRead,
-        actionLabel: allowed ? r.actionLabel : null,
-        actionUrl: allowed ? r.actionUrl : null,
-        createdAt: r.createdAt.toISOString(),
-        readAt: r.readAt ? r.readAt.toISOString() : null,
+        items: filteredItems,
+        unreadCount,
+        userDepartmentCode: userDept,
+        userDepartmentLabel: DEPARTMENT_SCOPE_LABELS[userDept],
+        canSendFullReport,
+        reports: visibleReports,
       };
-    })
-    .filter((item) => {
-      if (canSendFullReport) return true;
-      // Nhân sự phòng nào chỉ xem thông báo thuộc phòng đó hoặc thông báo chung từ Ban Giám đốc
-      return item.departmentScope === userDept || item.departmentScope === 'ALL';
-    });
-
-  const unreadCount = filteredItems.filter((r) => !r.isRead).length;
-  const allReports = await listDispatchedExecutiveReports(25, userId);
-  const visibleReports = allReports.filter((rpt) => {
-    if (canSendFullReport) return true;
-    if (rpt.status === 'DRAFT') return true;
-    const targets = rpt.targetDepartments || [];
-    return (
-      targets.length === 0 ||
-      targets.includes('ALL') ||
-      targets.includes(userDept)
-    );
+    },
   });
-
-  return {
-    items: filteredItems,
-    unreadCount,
-    userDepartmentCode: userDept,
-    userDepartmentLabel: DEPARTMENT_SCOPE_LABELS[userDept],
-    canSendFullReport,
-    reports: visibleReports,
-  };
+  return cached.data;
 }
 
 export async function markNotificationsRead(
@@ -231,7 +258,8 @@ export async function markNotificationsRead(
     });
   }
 
-  return listUserNotifications(userId, roleCode);
+  bumpDomainRevisions(['notifications'], 'mark_notifications_read');
+  return listUserNotifications(userId, roleCode, { bypassCache: true });
 }
 
 export async function createDispatchNotification(
@@ -342,7 +370,8 @@ export async function createDispatchNotification(
     })),
   });
 
-  const list = await listUserNotifications(userId, roleCode);
+  bumpDomainRevisions(['notifications', 'reports'], 'dispatch_notification');
+  const list = await listUserNotifications(userId, roleCode, { bypassCache: true });
   return {
     ...list,
     savedReportId,
@@ -388,6 +417,7 @@ export async function saveReportDraftForUser(
         where: { id: existing.id },
         data: { detailsJson: payloadJson },
       });
+      bumpDomainRevisions(['notifications', 'reports'], 'save_report_draft');
       return {
         id: updated.id,
         reportCode: updated.targetId || `DRAFT-${updated.id}`,
@@ -407,6 +437,7 @@ export async function saveReportDraftForUser(
     },
   });
 
+  bumpDomainRevisions(['notifications', 'reports'], 'save_report_draft');
   return {
     id: created.id,
     reportCode: created.targetId || `DRAFT-${created.id}`,
@@ -505,6 +536,7 @@ export async function upsertActionableNotification(input: {
         requiredPermission: input.requiredPermission ?? existingUnread.requiredPermission,
       },
     });
+    bumpDomainRevisions(['notifications'], 'upsert_notification');
     return;
   }
 
@@ -520,5 +552,6 @@ export async function upsertActionableNotification(input: {
       requiredPermission: input.requiredPermission ?? null,
     },
   });
+  bumpDomainRevisions(['notifications'], 'create_notification');
 }
 

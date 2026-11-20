@@ -98,7 +98,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     } else {
       setGlobalSearchText('');
       window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
-      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
     }
   }, [pathname]);
 
@@ -112,7 +111,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       setGlobalSearchText('');
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
-        window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
       }
     }
   }, [user?.email, globalSearchText]);
@@ -594,7 +592,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   setGlobalSearchText(val);
                   if (typeof window !== 'undefined') {
                     window.dispatchEvent(new CustomEvent('tt-global-search', { detail: val }));
-                    window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: val }));
                   }
                 }}
                 onKeyDown={(e) => {
@@ -602,7 +599,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     setGlobalSearchText('');
                     if (typeof window !== 'undefined') {
                       window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
-                      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
                     }
                   }
                 }}
@@ -617,7 +613,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     setGlobalSearchText('');
                     if (typeof window !== 'undefined') {
                       window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
-                      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
                     }
                   }}
                   className="min-w-6 min-h-6 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-900 text-xs font-bold grid place-items-center shrink-0"
@@ -815,7 +810,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 setGlobalSearchText(val);
                 if (typeof window !== 'undefined') {
                   window.dispatchEvent(new CustomEvent('tt-global-search', { detail: val }));
-                  window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: val }));
                 }
               }}
               placeholder={`Tìm kiếm trong ${currentBreadcrumb}...`}

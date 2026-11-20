@@ -6,6 +6,7 @@ import {
   sanitizeProjectOrSubjectText,
 } from '@toantrung/contracts';
 import { upsertActionableNotification } from '../../core/notifications/service';
+import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
 import {
   getGoogleConnection,
   getValidAccessToken,
@@ -694,9 +695,12 @@ const globalForGmailSync = globalThis as typeof globalThis & {
   __gmailSyncInFlight?: Promise<GmailSyncRunResult> | null;
   __gmailAutoSyncPollerStarted?: boolean;
   __gmailLastAutoAttemptMs?: number;
+  __gmailPollRunning?: boolean;
 };
 
 async function runQuietBackgroundGmailPoll(forceIntervalCheck = false): Promise<void> {
+  if (globalForGmailSync.__gmailPollRunning) return;
+  globalForGmailSync.__gmailPollRunning = true;
   try {
     const [conn, cfg] = await Promise.all([
       getGoogleConnection(),
@@ -720,12 +724,15 @@ async function runQuietBackgroundGmailPoll(forceIntervalCheck = false): Promise<
     await syncLeadsFromGmail();
   } catch {
     // Background poll errors should never crash the server process
+  } finally {
+    globalForGmailSync.__gmailPollRunning = false;
   }
 }
 
 export function ensureGmailAutoSyncPollerStarted(): void {
   if (globalForGmailSync.__gmailAutoSyncPollerStarted) return;
   globalForGmailSync.__gmailAutoSyncPollerStarted = true;
+  globalForGmailSync.__gmailLastAutoAttemptMs = Date.now();
 
   void runQuietBackgroundGmailPoll(false);
 
@@ -744,12 +751,19 @@ export function ensureGmailAutoSyncPollerStarted(): void {
  */
 export async function triggerGmailAutoSyncOnRead(maxWaitMs = 0): Promise<void> {
   ensureGmailAutoSyncPollerStarted();
+  if (globalForGmailSync.__gmailPollRunning) return;
+  const nowPre = Date.now();
+  const lastPre = globalForGmailSync.__gmailLastAutoAttemptMs || 0;
+  if (nowPre - lastPre < 5_000) {
+    return;
+  }
   const cfg = await getGmailLeadSyncConfig();
   const now = Date.now();
   const lastAttempt = globalForGmailSync.__gmailLastAutoAttemptMs || 0;
-  if (now - lastAttempt < cfg.pollIntervalSec * 1000) {
+  if (now - lastAttempt < cfg.pollIntervalSec * 1000 || globalForGmailSync.__gmailPollRunning) {
     return;
   }
+  globalForGmailSync.__gmailLastAutoAttemptMs = now;
   if (maxWaitMs <= 0) {
     void runQuietBackgroundGmailPoll(false);
     return;
@@ -1483,6 +1497,10 @@ async function runSyncLeadsFromGmailInternal(options?: {
     }),
     appendGmailIntakeAuditLogs(auditEntries),
   ]);
+
+  if (summary.created > 0) {
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'gmail_leads_synced');
+  }
 
   return {
     ok: true,

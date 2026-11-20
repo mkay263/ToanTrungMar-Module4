@@ -35,6 +35,14 @@ export interface DashboardFreshnessDto {
   dataThrough: string | null;
   state: DataFreshnessState;
   statusMessage: string;
+  /** Thời điểm kiểm tra thực tế (khi API đọc / kiểm tra dữ liệu) */
+  checkedAt?: string;
+  /** Lần đồng bộ thành công gần nhất từ nguồn */
+  lastSyncedAt?: string | null;
+  /** Thời điểm dữ liệu mới nhất nguồn cung cấp (YYYY-MM-DD hoặc ISO) */
+  latestSourceDataAt?: string | null;
+  /** Đánh dấu kết quả đọc từ bộ nhớ đệm đúng phạm vi */
+  fromCache?: boolean;
 }
 
 export interface DashboardCoverageDto {

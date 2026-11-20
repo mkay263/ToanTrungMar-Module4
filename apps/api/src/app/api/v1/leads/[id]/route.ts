@@ -7,6 +7,7 @@ import {
   UpdateLeadDetailsSchema,
 } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import {
   requirePermissionSession,
 } from '../../../../../core/permissions';
@@ -47,6 +48,7 @@ export async function PATCH(
         );
       }
       const res = await reassignLeadSales(auth.user, leadId, parsed.data);
+      bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'reassign_sales');
       return jsonSuccess({ id: res.lead.id, version: res.lead.version });
     }
 
@@ -56,6 +58,7 @@ export async function PATCH(
     if (action === 'confirm_receive') {
       const expectedVersion = Number(raw.expectedVersion || 1);
       const res = await confirmReceiveLead(auth.user, leadId, expectedVersion);
+      bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'confirm_receive');
       return jsonSuccess({ id: res.lead.id, version: res.lead.version });
     }
 
@@ -69,6 +72,7 @@ export async function PATCH(
         );
       }
       await updateLeadInformation(auth.user, leadId, parsed.data);
+      bumpDomainRevisions(['leads', 'reports', 'tracking'], 'update_lead_info');
       return jsonSuccess({ id: leadId });
     }
 
@@ -82,6 +86,7 @@ export async function PATCH(
         );
       }
       const res = await markLeadSpam(auth.user, leadId, parsed.data);
+      bumpDomainRevisions(['leads', 'reports', 'tracking'], 'mark_spam');
       return jsonSuccess({ id: res.lead.id, version: res.lead.version });
     }
 
@@ -93,6 +98,7 @@ export async function PATCH(
         decision,
         typeof raw.note === 'string' ? raw.note : undefined,
       );
+      bumpDomainRevisions(['leads', 'reports', 'tracking'], 'review_spam');
       return jsonSuccess({ id: updated.id, version: updated.version });
     }
 
@@ -106,6 +112,7 @@ export async function PATCH(
         );
       }
       const res = await createPrivateQuoteVersion(auth.user, leadId, parsed.data);
+      bumpDomainRevisions(['leads', 'reports', 'tracking'], 'create_quote_version');
       return jsonSuccess({
         id: res.lead.id,
         version: res.lead.version,
@@ -132,6 +139,7 @@ export async function PATCH(
           note,
         },
       });
+      bumpDomainRevisions(['leads'], 'add_lead_note');
       return jsonSuccess({ id: leadId });
     }
 
@@ -171,6 +179,7 @@ export async function PATCH(
         });
       }
 
+      bumpDomainRevisions(['leads', 'notifications'], 'send_reminder_nudge');
       return jsonSuccess({ id: leadId, notifiedUserId: targetUserId });
     }
 
@@ -206,6 +215,7 @@ export async function PATCH(
         });
       });
 
+      bumpDomainRevisions(['leads', 'reports'], 'quick_ack_reminder');
       return jsonSuccess({ id: leadId });
     }
 
@@ -219,6 +229,7 @@ export async function PATCH(
     }
 
     const res = await transitionLeadPipeline(auth.user, leadId, parsed.data);
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'transition_pipeline');
     return jsonSuccess({
       id: res.lead.id,
       version: res.lead.version,

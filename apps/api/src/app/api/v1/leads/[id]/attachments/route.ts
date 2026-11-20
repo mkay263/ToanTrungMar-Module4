@@ -1,4 +1,5 @@
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../../core/cache/server-data-cache';
 import { requirePermissionSession } from '../../../../../../core/permissions';
 import {
   shouldAnonymizeLeadForRole,
@@ -87,6 +88,7 @@ export async function POST(
         uploadedList.push({ id: created.id, fileName: created.fileName });
       }
 
+      bumpDomainRevisions(['leads', 'reports'], 'upload_lead_attachment');
       return jsonSuccess(
         {
           id: uploadedList[0]?.id,
@@ -143,6 +145,7 @@ export async function POST(
       uploadedList.push({ id: created.id, fileName: created.fileName });
     }
 
+    bumpDomainRevisions(['leads', 'reports'], 'upload_lead_attachment');
     return jsonSuccess(
       {
         id: uploadedList[0]?.id,

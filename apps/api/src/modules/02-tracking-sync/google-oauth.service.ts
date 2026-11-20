@@ -11,6 +11,9 @@ import type {
 } from '@toantrung/contracts';
 import { encryptSecret, decryptSecret, maskSecret } from '../../core/security/vault';
 import { getCanonicalDateRange, countInclusiveCalendarDays } from '../../core/reporting-dates';
+import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
+import { invalidateConfiguredWebsitesCache } from '../../core/website-catalog';
+import { invalidateGa4LiveCaches } from './ga4-live-cache.service';
 import { retryUnresolvedGclids } from './service';
 import { refreshKeywordDerivedCacheFromCanonicalMetrics } from '../03-keywords-ads/service';
 
@@ -113,6 +116,12 @@ function syncToLegacyFile(conn: StoredGoogleConnection | null) {
   }
 }
 
+const globalOAuthHelpers = globalThis as typeof globalThis & {
+  __toantrungEnvClientCache?: StoredClientConfig | null;
+  __toantrungEnvClientLoaded?: boolean;
+  __toantrungTokenRefreshInFlight?: Promise<string | null> | null;
+};
+
 export async function getGoogleClientConfig(): Promise<StoredClientConfig | null> {
   // 1. Prioritize environment variables (.env) so user can paste privately in local file
   let envClientId = (process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_ADS_CLIENT_ID || '')
@@ -123,32 +132,41 @@ export async function getGoogleClientConfig(): Promise<StoredClientConfig | null
     .replace(/^["']+|["']+$/g, '');
 
   if (!envClientId || !envClientSecret) {
-    const envCandidates = [
-      path.resolve(process.cwd(), '.env'),
-      path.resolve(process.cwd(), '..', '..', '.env'),
-    ];
-    for (const envPath of envCandidates) {
-      try {
-        if (fs.existsSync(envPath)) {
-          const content = fs.readFileSync(envPath, 'utf8');
-          for (const line of content.split(/\r?\n/)) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            const eqIdx = trimmed.indexOf('=');
-            if (eqIdx <= 0) continue;
-            const k = trimmed.slice(0, eqIdx).trim();
-            const v = trimmed.slice(eqIdx + 1).trim().replace(/^["']+|["']+$/g, '');
-            if ((k === 'GOOGLE_CLIENT_ID' || k === 'GOOGLE_ADS_CLIENT_ID') && v && !envClientId) {
-              envClientId = v;
-            }
-            if ((k === 'GOOGLE_CLIENT_SECRET' || k === 'GOOGLE_ADS_CLIENT_SECRET') && v && !envClientSecret) {
-              envClientSecret = v;
+    if (!globalOAuthHelpers.__toantrungEnvClientLoaded) {
+      globalOAuthHelpers.__toantrungEnvClientLoaded = true;
+      const envCandidates = [
+        path.resolve(process.cwd(), '.env'),
+        path.resolve(process.cwd(), '..', '..', '.env'),
+      ];
+      for (const envPath of envCandidates) {
+        try {
+          if (fs.existsSync(envPath)) {
+            const content = fs.readFileSync(envPath, 'utf8');
+            for (const line of content.split(/\r?\n/)) {
+              const trimmed = line.trim();
+              if (!trimmed || trimmed.startsWith('#')) continue;
+              const eqIdx = trimmed.indexOf('=');
+              if (eqIdx <= 0) continue;
+              const k = trimmed.slice(0, eqIdx).trim();
+              const v = trimmed.slice(eqIdx + 1).trim().replace(/^["']+|["']+$/g, '');
+              if ((k === 'GOOGLE_CLIENT_ID' || k === 'GOOGLE_ADS_CLIENT_ID') && v && !envClientId) {
+                envClientId = v;
+              }
+              if ((k === 'GOOGLE_CLIENT_SECRET' || k === 'GOOGLE_ADS_CLIENT_SECRET') && v && !envClientSecret) {
+                envClientSecret = v;
+              }
             }
           }
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
       }
+      if (envClientId && envClientSecret) {
+        globalOAuthHelpers.__toantrungEnvClientCache = { clientId: envClientId, clientSecret: envClientSecret };
+      }
+    } else if (globalOAuthHelpers.__toantrungEnvClientCache) {
+      envClientId = globalOAuthHelpers.__toantrungEnvClientCache.clientId;
+      envClientSecret = globalOAuthHelpers.__toantrungEnvClientCache.clientSecret;
     }
   }
 
@@ -601,6 +619,9 @@ export async function testGoogleConnection(): Promise<GoogleTestConnectionResult
   }
 
   await saveGoogleConnection(conn);
+  invalidateConfiguredWebsitesCache();
+  invalidateGa4LiveCaches();
+  bumpDomainRevisions(['websites', 'tracking', 'ads', 'reports'], 'google_test_connection');
 
   return {
     success: isHealthy,
@@ -640,6 +661,9 @@ export async function saveSelectedResources(input: {
   }
 
   await saveGoogleConnection(conn);
+  invalidateConfiguredWebsitesCache();
+  invalidateGa4LiveCaches();
+  bumpDomainRevisions(['websites', 'tracking', 'ads', 'reports'], 'google_select_resources');
   return getGoogleOAuthStatusDto();
 }
 
@@ -820,6 +844,9 @@ export async function connectSandboxDemo(email = 'toantrung.marketing@gmail.com'
 
 export async function disconnectGoogleOAuth() {
   await saveGoogleConnection(null);
+  invalidateConfiguredWebsitesCache();
+  invalidateGa4LiveCaches();
+  bumpDomainRevisions(['websites', 'tracking', 'ads', 'reports'], 'google_oauth_disconnected');
 }
 
 export async function getValidAccessToken(): Promise<string | null> {
@@ -836,39 +863,49 @@ export async function getValidAccessToken(): Promise<string | null> {
     return conn.accessToken;
   }
 
-  // Needs refresh:
+  // Needs refresh: coalesce concurrent refresh attempts across routes & warmers
   if (!conn.refreshToken) {
     return conn.accessToken; // Fallback
   }
 
-  const cfg = await getGoogleClientConfig();
-  if (!cfg) return conn.accessToken;
-
-  try {
-    const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: cfg.clientId,
-        client_secret: cfg.clientSecret,
-        refresh_token: conn.refreshToken,
-        grant_type: 'refresh_token',
-      }).toString(),
-    });
-    if (tokenResp.ok) {
-      const data = (await tokenResp.json()) as { access_token?: string; expires_in?: number };
-      if (data.access_token) {
-        conn.accessToken = data.access_token;
-        conn.expiresAt = new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString();
-        await saveGoogleConnection(conn);
-        return data.access_token;
-      }
-    }
-  } catch {
-    // ignore
+  if (globalOAuthHelpers.__toantrungTokenRefreshInFlight) {
+    return globalOAuthHelpers.__toantrungTokenRefreshInFlight;
   }
 
-  return conn.accessToken;
+  const refreshPromise = (async () => {
+    try {
+      const cfg = await getGoogleClientConfig();
+      if (!cfg) return conn.accessToken;
+
+      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: cfg.clientId,
+          client_secret: cfg.clientSecret,
+          refresh_token: conn.refreshToken || '',
+          grant_type: 'refresh_token',
+        }).toString(),
+      });
+      if (tokenResp.ok) {
+        const data = (await tokenResp.json()) as { access_token?: string; expires_in?: number };
+        if (data.access_token) {
+          conn.accessToken = data.access_token;
+          conn.expiresAt = new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString();
+          await saveGoogleConnection(conn);
+          return data.access_token;
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      globalOAuthHelpers.__toantrungTokenRefreshInFlight = null;
+    }
+    return conn.accessToken;
+  })();
+
+  globalOAuthHelpers.__toantrungTokenRefreshInFlight = refreshPromise;
+  return refreshPromise;
 }
 
 export const ALLOWED_COMPANY_GA4_PROPERTY_IDS = [
@@ -890,6 +927,7 @@ export const ALLOWED_COMPANY_GSC_SITES = [
 const globalForTrackingSync = globalThis as typeof globalThis & {
   __googleTrackingAutoSyncInFlight?: Promise<unknown> | null;
   __googleTrackingLastAutoSyncAttemptMs?: number;
+  __toantrungUnifiedSyncInFlight?: Promise<Awaited<ReturnType<typeof runSyncAllGoogleDataAcrossModulesInternal>>> | null;
 };
 
 /**
@@ -933,6 +971,18 @@ export function triggerBackgroundTrackingSyncIfStale(): void {
  * Called during manual sync button, OAuth callback, or scheduled worker slots (02:00, 11:00, 17:00)
  */
 export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_1100' | 'LIGHT_1700' | 'MANUAL_RETRY' = 'MANUAL_RETRY') {
+  if (globalForTrackingSync.__toantrungUnifiedSyncInFlight) {
+    return globalForTrackingSync.__toantrungUnifiedSyncInFlight;
+  }
+  const run = runSyncAllGoogleDataAcrossModulesInternal(slot).finally(() => {
+    globalForTrackingSync.__toantrungUnifiedSyncInFlight = null;
+  });
+  globalForTrackingSync.__toantrungUnifiedSyncInFlight = run;
+  return run;
+}
+
+async function runSyncAllGoogleDataAcrossModulesInternal(slot: 'FULL_0200' | 'LIGHT_1100' | 'LIGHT_1700' | 'MANUAL_RETRY' = 'MANUAL_RETRY') {
+  const syncStartedAt = new Date();
   const token = await getValidAccessToken();
   const conn = await getGoogleConnection();
   const windowDays = slot === 'FULL_0200' ? 30 : 7;
@@ -1017,7 +1067,7 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
           status: adsOutcome.success ? 'success' : 'failed',
           errorMessage: adsOutcome.success ? null : (adsOutcome.error?.slice(0, 500) || 'Lỗi Google Ads API'),
           consecutiveFailures: adsConsecutive,
-          startedAt: new Date(),
+          startedAt: syncStartedAt,
           completedAt: new Date(),
         },
       });
@@ -1062,7 +1112,7 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
           ? (ga4Outcome.isPartial ? ga4Outcome.error?.slice(0, 500) || null : null)
           : (ga4Outcome.error?.slice(0, 500) || 'Lỗi không xác định'),
         consecutiveFailures: ga4Consecutive,
-        startedAt: new Date(),
+        startedAt: syncStartedAt,
         completedAt: new Date(),
       },
     });
@@ -1080,7 +1130,7 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
           ? (scOutcome.isPartial ? scOutcome.error?.slice(0, 500) || null : null)
           : (scOutcome.error?.slice(0, 500) || 'Lỗi không xác định'),
         consecutiveFailures: scConsecutive,
-        startedAt: new Date(),
+        startedAt: syncStartedAt,
         completedAt: new Date(),
       },
     });
@@ -1120,6 +1170,10 @@ export async function syncAllGoogleDataAcrossModules(slot: 'FULL_0200' | 'LIGHT_
   }
 
   const overallSuccess = ga4Outcome.success || scOutcome.success;
+
+  invalidateConfiguredWebsitesCache();
+  invalidateGa4LiveCaches();
+  bumpDomainRevisions(['tracking', 'ads', 'reports', 'leads', 'websites'], `google_sync_${slot}`);
 
   return {
     success: overallSuccess,

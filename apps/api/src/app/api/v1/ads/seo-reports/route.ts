@@ -1,5 +1,6 @@
 import { jsonError, jsonSuccess } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import {
   generateSeoAiReportFromSnapshot,
   listSeoAiReports,
@@ -67,6 +68,7 @@ export async function PATCH(req: Request) {
     if (!updated) {
       return jsonError('NOT_FOUND', 'Không tìm thấy báo cáo SEO AI.', 404);
     }
+    bumpDomainRevisions(['seo_reports', 'ads', 'reports'], 'update_seo_ai_report');
     return jsonSuccess({ report: updated });
   } catch (err) {
     return jsonError(

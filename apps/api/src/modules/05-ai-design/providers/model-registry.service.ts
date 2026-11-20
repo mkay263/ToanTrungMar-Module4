@@ -21,6 +21,7 @@ import type {
   AiTaskValidationStatus,
   DesignTaskCode,
 } from '@toantrung/contracts';
+import { bumpDomainRevisions } from '../../../core/cache/server-data-cache';
 import { APP_CONFIG } from '../../../core/config';
 
 export interface StoredProviderCredentialEntry {
@@ -379,12 +380,35 @@ function recommendTasksForOperations(ops: AiSupportedOperation[]): DesignTaskCod
   return list;
 }
 
+const globalForModelRegistry = globalThis as unknown as {
+  __toantrungModelRegistryMemCache?: {
+    mtimeMs: number;
+    size: number;
+    data: PersistedRegistryCache;
+  } | null;
+  __toantrungModelRegistryRefreshInFlight?: Promise<AiModelRegistrySnapshotDto> | null;
+};
+
 export class AiModelRegistryService {
   private static readCache(): PersistedRegistryCache | null {
     try {
       const file = getCacheFilePath();
-      if (!fs.existsSync(file)) return null;
-      return JSON.parse(fs.readFileSync(file, 'utf-8')) as PersistedRegistryCache;
+      if (!fs.existsSync(file)) {
+        globalForModelRegistry.__toantrungModelRegistryMemCache = null;
+        return null;
+      }
+      const stat = fs.statSync(file);
+      const mem = globalForModelRegistry.__toantrungModelRegistryMemCache;
+      if (mem && mem.mtimeMs === stat.mtimeMs && mem.size === stat.size) {
+        return mem.data;
+      }
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as PersistedRegistryCache;
+      globalForModelRegistry.__toantrungModelRegistryMemCache = {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        data: parsed,
+      };
+      return parsed;
     } catch {
       return null;
     }
@@ -393,7 +417,14 @@ export class AiModelRegistryService {
   private static writeCache(cache: PersistedRegistryCache): void {
     try {
       const file = getCacheFilePath();
-      fs.writeFileSync(file, JSON.stringify(cache, null, 2), 'utf-8');
+      const raw = JSON.stringify(cache, null, 2);
+      fs.writeFileSync(file, raw, 'utf-8');
+      const stat = fs.statSync(file);
+      globalForModelRegistry.__toantrungModelRegistryMemCache = {
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        data: cache,
+      };
     } catch {
       // Ignore write failures in read-only sandboxes
     }
@@ -724,195 +755,86 @@ export class AiModelRegistryService {
     };
   }
 
-  static async getModelRegistrySnapshot(
-    stored: StoredMultiAiConfigShape,
-    options?: { forceRefresh?: boolean; onlyProviderId?: AiProviderId }
-  ): Promise<AiModelRegistrySnapshotDto> {
-    const fingerprint = buildCredentialFingerprint(stored);
-    const cached = this.readCache();
-    const isFresh =
-      !options?.forceRefresh &&
-      cached &&
-      cached.credentialFingerprint === fingerprint &&
-      Date.now() - new Date(cached.generatedAt).getTime() < REGISTRY_CACHE_TTL_MINUTES * 60_000;
-
-    if (isFresh && cached) {
-      return {
-        generatedAt: cached.generatedAt,
-        cacheTtlMinutes: cached.cacheTtlMinutes,
-        connections: cached.connections,
-        models: cached.models,
-        defaultModelByTask: this.computeDefaultModelsByTask(cached.models, stored),
-        probeBudgetMaxUsd: cached.probeBudgetMaxUsd,
-        probeBudgetSpentUsd: Number(cached.probeBudgetSpentUsd.toFixed(4)),
-      };
-    }
-
-    const existingMap = new Map<string, AiDiscoveredModelRegistryItemDto>();
-    for (const m of cached?.models || []) {
-      existingMap.set(`${m.providerId}::${m.modelId}`, m);
-    }
-
+  private static buildFastFallbackSnapshot(
+    stored: StoredMultiAiConfigShape
+  ): AiModelRegistrySnapshotDto {
+    const nowIso = new Date().toISOString();
     const connections: AiProviderRegistryConnectionDto[] = [];
     const models: AiDiscoveredModelRegistryItemDto[] = [];
-    const nowIso = new Date().toISOString();
 
     const googleCred = resolveEffectiveProviderCredential('google_imagen', stored);
-    if (!googleCred.apiKey) {
-      connections.push({
-        providerId: 'google_imagen',
-        providerName: 'Google Gemini & Imagen',
-        connectionKind: 'direct_official',
-        configuredEndpoint: googleCred.apiEndpoint,
-        hasCredential: false,
-        maskedCredential: null,
-        listApiSupported: true,
-        listApiStatus: 'not_configured',
-        listApiDetail: 'Chưa cấu hình Google API Key.',
-        discoveredModelCount: 0,
-        lastDiscoveryAt: null,
-        cacheExpiresAt: null,
-      });
-    } else if (options?.onlyProviderId && options.onlyProviderId !== 'google_imagen' && cached) {
-      const prevConn = cached.connections.find((c) => c.providerId === 'google_imagen');
-      if (prevConn) connections.push(prevConn);
-      models.push(...cached.models.filter((m) => m.providerId === 'google_imagen'));
-    } else {
-      const res = await this.discoverGoogleModels(
-        googleCred.apiKey,
-        googleCred.apiEndpoint || 'https://generativelanguage.googleapis.com/v1beta',
-        existingMap
-      );
-      connections.push(res.connection);
-      models.push(...res.models);
-    }
-
-    const openAiCred = resolveEffectiveProviderCredential('openai_dalle', stored);
-    if (!openAiCred.apiKey) {
-      connections.push({
-        providerId: 'openai_dalle',
-        providerName: 'OpenAI Official API',
-        connectionKind: 'direct_official',
-        configuredEndpoint: openAiCred.apiEndpoint,
-        hasCredential: false,
-        maskedCredential: null,
-        listApiSupported: true,
-        listApiStatus: 'not_configured',
-        listApiDetail: 'Chưa cấu hình OPENAI_API_KEY.',
-        discoveredModelCount: 0,
-        lastDiscoveryAt: null,
-        cacheExpiresAt: null,
-      });
-    } else if (options?.onlyProviderId && options.onlyProviderId !== 'openai_dalle' && cached) {
-      const prevConn = cached.connections.find((c) => c.providerId === 'openai_dalle');
-      if (prevConn) connections.push(prevConn);
-      models.push(...cached.models.filter((m) => m.providerId === 'openai_dalle'));
-    } else {
-      const res = await this.discoverOpenAiCompatibleModels(
-        'openai_dalle',
-        'OpenAI Official API',
-        'direct_official',
-        openAiCred.apiKey,
-        openAiCred.apiEndpoint || 'https://api.openai.com/v1',
-        existingMap
-      );
-      connections.push(res.connection);
-      models.push(...res.models);
-    }
-
-    const customCred = resolveEffectiveProviderCredential('custom_endpoint', stored);
-    if (!customCred.apiKey || !customCred.apiEndpoint) {
-      connections.push({
-        providerId: 'custom_endpoint',
-        providerName: 'OpenAI-Compatible Gateway',
-        connectionKind: 'openai_compatible_gateway',
-        configuredEndpoint: customCred.apiEndpoint,
-        hasCredential: Boolean(customCred.apiKey),
-        maskedCredential: maskSecretValue(customCred.apiKey),
-        listApiSupported: true,
-        listApiStatus: 'not_configured',
-        listApiDetail: 'Cần cả Endpoint URL và API Key cho Gateway.',
-        discoveredModelCount: 0,
-        lastDiscoveryAt: null,
-        cacheExpiresAt: null,
-      });
-    } else if (options?.onlyProviderId && options.onlyProviderId !== 'custom_endpoint' && cached) {
-      const prevConn = cached.connections.find((c) => c.providerId === 'custom_endpoint');
-      if (prevConn) connections.push(prevConn);
-      models.push(...cached.models.filter((m) => m.providerId === 'custom_endpoint'));
-    } else {
-      const res = await this.discoverOpenAiCompatibleModels(
-        'custom_endpoint',
-        'OpenAI-Compatible Gateway',
-        'openai_compatible_gateway',
-        customCred.apiKey,
-        customCred.apiEndpoint,
-        existingMap
-      );
-      connections.push(res.connection);
-      models.push(...res.models);
-    }
-
-    // BFL & Stability: official APIs do not expose a standard dynamic /models catalog list
-    for (const staticPid of ['flux_bfl', 'stability_ai'] as const) {
-      const cred = resolveEffectiveProviderCredential(staticPid, stored);
-      const staticModels =
-        staticPid === 'flux_bfl'
-          ? ['flux-1.1-pro-ultra', 'flux-1-fill-pro']
-          : ['sd3.5-large', 'sdxl-inpaint-v1'];
-      connections.push({
-        providerId: staticPid,
-        providerName: staticPid === 'flux_bfl' ? 'Black Forest Labs (FLUX)' : 'Stability AI (SD 3.5)',
-        connectionKind: 'direct_official',
-        configuredEndpoint: cred.apiEndpoint,
-        hasCredential: Boolean(cred.apiKey),
-        maskedCredential: maskSecretValue(cred.apiKey),
-        listApiSupported: false,
-        listApiStatus: cred.apiKey ? 'unsupported' : 'not_configured',
-        listApiDetail: cred.apiKey
-          ? 'Provider không hỗ trợ List Models API chuẩn; dùng danh sách model cấu hình thủ công.'
-          : 'Chưa cấu hình API Key.',
-        discoveredModelCount: staticModels.length,
-        lastDiscoveryAt: nowIso,
-        cacheExpiresAt: null,
-      });
-      for (const mId of staticModels) {
-        const inferred = inferOperationsFromCatalogMetadata(staticPid, mId);
-        const prev = existingMap.get(`${staticPid}::${mId}`);
+    connections.push({
+      providerId: 'google_imagen',
+      providerName: 'Google Gemini & Imagen',
+      connectionKind: 'direct_official',
+      configuredEndpoint: googleCred.apiEndpoint,
+      hasCredential: Boolean(googleCred.apiKey),
+      maskedCredential: maskSecretValue(googleCred.apiKey),
+      listApiSupported: true,
+      listApiStatus: googleCred.apiKey ? 'ok' : 'not_configured',
+      listApiDetail: googleCred.apiKey
+        ? 'Đang dùng cấu hình tĩnh trong lúc đồng bộ catalog nền...'
+        : 'Chưa cấu hình Google API Key.',
+      discoveredModelCount: 0,
+      lastDiscoveryAt: null,
+      cacheExpiresAt: null,
+    });
+    if (googleCred.apiKey) {
+      for (const mId of ['gemini-2.5-flash-image', 'imagen-3.0-generate-002', 'gemini-3.5-flash-lite']) {
+        const inferred = inferOperationsFromCatalogMetadata('google_imagen', mId);
         models.push({
           modelId: mId,
           displayName: mId,
-          providerId: staticPid,
+          providerId: 'google_imagen',
           connectionKind: 'direct_official',
           listedInCatalog: false,
           supportedOperations: inferred.ops,
-          taskStatuses:
-            prev?.capabilityEvidence === 'live_probe'
-              ? prev.taskStatuses
-              : buildInitialTaskStatuses(inferred.ops, staticPid),
-          capabilityEvidence: prev?.capabilityEvidence === 'live_probe' ? 'live_probe' : 'documentation',
+          taskStatuses: buildInitialTaskStatuses(inferred.ops, 'google_imagen'),
+          capabilityEvidence: 'documentation',
           recommendedDefaultForTasks: recommendTasksForOperations(inferred.ops),
-          lastCheckedAt: prev?.lastCheckedAt || null,
-          statusDetail: prev?.statusDetail || `${inferred.note} (Cấu hình thủ công)`,
+          lastCheckedAt: null,
+          statusDetail: inferred.note,
         });
       }
     }
 
-    // Always include local_sandbox compositor so offline fallback/perspective remains transparent
+    const openAiCred = resolveEffectiveProviderCredential('openai_dalle', stored);
     connections.push({
-      providerId: 'local_sandbox',
-      providerName: 'Toàn Trung Studio Engine (Local)',
-      connectionKind: 'local_compositor',
-      configuredEndpoint: 'internal://toantrung-studio-v3',
-      hasCredential: true,
-      maskedCredential: 'internal',
-      listApiSupported: false,
-      listApiStatus: 'unsupported',
-      listApiDetail: 'Compositor nội bộ luôn sẵn sàng (chỉ dựng bố cục/phối cảnh, không sinh ảnh AI cloud).',
-      discoveredModelCount: 1,
-      lastDiscoveryAt: nowIso,
+      providerId: 'openai_dalle',
+      providerName: 'OpenAI Official API',
+      connectionKind: 'direct_official',
+      configuredEndpoint: openAiCred.apiEndpoint,
+      hasCredential: Boolean(openAiCred.apiKey),
+      maskedCredential: maskSecretValue(openAiCred.apiKey),
+      listApiSupported: true,
+      listApiStatus: openAiCred.apiKey ? 'ok' : 'not_configured',
+      listApiDetail: openAiCred.apiKey
+        ? 'Đang dùng cấu hình tĩnh trong lúc đồng bộ catalog nền...'
+        : 'Chưa cấu hình OPENAI_API_KEY.',
+      discoveredModelCount: 0,
+      lastDiscoveryAt: null,
       cacheExpiresAt: null,
     });
+
+    const customCred = resolveEffectiveProviderCredential('custom_endpoint', stored);
+    connections.push({
+      providerId: 'custom_endpoint',
+      providerName: 'OpenAI-Compatible Gateway',
+      connectionKind: 'openai_compatible_gateway',
+      configuredEndpoint: customCred.apiEndpoint,
+      hasCredential: Boolean(customCred.apiKey),
+      maskedCredential: maskSecretValue(customCred.apiKey),
+      listApiSupported: true,
+      listApiStatus: customCred.apiKey && customCred.apiEndpoint ? 'ok' : 'not_configured',
+      listApiDetail:
+        customCred.apiKey && customCred.apiEndpoint
+          ? 'Đang dùng cấu hình tĩnh trong lúc đồng bộ catalog nền...'
+          : 'Cần cả Endpoint URL và API Key cho Gateway.',
+      discoveredModelCount: 0,
+      lastDiscoveryAt: null,
+      cacheExpiresAt: null,
+    });
+
     models.push({
       modelId: 'toantrung-studio-v3',
       displayName: 'Toàn Trung Studio Engine v3 (Local)',
@@ -926,27 +848,313 @@ export class AiModelRegistryService {
       lastCheckedAt: nowIso,
       statusDetail: 'Compositor nội bộ dựng nháp bố cục/phối cảnh.',
     });
-
-    const nextCache: PersistedRegistryCache = {
-      generatedAt: nowIso,
-      cacheTtlMinutes: REGISTRY_CACHE_TTL_MINUTES,
-      credentialFingerprint: fingerprint,
-      probeBudgetMaxUsd: cached?.probeBudgetMaxUsd ?? DEFAULT_PROBE_BUDGET_MAX_USD,
-      probeBudgetSpentUsd: cached?.probeBudgetSpentUsd ?? 0,
-      connections,
-      models,
-    };
-    this.writeCache(nextCache);
+    connections.push({
+      providerId: 'local_sandbox',
+      providerName: 'Toàn Trung Studio Engine (Local)',
+      connectionKind: 'local_compositor',
+      configuredEndpoint: 'internal://toantrung-studio-v3',
+      hasCredential: true,
+      maskedCredential: 'internal',
+      listApiSupported: false,
+      listApiStatus: 'unsupported',
+      listApiDetail: 'Compositor nội bộ luôn sẵn sàng.',
+      discoveredModelCount: 1,
+      lastDiscoveryAt: nowIso,
+      cacheExpiresAt: null,
+    });
 
     return {
-      generatedAt: nextCache.generatedAt,
-      cacheTtlMinutes: nextCache.cacheTtlMinutes,
-      connections: nextCache.connections,
-      models: nextCache.models,
-      defaultModelByTask: this.computeDefaultModelsByTask(nextCache.models, stored),
-      probeBudgetMaxUsd: nextCache.probeBudgetMaxUsd,
-      probeBudgetSpentUsd: Number(nextCache.probeBudgetSpentUsd.toFixed(4)),
+      generatedAt: nowIso,
+      cacheTtlMinutes: REGISTRY_CACHE_TTL_MINUTES,
+      connections,
+      models,
+      defaultModelByTask: this.computeDefaultModelsByTask(models, stored),
+      probeBudgetMaxUsd: DEFAULT_PROBE_BUDGET_MAX_USD,
+      probeBudgetSpentUsd: 0,
     };
+  }
+
+  private static triggerBackgroundRefresh(stored: StoredMultiAiConfigShape): void {
+    if (process.env.NODE_TEST_CONTEXT) return;
+    if (globalForModelRegistry.__toantrungModelRegistryRefreshInFlight) return;
+    void this.getModelRegistrySnapshot(stored, { forceRefresh: true }).catch(() => {
+      // background catalog sync must not reject unhandled
+    });
+  }
+
+  static async getModelRegistrySnapshot(
+    stored: StoredMultiAiConfigShape,
+    options?: { forceRefresh?: boolean; onlyProviderId?: AiProviderId }
+  ): Promise<AiModelRegistrySnapshotDto> {
+    const fingerprint = buildCredentialFingerprint(stored);
+    const cached = this.readCache();
+    const isFresh =
+      !options?.forceRefresh &&
+      cached &&
+      cached.credentialFingerprint === fingerprint &&
+      Date.now() - new Date(cached.generatedAt).getTime() < REGISTRY_CACHE_TTL_MINUTES * 60_000;
+
+    if (!options?.forceRefresh && cached) {
+      if (!isFresh) {
+        this.triggerBackgroundRefresh(stored);
+      }
+      return {
+        generatedAt: cached.generatedAt,
+        cacheTtlMinutes: cached.cacheTtlMinutes,
+        connections: cached.connections,
+        models: cached.models,
+        defaultModelByTask: this.computeDefaultModelsByTask(cached.models, stored),
+        probeBudgetMaxUsd: cached.probeBudgetMaxUsd,
+        probeBudgetSpentUsd: Number(cached.probeBudgetSpentUsd.toFixed(4)),
+      };
+    }
+
+    if (!options?.forceRefresh && !cached && !process.env.NODE_TEST_CONTEXT) {
+      this.triggerBackgroundRefresh(stored);
+      return this.buildFastFallbackSnapshot(stored);
+    }
+
+    if (!options?.onlyProviderId && globalForModelRegistry.__toantrungModelRegistryRefreshInFlight) {
+      return globalForModelRegistry.__toantrungModelRegistryRefreshInFlight;
+    }
+
+    const runDiscovery = async (): Promise<AiModelRegistrySnapshotDto> => {
+      const existingMap = new Map<string, AiDiscoveredModelRegistryItemDto>();
+      for (const m of cached?.models || []) {
+        existingMap.set(`${m.providerId}::${m.modelId}`, m);
+      }
+
+      const connections: AiProviderRegistryConnectionDto[] = [];
+      const models: AiDiscoveredModelRegistryItemDto[] = [];
+      const nowIso = new Date().toISOString();
+
+      const discoverGoogle = async () => {
+        const googleCred = resolveEffectiveProviderCredential('google_imagen', stored);
+        if (!googleCred.apiKey) {
+          return {
+            connection: {
+              providerId: 'google_imagen' as const,
+              providerName: 'Google Gemini & Imagen',
+              connectionKind: 'direct_official' as const,
+              configuredEndpoint: googleCred.apiEndpoint,
+              hasCredential: false,
+              maskedCredential: null,
+              listApiSupported: true,
+              listApiStatus: 'not_configured' as const,
+              listApiDetail: 'Chưa cấu hình Google API Key.',
+              discoveredModelCount: 0,
+              lastDiscoveryAt: null,
+              cacheExpiresAt: null,
+            },
+            models: [] as AiDiscoveredModelRegistryItemDto[],
+          };
+        }
+        if (options?.onlyProviderId && options.onlyProviderId !== 'google_imagen' && cached) {
+          const prevConn = cached.connections.find((c) => c.providerId === 'google_imagen');
+          return {
+            connection: prevConn || null,
+            models: cached.models.filter((m) => m.providerId === 'google_imagen'),
+          };
+        }
+        return this.discoverGoogleModels(
+          googleCred.apiKey,
+          googleCred.apiEndpoint || 'https://generativelanguage.googleapis.com/v1beta',
+          existingMap
+        );
+      };
+
+      const discoverOpenAi = async () => {
+        const openAiCred = resolveEffectiveProviderCredential('openai_dalle', stored);
+        if (!openAiCred.apiKey) {
+          return {
+            connection: {
+              providerId: 'openai_dalle' as const,
+              providerName: 'OpenAI Official API',
+              connectionKind: 'direct_official' as const,
+              configuredEndpoint: openAiCred.apiEndpoint,
+              hasCredential: false,
+              maskedCredential: null,
+              listApiSupported: true,
+              listApiStatus: 'not_configured' as const,
+              listApiDetail: 'Chưa cấu hình OPENAI_API_KEY.',
+              discoveredModelCount: 0,
+              lastDiscoveryAt: null,
+              cacheExpiresAt: null,
+            },
+            models: [] as AiDiscoveredModelRegistryItemDto[],
+          };
+        }
+        if (options?.onlyProviderId && options.onlyProviderId !== 'openai_dalle' && cached) {
+          const prevConn = cached.connections.find((c) => c.providerId === 'openai_dalle');
+          return {
+            connection: prevConn || null,
+            models: cached.models.filter((m) => m.providerId === 'openai_dalle'),
+          };
+        }
+        return this.discoverOpenAiCompatibleModels(
+          'openai_dalle',
+          'OpenAI Official API',
+          'direct_official',
+          openAiCred.apiKey,
+          openAiCred.apiEndpoint || 'https://api.openai.com/v1',
+          existingMap
+        );
+      };
+
+      const discoverCustom = async () => {
+        const customCred = resolveEffectiveProviderCredential('custom_endpoint', stored);
+        if (!customCred.apiKey || !customCred.apiEndpoint) {
+          return {
+            connection: {
+              providerId: 'custom_endpoint' as const,
+              providerName: 'OpenAI-Compatible Gateway',
+              connectionKind: 'openai_compatible_gateway' as const,
+              configuredEndpoint: customCred.apiEndpoint,
+              hasCredential: Boolean(customCred.apiKey),
+              maskedCredential: maskSecretValue(customCred.apiKey),
+              listApiSupported: true,
+              listApiStatus: 'not_configured' as const,
+              listApiDetail: 'Cần cả Endpoint URL và API Key cho Gateway.',
+              discoveredModelCount: 0,
+              lastDiscoveryAt: null,
+              cacheExpiresAt: null,
+            },
+            models: [] as AiDiscoveredModelRegistryItemDto[],
+          };
+        }
+        if (options?.onlyProviderId && options.onlyProviderId !== 'custom_endpoint' && cached) {
+          const prevConn = cached.connections.find((c) => c.providerId === 'custom_endpoint');
+          return {
+            connection: prevConn || null,
+            models: cached.models.filter((m) => m.providerId === 'custom_endpoint'),
+          };
+        }
+        return this.discoverOpenAiCompatibleModels(
+          'custom_endpoint',
+          'OpenAI-Compatible Gateway',
+          'openai_compatible_gateway',
+          customCred.apiKey,
+          customCred.apiEndpoint,
+          existingMap
+        );
+      };
+
+      const [googleRes, openAiRes, customRes] = await Promise.all([
+        discoverGoogle(),
+        discoverOpenAi(),
+        discoverCustom(),
+      ]);
+
+      for (const r of [googleRes, openAiRes, customRes]) {
+        if (r.connection) connections.push(r.connection);
+        models.push(...r.models);
+      }
+
+      // BFL & Stability: official APIs do not expose a standard dynamic /models catalog list
+      for (const staticPid of ['flux_bfl', 'stability_ai'] as const) {
+        const cred = resolveEffectiveProviderCredential(staticPid, stored);
+        const staticModels =
+          staticPid === 'flux_bfl'
+            ? ['flux-1.1-pro-ultra', 'flux-1-fill-pro']
+            : ['sd3.5-large', 'sdxl-inpaint-v1'];
+        connections.push({
+          providerId: staticPid,
+          providerName: staticPid === 'flux_bfl' ? 'Black Forest Labs (FLUX)' : 'Stability AI (SD 3.5)',
+          connectionKind: 'direct_official',
+          configuredEndpoint: cred.apiEndpoint,
+          hasCredential: Boolean(cred.apiKey),
+          maskedCredential: maskSecretValue(cred.apiKey),
+          listApiSupported: false,
+          listApiStatus: cred.apiKey ? 'unsupported' : 'not_configured',
+          listApiDetail: cred.apiKey
+            ? 'Provider không hỗ trợ List Models API chuẩn; dùng danh sách model cấu hình thủ công.'
+            : 'Chưa cấu hình API Key.',
+          discoveredModelCount: staticModels.length,
+          lastDiscoveryAt: nowIso,
+          cacheExpiresAt: null,
+        });
+        for (const mId of staticModels) {
+          const inferred = inferOperationsFromCatalogMetadata(staticPid, mId);
+          const prev = existingMap.get(`${staticPid}::${mId}`);
+          models.push({
+            modelId: mId,
+            displayName: mId,
+            providerId: staticPid,
+            connectionKind: 'direct_official',
+            listedInCatalog: false,
+            supportedOperations: inferred.ops,
+            taskStatuses:
+              prev?.capabilityEvidence === 'live_probe'
+                ? prev.taskStatuses
+                : buildInitialTaskStatuses(inferred.ops, staticPid),
+            capabilityEvidence: prev?.capabilityEvidence === 'live_probe' ? 'live_probe' : 'documentation',
+            recommendedDefaultForTasks: recommendTasksForOperations(inferred.ops),
+            lastCheckedAt: prev?.lastCheckedAt || null,
+            statusDetail: prev?.statusDetail || `${inferred.note} (Cấu hình thủ công)`,
+          });
+        }
+      }
+
+      // Always include local_sandbox compositor so offline fallback/perspective remains transparent
+      connections.push({
+        providerId: 'local_sandbox',
+        providerName: 'Toàn Trung Studio Engine (Local)',
+        connectionKind: 'local_compositor',
+        configuredEndpoint: 'internal://toantrung-studio-v3',
+        hasCredential: true,
+        maskedCredential: 'internal',
+        listApiSupported: false,
+        listApiStatus: 'unsupported',
+        listApiDetail: 'Compositor nội bộ luôn sẵn sàng (chỉ dựng bố cục/phối cảnh, không sinh ảnh AI cloud).',
+        discoveredModelCount: 1,
+        lastDiscoveryAt: nowIso,
+        cacheExpiresAt: null,
+      });
+      models.push({
+        modelId: 'toantrung-studio-v3',
+        displayName: 'Toàn Trung Studio Engine v3 (Local)',
+        providerId: 'local_sandbox',
+        connectionKind: 'local_compositor',
+        listedInCatalog: false,
+        supportedOperations: ['image_generation', 'image_editing_ref', 'inpainting_mask'],
+        taskStatuses: buildInitialTaskStatuses(['image_generation', 'image_editing_ref'], 'local_sandbox'),
+        capabilityEvidence: 'documentation',
+        recommendedDefaultForTasks: ['perspective_compose'],
+        lastCheckedAt: nowIso,
+        statusDetail: 'Compositor nội bộ dựng nháp bố cục/phối cảnh.',
+      });
+
+      const nextCache: PersistedRegistryCache = {
+        generatedAt: nowIso,
+        cacheTtlMinutes: REGISTRY_CACHE_TTL_MINUTES,
+        credentialFingerprint: fingerprint,
+        probeBudgetMaxUsd: cached?.probeBudgetMaxUsd ?? DEFAULT_PROBE_BUDGET_MAX_USD,
+        probeBudgetSpentUsd: cached?.probeBudgetSpentUsd ?? 0,
+        connections,
+        models,
+      };
+      this.writeCache(nextCache);
+      bumpDomainRevisions(['design'], 'model_registry_updated');
+
+      return {
+        generatedAt: nextCache.generatedAt,
+        cacheTtlMinutes: nextCache.cacheTtlMinutes,
+        connections: nextCache.connections,
+        models: nextCache.models,
+        defaultModelByTask: this.computeDefaultModelsByTask(nextCache.models, stored),
+        probeBudgetMaxUsd: nextCache.probeBudgetMaxUsd,
+        probeBudgetSpentUsd: Number(nextCache.probeBudgetSpentUsd.toFixed(4)),
+      };
+    };
+
+    if (!options?.onlyProviderId) {
+      const p = runDiscovery().finally(() => {
+        globalForModelRegistry.__toantrungModelRegistryRefreshInFlight = null;
+      });
+      globalForModelRegistry.__toantrungModelRegistryRefreshInFlight = p;
+      return p;
+    }
+    return runDiscovery();
   }
 
   private static computeDefaultModelsByTask(

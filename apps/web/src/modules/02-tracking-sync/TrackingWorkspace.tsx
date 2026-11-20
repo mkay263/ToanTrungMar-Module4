@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import {
   Activity,
@@ -19,15 +20,33 @@ import {
   type M02TrafficInteractionDto,
   type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
-import { apiRequest, peekApiCache, prefetchApiCache } from '@/core/http/client';
+import { apiRequest, peekApiCacheEntry } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
+import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
-import {
-  MarketingChannelMixCard,
-  MarketingTrafficChart,
-} from './MarketingTrafficChart';
+
+const MarketingTrafficChart = dynamic(
+  () => import('./MarketingTrafficChart').then((m) => m.MarketingTrafficChart),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-[296px] rounded-xl bg-slate-50 border border-slate-100 animate-pulse" />
+    ),
+  },
+);
+
+const MarketingChannelMixCard = dynamic(
+  () => import('./MarketingTrafficChart').then((m) => m.MarketingChannelMixCard),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-[260px] rounded-xl bg-slate-50 border border-slate-100 animate-pulse" />
+    ),
+  },
+);
 
 type MainBusinessTab = 'traffic' | 'ads';
 type TrafficTableSubTab = 'channels' | 'landing_pages' | 'actions';
@@ -57,14 +76,28 @@ export function TrackingWorkspace() {
   const { user } = useSession();
   const canDirectDesign = Boolean(user && hasBaPermission(user.roleCode, 'AI_DESIGN'));
   const { scope, hydrated, updateScope } = useDashboardScope();
-  const [businessTab, setBusinessTab] = useState<MainBusinessTab>('traffic');
-  const [trafficSubTab, setTrafficSubTab] = useState<TrafficTableSubTab>('channels');
-  const [page, setPage] = useState(1);
-  const [adsPage, setAdsPage] = useState(1);
+  const [businessTab, setBusinessTab] = useState<MainBusinessTab>(() => {
+    if (typeof window !== 'undefined') {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      if (t === 'ads' || t === 'traffic') return t;
+      const saved = loadRouteState<{ businessTab?: MainBusinessTab }>('tracking');
+      if (saved?.businessTab) return saved.businessTab;
+    }
+    return 'traffic';
+  });
+  const [trafficSubTab, setTrafficSubTab] = useState<TrafficTableSubTab>(() => {
+    const saved = loadRouteState<{ trafficSubTab?: TrafficTableSubTab }>('tracking');
+    return saved?.trafficSubTab || 'channels';
+  });
+  const [page, setPage] = useState(() => loadRouteState<{ page?: number }>('tracking')?.page || 1);
+  const [adsPage, setAdsPage] = useState(() => loadRouteState<{ adsPage?: number }>('tracking')?.adsPage || 1);
   const [searchTerm, setSearchTerm] = useState('');
   const [drawerCampaign, setDrawerCampaign] = useState<M02CampaignRowDto | null>(null);
   const [briefSubmittingId, setBriefSubmittingId] = useState<string | null>(null);
   const [briefNotice, setBriefNotice] = useState<string | null>(null);
+  const reqSeqRef = useRef<number>(0);
+  const prevScopeSigRef = useRef<string>(`${scope.websiteId}|${scope.preset}|${scope.from}|${scope.to}`);
+  const scrollRestoredRef = useRef<boolean>(false);
 
   const handleCreateCampaignBrief = async (c: M02CampaignRowDto) => {
     setBriefSubmittingId(c.campaignId);
@@ -131,115 +164,91 @@ export function TrackingWorkspace() {
     () => buildM02ApiPath(scope, page, adsPage),
     [scope, page, adsPage],
   );
+  const activePathRef = useRef<string>(apiPath);
+  activePathRef.current = apiPath;
 
-  const [data, setData] = useState<M02TrafficInteractionDto | null>(() =>
-    peekApiCache<M02TrafficInteractionDto>(apiPath),
-  );
+  const [dataState, setDataState] = useState<{
+    path: string;
+    data: M02TrafficInteractionDto;
+  } | null>(() => {
+    const cached = peekApiCacheEntry<M02TrafficInteractionDto>(apiPath);
+    return cached ? { path: apiPath, data: cached.data } : null;
+  });
+  const data = dataState && dataState.path === apiPath ? dataState.data : null;
+
   const [knownWebsites, setKnownWebsites] = useState<WebsiteConfigItemDto[]>(
-    () => peekApiCache<M02TrafficInteractionDto>(apiPath)?.coverage.availableWebsites || [],
+    () => peekApiCacheEntry<M02TrafficInteractionDto>(apiPath)?.data.coverage.availableWebsites || [],
   );
   const [loading, setLoading] = useState<boolean>(
-    () => !peekApiCache<M02TrafficInteractionDto>(apiPath),
+    () => !peekApiCacheEntry<M02TrafficInteractionDto>(apiPath),
   );
   const [refreshing, setRefreshing] = useState(false);
+  const [checkedAtIso, setCheckedAtIso] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    setPage(1);
-    setAdsPage(1);
+    const nextSig = `${scope.websiteId}|${scope.preset}|${scope.from}|${scope.to}`;
+    if (prevScopeSigRef.current !== nextSig) {
+      prevScopeSigRef.current = nextSig;
+      setPage(1);
+      setAdsPage(1);
+      setDrawerCampaign(null);
+    }
   }, [scope.websiteId, scope.preset, scope.from, scope.to]);
 
   useEffect(() => {
-    const cached = peekApiCache<M02TrafficInteractionDto>(apiPath);
+    const cached = peekApiCacheEntry<M02TrafficInteractionDto>(apiPath);
     if (cached) {
-      setData(cached);
-      if (cached.coverage.availableWebsites?.length) {
-        setKnownWebsites(cached.coverage.availableWebsites);
+      setDataState({ path: apiPath, data: cached.data });
+      if (cached.data.coverage.availableWebsites?.length) {
+        setKnownWebsites(cached.data.coverage.availableWebsites);
       }
+      setCheckedAtIso(new Date(cached.timestamp).toISOString());
       setLoading(false);
       setRefreshing(false);
     } else {
-      // Giữ nguyên dữ liệu hiện tại trên màn hình khi chuyển ngày/website để không bị nháy trắng trống
-      setRefreshing(true);
+      // Tuyệt đối không hiển thị dữ liệu phạm vi cũ dưới nhãn website/ngày mới
+      setDataState(null);
+      setLoading(true);
     }
   }, [apiPath]);
 
-  // Nạp trước ngầm (prefetch) các mốc ngày còn lại & Module 3 (Từ khóa & SEO) để chuyển tab tức thì
-  useEffect(() => {
-    if (!hydrated || !data) return;
-    const timer = window.setTimeout(() => {
-      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
-      for (const preset of presets) {
-        if (preset === scope.preset) continue;
-        prefetchApiCache(
-          buildM02ApiPath(
-            { websiteId: scope.websiteId || 'all', preset, from: '', to: '' },
-            1,
-            1,
-          ),
-        );
-      }
-      const m03Qs = new URLSearchParams({
-        view: 'spec',
-        websiteId: scope.websiteId || 'all',
-        preset: scope.preset || '7D',
-        page: '1',
-        pageSize: '20',
-        contentPage: '1',
-        contentPageSize: '12',
-        minImpressions: '30',
-        maxCtrPct: '3',
-      });
-      if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
-        m03Qs.set('from', scope.from);
-        m03Qs.set('to', scope.to);
-      }
-      prefetchApiCache(`/api/v1/ads?${m03Qs.toString()}`);
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [hydrated, Boolean(data), scope.websiteId, scope.preset, scope.from, scope.to]);
-
   const loadData = useCallback(
-    async (opts?: { manual?: boolean; signal?: AbortSignal }) => {
+    async (opts?: { manual?: boolean; silent?: boolean; signal?: AbortSignal }) => {
+      const requestPath = apiPath;
+      const seq = ++reqSeqRef.current;
       if (opts?.manual) setRefreshing(true);
-      setErrorMsg(null);
+      if (!opts?.silent) setErrorMsg(null);
       try {
-        const res = await apiRequest<M02TrafficInteractionDto>(apiPath, {
+        const res = await apiRequest<M02TrafficInteractionDto>(requestPath, {
           signal: opts?.signal,
-          skipCache: Boolean(opts?.manual),
+          skipCache: Boolean(opts?.manual || opts?.silent),
+          onRevalidated: (fresh) => {
+            if (activePathRef.current !== requestPath) return;
+            setDataState({ path: requestPath, data: fresh });
+            if (fresh.coverage.availableWebsites?.length) {
+              setKnownWebsites(fresh.coverage.availableWebsites);
+            }
+            setCheckedAtIso(new Date().toISOString());
+          },
         });
-        if (opts?.signal?.aborted) return;
-        setData(res);
+        if (opts?.signal?.aborted || seq !== reqSeqRef.current || activePathRef.current !== requestPath) {
+          return;
+        }
+        setDataState({ path: requestPath, data: res });
         if (res.coverage.availableWebsites?.length) {
           setKnownWebsites(res.coverage.availableWebsites);
         }
-        // Tự động làm mới lại sau 2s nếu request đầu tiên rơi vào lúc cache GA4 đang warm sau 00:00
-        if (
-          !opts?.manual &&
-          (res.metrics.sessions ?? 0) > 0 &&
-          res.metrics.users === null &&
-          res.metrics.engagementRatePct === null
-        ) {
-          window.setTimeout(() => {
-            if (!opts?.signal?.aborted) {
-              void apiRequest<M02TrafficInteractionDto>(apiPath, {
-                skipCache: true,
-                signal: opts?.signal,
-              })
-                .then((freshRes) => {
-                  if (!opts?.signal?.aborted) setData(freshRes);
-                })
-                .catch(() => { });
-            }
-          }, 2000);
-        }
+        setCheckedAtIso(new Date().toISOString());
       } catch (err) {
         if (opts?.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
           return;
         }
-        setErrorMsg(err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError);
+        if (seq === reqSeqRef.current && !opts?.silent) {
+          setErrorMsg(err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError);
+        }
       } finally {
-        if (!opts?.signal?.aborted) {
+        if (!opts?.signal?.aborted && seq === reqSeqRef.current) {
           setLoading(false);
           setRefreshing(false);
         }
@@ -253,19 +262,45 @@ export function TrackingWorkspace() {
     if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
 
     const controller = new AbortController();
-    void loadData({ signal: controller.signal });
+    const cached = peekApiCacheEntry<M02TrafficInteractionDto>(apiPath);
+    if (!cached || !cached.isFresh) {
+      void loadData({ silent: Boolean(cached), signal: controller.signal });
+    }
 
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void loadData();
-      }
-    }, 60_000);
+    const unsubscribe = subscribeDataSync(
+      ['tracking', 'ads', 'leads', 'websites'],
+      () => {
+        void loadData({ silent: true });
+      },
+    );
 
     return () => {
       controller.abort();
-      window.clearInterval(timer);
+      unsubscribe();
     };
-  }, [hydrated, scope.preset, scope.from, scope.to, loadData]);
+  }, [hydrated, apiPath, scope.preset, scope.from, scope.to, loadData]);
+
+  useEffect(() => {
+    saveRouteState('tracking', { businessTab, trafficSubTab, page, adsPage });
+  }, [businessTab, trafficSubTab, page, adsPage]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const scroller = document.getElementById('main-workspace-content');
+    if (!scroller) return;
+    if (!scrollRestoredRef.current && data) {
+      scrollRestoredRef.current = true;
+      const saved = loadRouteState<{ scrollTop?: number }>('tracking_scroll');
+      if (saved?.scrollTop && saved.scrollTop > 0) {
+        requestAnimationFrame(() => {
+          scroller.scrollTop = saved.scrollTop ?? 0;
+        });
+      }
+    }
+    return () => {
+      saveRouteState('tracking_scroll', { scrollTop: scroller.scrollTop });
+    };
+  }, [data]);
 
   useEffect(() => {
     const onSearch = (e: Event) => {
@@ -335,12 +370,23 @@ export function TrackingWorkspace() {
         availableWebsites={data?.coverage.availableWebsites || knownWebsites}
         comparisonLabel={sessionComp && sessionComp.pctChange !== null ? sessionComp.label : null}
         freshnessMessage={
-          refreshing
+          loading && !data
             ? UI_VOCABULARY.freshness.updating
-            : errorMsg
-              ? UI_VOCABULARY.fallbacks.loadError
-              : data?.freshness.statusMessage
+            : refreshing
+              ? UI_VOCABULARY.freshness.updating
+              : errorMsg
+                ? UI_VOCABULARY.fallbacks.loadError
+                : data?.freshness.statusMessage
         }
+        freshnessDetail={{
+          checkedAt: checkedAtIso,
+          lastSyncedAt: data?.freshness.lastSyncedAt || data?.freshness.lastSuccessAt || null,
+          latestSourceDataAt:
+            data?.freshness.latestSourceDataAt ||
+            data?.freshness.dataThrough ||
+            data?.scope.endDate ||
+            null,
+        }}
         freshnessTone={
           errorMsg
             ? 'error'
@@ -471,6 +517,20 @@ export function TrackingWorkspace() {
         )}
 
         {/* 6 KPI Truy cập (~108px) */}
+        {loading && !data ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[1, 2, 3, 4, 5, 6].map((k) => (
+              <div
+                key={k}
+                className="min-h-[108px] rounded-[12px] bg-white border border-slate-200/90 p-4 shadow-2xs space-y-2.5 animate-pulse"
+              >
+                <div className="h-3 w-28 rounded bg-slate-200" />
+                <div className="h-7 w-24 rounded bg-slate-200" />
+                <div className="h-3 w-44 rounded bg-slate-100" />
+              </div>
+            ))}
+          </div>
+        ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
             <span className="text-xs font-medium text-slate-600">Người dùng</span>
@@ -566,6 +626,7 @@ export function TrackingWorkspace() {
             </span>
           </div>
         </div>
+        )}
 
         {/* Biểu đồ Marketing Spline 8/12 + Cơ cấu Kênh thu hút 4/12 */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
@@ -604,7 +665,10 @@ export function TrackingWorkspace() {
         </div>
 
         {/* Bảng dưới: Tab Kênh / Trang vào / Hành động */}
-        <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+        <section
+          className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden"
+          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 360px' }}
+        >
           <div className="px-4 pt-2 border-b border-slate-200 flex items-center justify-between gap-2">
             <div
               role="tablist"
@@ -1073,7 +1137,10 @@ export function TrackingWorkspace() {
         </section>
 
         {/* Bảng chiến dịch phân trang + mở Drawer chi tiết nhóm quảng cáo / từ khóa / thiết bị / khu vực */}
-        <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+        <section
+          className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden"
+          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 380px' }}
+        >
           <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
             <h2 className="text-sm font-bold text-slate-900">Danh sách chiến dịch quảng cáo</h2>
             <span className="text-xs text-slate-500 tabular-nums">

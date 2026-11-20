@@ -3,6 +3,18 @@ import crypto from 'node:crypto';
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96 bits for AES-GCM
 const PREFIX = 'vault$v1$';
+const VAULT_SALT = 'toantrung_oauth_vault_salt_2026';
+
+const globalVaultCache = globalThis as unknown as {
+  __toantrungDerivedVaultKeys?: Map<string, Buffer>;
+};
+
+function getDerivedKeyMemo(): Map<string, Buffer> {
+  if (!globalVaultCache.__toantrungDerivedVaultKeys) {
+    globalVaultCache.__toantrungDerivedVaultKeys = new Map<string, Buffer>();
+  }
+  return globalVaultCache.__toantrungDerivedVaultKeys;
+}
 
 function getCandidateKeys(): Buffer[] {
   const secrets = [
@@ -12,9 +24,16 @@ function getCandidateKeys(): Buffer[] {
     'toantrung-v2-fallback-dev-secret-2026',
   ].filter(Boolean) as string[];
 
-  // Deduplicate keys
+  // Memoize scryptSync output per secret across all requests & chunks to avoid ~240ms CPU stall per call
+  const memo = getDerivedKeyMemo();
   const unique = Array.from(new Set(secrets));
-  return unique.map((s) => crypto.scryptSync(s, 'toantrung_oauth_vault_salt_2026', 32));
+  return unique.map((s) => {
+    const hit = memo.get(s);
+    if (hit) return hit;
+    const derived = crypto.scryptSync(s, VAULT_SALT, 32);
+    memo.set(s, derived);
+    return derived;
+  });
 }
 
 function getVaultKey(): Buffer {

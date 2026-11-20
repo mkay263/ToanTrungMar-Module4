@@ -327,12 +327,15 @@ async function handleGenerateDocx(
     const fromDate = customPayload?.from || url.searchParams.get('from') || url.searchParams.get('fromDate') || undefined;
     const toDate = customPayload?.to || url.searchParams.get('to') || url.searchParams.get('toDate') || undefined;
 
-    const dash = await getScopedReportsDashboard(auth.user, { websiteId, preset, fromDate, toDate });
-    const m04Spec = await getM04ResultsReportSpec(auth.user, {
-      websiteId: dash.websiteId || 'all',
-      from: dash.fromDate,
-      to: dash.toDate,
-    });
+    const [dash, m04Spec] = await Promise.all([
+      getScopedReportsDashboard(auth.user, { websiteId, preset, fromDate, toDate }),
+      getM04ResultsReportSpec(auth.user, {
+        websiteId,
+        preset: preset.toUpperCase(),
+        from: fromDate,
+        to: toDate,
+      }),
+    ]);
     const dateStamp = new Date().toISOString().slice(0, 10);
     const docCode = customPayload?.docCode || `TT-BC-${dateStamp.replace(/-/g, '')}`;
     const reportTitle =

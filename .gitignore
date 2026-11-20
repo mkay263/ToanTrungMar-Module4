@@ -9,8 +9,12 @@ coverage/
 # Local database & protected upload storage
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 *.dump
 *.sql.bak
 /storage/

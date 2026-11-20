@@ -22,7 +22,7 @@ const DEFAULT_SCOPE: DashboardScopeState = {
 function readInitialScope(): DashboardScopeState {
   if (typeof window === 'undefined') return DEFAULT_SCOPE;
   const params = new URLSearchParams(window.location.search);
-  const urlWeb = params.get('websiteId');
+  const urlWeb = params.get('websiteId') || params.get('website');
   const urlPreset = params.get('preset')?.toUpperCase() as DashboardDatePreset | undefined;
   const urlFrom = params.get('from');
   const urlTo = params.get('to');
@@ -53,8 +53,21 @@ export function useDashboardScope() {
   const [hydrated, setHydrated] = useState<boolean>(() => typeof window !== 'undefined');
 
   useEffect(() => {
-    setScope(readInitialScope());
-    setHydrated(true);
+    const syncFromUrl = () => {
+      const next = readInitialScope();
+      setScope((prev) =>
+        prev.websiteId === next.websiteId &&
+        prev.preset === next.preset &&
+        prev.from === next.from &&
+        prev.to === next.to
+          ? prev
+          : next,
+      );
+      setHydrated(true);
+    };
+    syncFromUrl();
+    window.addEventListener('popstate', syncFromUrl);
+    return () => window.removeEventListener('popstate', syncFromUrl);
   }, []);
 
   const updateScope = useCallback((patch: Partial<DashboardScopeState>) => {
@@ -68,6 +81,7 @@ export function useDashboardScope() {
         }
         const url = new URL(window.location.href);
         url.searchParams.set('websiteId', next.websiteId);
+        url.searchParams.delete('website');
         url.searchParams.set('preset', next.preset);
         if (next.preset === 'CUSTOM' && next.from && next.to) {
           url.searchParams.set('from', next.from);

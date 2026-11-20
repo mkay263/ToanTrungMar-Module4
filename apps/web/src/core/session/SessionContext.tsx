@@ -1,9 +1,24 @@
 'use client';
 
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import type { PublicBrandingDto, SessionUserDto } from '@toantrung/contracts';
-import { apiRequest, clearAllApiCache, setApiCacheUserScope } from '../http/client';
+import {
+  apiRequest,
+  clearAllApiCache,
+  invalidateApiCacheByDomains,
+  setApiCacheUserScope,
+} from '../http/client';
+import { publishDataSync, subscribeDataSync, type SyncDomain } from '../http/data-sync-bus';
+import { setRouteStateUserScope } from '../http/route-state';
 
 const DEFAULT_BRANDING: PublicBrandingDto = {
   organizationName: 'Toàn Trung',
@@ -57,6 +72,14 @@ const DEFAULT_BRANDING: PublicBrandingDto = {
   },
 };
 
+interface SystemRevisionsDto {
+  revisions: Record<string, number>;
+  lastUpdatedAt?: Record<string, string>;
+  serverDateVn: string;
+  serverTime?: string;
+  unreadCount?: number;
+}
+
 interface SessionContextValue {
   user: SessionUserDto | null;
   loading: boolean;
@@ -83,13 +106,36 @@ const SessionContext = createContext<SessionContextValue>({
   logout: async () => {},
 });
 
+function SessionAuthRedirect({
+  loading,
+  user,
+}: {
+  loading: boolean;
+  user: SessionUserDto | null;
+}) {
+  const router = useRouter();
+  const pathname = usePathname();
+
+  useEffect(() => {
+    if (!loading && !user && pathname && pathname !== '/login') {
+      router.replace('/login');
+    }
+  }, [loading, user, pathname, router]);
+
+  return null;
+}
+
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<SessionUserDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [branding, setBranding] = useState<PublicBrandingDto>(DEFAULT_BRANDING);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const router = useRouter();
-  const pathname = usePathname();
+
+  const prevRevisionsRef = useRef<Record<string, number> | null>(null);
+  const prevVnDateRef = useRef<string | null>(null);
+  const lastRevisionCheckAtRef = useRef<number>(0);
+  const pollInFlightRef = useRef<boolean>(false);
 
   const refreshBranding = useCallback(async () => {
     try {
@@ -104,7 +150,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const refreshUnreadCount = useCallback(async () => {
     try {
-      const res = await apiRequest<{ unreadCount: number }>('/api/v1/notifications');
+      const res = await apiRequest<{ unreadCount: number }>('/api/v1/notifications?countOnly=1', {
+        skipCache: true,
+      });
       setUnreadCount(res.unreadCount ?? 0);
     } catch {
       setUnreadCount(0);
@@ -116,11 +164,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       const res = await apiRequest<{ user: SessionUserDto }>('/api/v1/auth/me', {
         skipCache: true,
       });
-      setApiCacheUserScope(`${res.user.id}:${res.user.roleCode}`);
+      const scope = `${res.user.id}:${res.user.roleCode}`;
+      setApiCacheUserScope(scope);
+      setRouteStateUserScope(scope);
       setUser(res.user);
       return res.user;
     } catch {
       setApiCacheUserScope(null);
+      setRouteStateUserScope(null);
       clearAllApiCache();
       setUser(null);
       return null;
@@ -138,11 +189,100 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     });
   }, [refreshBranding, refreshSession, refreshUnreadCount]);
 
+  // Central visibility-aware revision poller & midnight rollover detector
   useEffect(() => {
-    if (!loading && !user && pathname && pathname !== '/login') {
-      router.replace('/login');
+    if (!user) {
+      prevRevisionsRef.current = null;
+      prevVnDateRef.current = null;
+      return;
     }
-  }, [loading, user, pathname, router]);
+
+    let cancelled = false;
+    const checkRevisions = async (force = false) => {
+      if (cancelled || pollInFlightRef.current) return;
+      if (!force && typeof document !== 'undefined' && document.hidden) return;
+      pollInFlightRef.current = true;
+      try {
+        const res = await apiRequest<SystemRevisionsDto>('/api/v1/system/revisions', {
+          skipCache: true,
+        });
+        if (cancelled) return;
+        lastRevisionCheckAtRef.current = Date.now();
+
+        if (typeof res.unreadCount === 'number') {
+          setUnreadCount(res.unreadCount);
+        }
+
+        const prevDate = prevVnDateRef.current;
+        if (prevDate && res.serverDateVn && prevDate !== res.serverDateVn) {
+          const dateDomains: SyncDomain[] = ['leads', 'tracking', 'ads', 'reports'];
+          invalidateApiCacheByDomains(dateDomains);
+          publishDataSync(dateDomains, 'vn_midnight_rollover');
+        }
+        if (res.serverDateVn) {
+          prevVnDateRef.current = res.serverDateVn;
+        }
+
+        const prevRev = prevRevisionsRef.current;
+        if (prevRev && res.revisions) {
+          const changedDomains: SyncDomain[] = [];
+          for (const [domain, rev] of Object.entries(res.revisions)) {
+            if (prevRev[domain] !== rev) {
+              changedDomains.push(domain as SyncDomain);
+            }
+          }
+          if (changedDomains.length > 0) {
+            invalidateApiCacheByDomains(changedDomains);
+            publishDataSync(changedDomains, 'server_revision');
+            if (changedDomains.includes('branding')) {
+              void refreshBranding();
+            }
+          }
+        }
+        if (res.revisions) {
+          prevRevisionsRef.current = { ...res.revisions };
+        }
+      } catch {
+        // Silent background check error; retry on next cadence
+      } finally {
+        pollInFlightRef.current = false;
+      }
+    };
+
+    void checkRevisions(true);
+
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void checkRevisions(false);
+    }, 15_000);
+
+    const onVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        if (Date.now() - lastRevisionCheckAtRef.current >= 10_000) {
+          void checkRevisions(true);
+        }
+      }
+    };
+
+    const unsubNotif = subscribeDataSync(['notifications'], (ev) => {
+      if (ev.reason && ev.reason.startsWith('mutation:')) {
+        void refreshUnreadCount();
+      }
+    });
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onVisibilityChange);
+    }
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      unsubNotif();
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+    };
+  }, [user, refreshBranding, refreshUnreadCount]);
 
   const logout = useCallback(async () => {
     try {
@@ -154,28 +294,35 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       // Clear local session state regardless
     }
     setApiCacheUserScope(null);
+    setRouteStateUserScope(null);
     clearAllApiCache();
+    prevRevisionsRef.current = null;
+    prevVnDateRef.current = null;
     setUser(null);
     setUnreadCount(0);
     router.replace('/login');
   }, [router, user?.csrfToken]);
 
+  const contextValue = useMemo<SessionContextValue>(
+    () => ({
+      user,
+      loading,
+      branding,
+      unreadCount,
+      refreshSession,
+      refreshBranding,
+      refreshUnreadCount,
+      setBrandingState: setBranding,
+      setUnreadCountState: setUnreadCount,
+      logout,
+    }),
+    [user, loading, branding, unreadCount, refreshSession, refreshBranding, refreshUnreadCount, logout],
+  );
+
   return (
-    <SessionContext.Provider
-      value={{
-        user,
-        loading,
-        branding,
-        unreadCount,
-        refreshSession,
-        refreshBranding,
-        refreshUnreadCount,
-        setBrandingState: setBranding,
-        setUnreadCountState: setUnreadCount,
-        logout,
-      }}
-    >
+    <SessionContext.Provider value={contextValue}>
       {children}
+      <SessionAuthRedirect loading={loading} user={user} />
     </SessionContext.Provider>
   );
 }

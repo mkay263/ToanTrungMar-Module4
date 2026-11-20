@@ -1,4 +1,5 @@
 import { jsonError, jsonSuccess } from '../../../../core/http';
+import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   createDispatchNotification,
   listDispatchedExecutiveReports,
@@ -29,15 +30,20 @@ export async function GET(request: Request) {
     const websiteId = url.searchParams.get('websiteId') ?? 'all';
     const fromDate = url.searchParams.get('from') ?? url.searchParams.get('fromDate') ?? undefined;
     const toDate = url.searchParams.get('to') ?? url.searchParams.get('toDate') ?? undefined;
+    const compact = url.searchParams.get('compact') === '1';
 
     const [data, dispatchedReports] = await Promise.all([
-      getScopedReportsDashboard(auth.user, {
-        websiteId,
-        preset,
-        fromDate,
-        toDate,
-      }),
-      listDispatchedExecutiveReports(25, auth.user.id),
+      getScopedReportsDashboard(
+        auth.user,
+        {
+          websiteId,
+          preset,
+          fromDate,
+          toDate,
+        },
+        { compact },
+      ),
+      compact ? Promise.resolve([]) : listDispatchedExecutiveReports(25, auth.user.id),
     ]);
     return jsonSuccess({
       ...data,
@@ -78,6 +84,7 @@ export async function POST(request: Request) {
         authorName: auth.user.fullName,
         authorRole: auth.user.roleName,
       });
+      bumpDomainRevisions(['reports', 'notifications'], 'issue_report');
       return jsonSuccess(
         {
           id: issued.savedReportId,
@@ -100,6 +107,7 @@ export async function POST(request: Request) {
       reportingPeriod,
     });
 
+    bumpDomainRevisions(['reports', 'notifications'], 'save_report_draft');
     return jsonSuccess(draft, 200);
   } catch (err) {
     return jsonError(

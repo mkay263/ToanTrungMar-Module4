@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import {
   Activity,
   AlertTriangle,
@@ -61,13 +62,32 @@ import {
   type ProductCatalogDto,
   type SalesAssigneeOptionDto,
 } from '@toantrung/contracts';
-import { apiRequest, peekApiCache } from '@/core/http/client';
+import { apiRequest, peekApiCache, peekApiCacheEntry } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
+import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useSession } from '@/core/session/SessionContext';
-import { ManualLeadModal } from './ManualLeadModal';
-import { GmailSyncModal } from './GmailSyncModal';
-import { LeadActivityTimeline } from './LeadActivityTimeline';
 import { VietnamAddressFields } from './VietnamAddressFields';
-import { StandardDateRangeDropdown, type StandardDatePreset } from '@/components/common/StandardDateRangeDropdown';
+import {
+  StandardDateRangeDropdown,
+  resolvePresetDatesClient,
+  type StandardDatePreset,
+} from '@/components/common/StandardDateRangeDropdown';
+
+const ManualLeadModal = dynamic(
+  () => import('./ManualLeadModal').then((m) => m.ManualLeadModal),
+  { ssr: false },
+);
+const GmailSyncModal = dynamic(
+  () => import('./GmailSyncModal').then((m) => m.GmailSyncModal),
+  { ssr: false },
+);
+const LeadActivityTimeline = dynamic(
+  () => import('./LeadActivityTimeline').then((m) => m.LeadActivityTimeline),
+  {
+    ssr: false,
+    loading: () => <div className="h-32 rounded-xl bg-slate-50 border border-slate-100 animate-pulse" />,
+  },
+);
 
 const STATUS_BADGE_STYLES: Record<PipelineStatus, string> = {
   new_lead: 'bg-violet-50 text-violet-700 border-violet-200 font-semibold',
@@ -318,11 +338,80 @@ function isInvalidClosedLead(l: LeadItemDto): boolean {
   );
 }
 
+interface LeadsFraudIndex {
+  byId: Map<number, LeadItemDto>;
+  byPhone: Map<string, LeadItemDto[]>;
+  byEmail: Map<string, LeadItemDto[]>;
+  byCompany: Map<string, LeadItemDto[]>;
+  byProj: Map<string, LeadItemDto[]>;
+  byAddr: Map<string, LeadItemDto[]>;
+  activeAlertsByLeadId: Map<number, PriceCheckAlertDto>;
+  activeAlertsByPhone: Map<string, PriceCheckAlertDto>;
+  activeAlertsByCompany: Map<string, PriceCheckAlertDto>;
+}
+
+function buildLeadsFraudIndex(
+  allLeads: LeadItemDto[],
+  priceAlerts: PriceCheckAlertDto[],
+): LeadsFraudIndex {
+  const byId = new Map<number, LeadItemDto>();
+  const byPhone = new Map<string, LeadItemDto[]>();
+  const byEmail = new Map<string, LeadItemDto[]>();
+  const byCompany = new Map<string, LeadItemDto[]>();
+  const byProj = new Map<string, LeadItemDto[]>();
+  const byAddr = new Map<string, LeadItemDto[]>();
+  const activeAlertsByLeadId = new Map<number, PriceCheckAlertDto>();
+  const activeAlertsByPhone = new Map<string, PriceCheckAlertDto>();
+  const activeAlertsByCompany = new Map<string, PriceCheckAlertDto>();
+
+  const pushToMap = (m: Map<string, LeadItemDto[]>, key: string, item: LeadItemDto) => {
+    const arr = m.get(key);
+    if (arr) arr.push(item);
+    else m.set(key, [item]);
+  };
+
+  for (const item of allLeads) {
+    byId.set(item.id, item);
+    if (isInvalidClosedLead(item)) continue;
+    const cleanP = item.phone.replace(/\D/g, '');
+    if (cleanP && !cleanP.includes('*')) pushToMap(byPhone, cleanP, item);
+    const normE = (item.email || '').trim().toLowerCase();
+    if (normE && !normE.includes('*')) pushToMap(byEmail, normE, item);
+    const normC = (item.companyName || '').trim().toLowerCase();
+    if (normC.length >= 5) pushToMap(byCompany, normC, item);
+    const normP = (item.projectName || '').trim().toLowerCase();
+    if (normP.length >= 5) pushToMap(byProj, normP, item);
+    const normA = (item.installationAddress || '').trim().toLowerCase();
+    if (normA.length >= 10 && !normA.includes('ẩn địa chỉ')) pushToMap(byAddr, normA, item);
+  }
+
+  for (const a of priceAlerts) {
+    if (a.status !== 'ACTIVE') continue;
+    if (a.leadId) activeAlertsByLeadId.set(a.leadId, a);
+    if (a.phone) activeAlertsByPhone.set(a.phone, a);
+    if (a.companyName) activeAlertsByCompany.set(a.companyName, a);
+  }
+
+  return {
+    byId,
+    byPhone,
+    byEmail,
+    byCompany,
+    byProj,
+    byAddr,
+    activeAlertsByLeadId,
+    activeAlertsByPhone,
+    activeAlertsByCompany,
+  };
+}
+
 function evaluateLeadFraudCriteria(
   lead: LeadItemDto,
   allLeads: LeadItemDto[],
   priceAlerts: PriceCheckAlertDto[],
+  precomputedIndex?: LeadsFraudIndex,
 ): FraudEvaluationResult {
+  const index = precomputedIndex || buildLeadsFraudIndex(allLeads, priceAlerts);
   const nowMs = Date.now();
   const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
   const cleanPhone = lead.phone.replace(/\D/g, '');
@@ -339,16 +428,13 @@ function evaluateLeadFraudCriteria(
 
   // Tìm hồ sơ được liên kết trực tiếp qua duplicateOfLeadId:
   const explicitLinkedLead = lead.duplicateOfLeadId
-    ? allLeads.find((o) => o.id === lead.duplicateOfLeadId)
+    ? index.byId.get(lead.duplicateOfLeadId) || null
     : null;
 
   // Criteria 1: Duplicate Phone (>= 2 submissions within 30 days or backend duplicateType)
-  // Chỉ đếm các hồ sơ tạo trước hoặc tại thời điểm hồ sơ hiện tại (other.id <= lead.id) để Hồ sơ gốc ban đầu không bị báo trùng ngược
-  const samePhoneWithin30d = allLeads.filter((other) => {
-    if (isInvalidClosedLead(other)) return false;
+  const phoneCandidates = cleanPhone && !cleanPhone.includes('*') ? index.byPhone.get(cleanPhone) || [] : [];
+  const samePhoneWithin30d = phoneCandidates.filter((other) => {
     if (other.id > lead.id) return false;
-    const otherClean = other.phone.replace(/\D/g, '');
-    if (!cleanPhone || cleanPhone.includes('*') || otherClean !== cleanPhone) return false;
     const diff = Math.abs(nowMs - new Date(other.contactedAt).getTime());
     return diff <= thirtyDaysMs;
   });
@@ -356,16 +442,21 @@ function evaluateLeadFraudCriteria(
     lead.pipelineStatus === 'won' || lead.pipelineStatus === 'lost';
 
   // Tìm tất cả các hồ sơ của cùng một khách hàng (cùng SĐT, Email hoặc Công ty):
-  const allRelatedCustomerLeads = allLeads.filter((other) => {
-    if (other.id === lead.id || isInvalidClosedLead(other)) return false;
-    const otherClean = other.phone.replace(/\D/g, '');
-    const phoneMatch = cleanPhone && !cleanPhone.includes('*') && otherClean === cleanPhone;
-    const emailMatch =
-      normEmail && !normEmail.includes('*') && (other.email || '').trim().toLowerCase() === normEmail;
-    const companyMatch =
-      normCompany.length >= 5 && (other.companyName || '').trim().toLowerCase() === normCompany;
-    return Boolean(phoneMatch || emailMatch || companyMatch);
-  });
+  const relatedMap = new Map<number, LeadItemDto>();
+  for (const o of phoneCandidates) {
+    if (o.id !== lead.id) relatedMap.set(o.id, o);
+  }
+  if (normEmail && !normEmail.includes('*')) {
+    for (const o of index.byEmail.get(normEmail) || []) {
+      if (o.id !== lead.id) relatedMap.set(o.id, o);
+    }
+  }
+  if (normCompany.length >= 5) {
+    for (const o of index.byCompany.get(normCompany) || []) {
+      if (o.id !== lead.id) relatedMap.set(o.id, o);
+    }
+  }
+  const allRelatedCustomerLeads = Array.from(relatedMap.values());
 
   const wonCustomerLead =
     (explicitLinkedLead?.pipelineStatus === 'won' ? explicitLinkedLead : null) ||
@@ -389,24 +480,24 @@ function evaluateLeadFraudCriteria(
   // Tìm các nhà thầu khác nhau cùng hỏi 1 Dự án / Địa chỉ lắp đặt (Kịch bản 3: [DỰ ÁN NHIỀU BÊN HỎI GIÁ])
   const normalizedProj = (lead.projectName || '').trim().toLowerCase();
   const normalizedAddr = (lead.installationAddress || '').trim().toLowerCase();
-  const multiContractorLeads = allLeads.filter((other) => {
-    if (other.id === lead.id || isInvalidClosedLead(other)) return false;
-    if (isCurrentLeadClosed) return false;
-    const otherClean = other.phone.replace(/\D/g, '');
-    const otherComp = (other.companyName || '').trim().toLowerCase();
-    // Phải khác SĐT và khác Công ty (khác nhà thầu)
-    if (cleanPhone && otherClean === cleanPhone) return false;
-    if (normCompany && otherComp && normCompany === otherComp) return false;
-
-    const projMatch =
-      normalizedProj.length >= 5 &&
-      (other.projectName || '').trim().toLowerCase() === normalizedProj;
-    const addrMatch =
-      normalizedAddr.length >= 10 &&
-      !normalizedAddr.includes('ẩn địa chỉ') &&
-      (other.installationAddress || '').trim().toLowerCase() === normalizedAddr;
-    return projMatch || addrMatch;
-  });
+  const contractorMap = new Map<number, LeadItemDto>();
+  if (!isCurrentLeadClosed) {
+    const considerContractor = (other: LeadItemDto) => {
+      if (other.id === lead.id) return;
+      const otherClean = other.phone.replace(/\D/g, '');
+      const otherComp = (other.companyName || '').trim().toLowerCase();
+      if (cleanPhone && otherClean === cleanPhone) return;
+      if (normCompany && otherComp && normCompany === otherComp) return;
+      contractorMap.set(other.id, other);
+    };
+    if (normalizedProj.length >= 5) {
+      for (const o of index.byProj.get(normalizedProj) || []) considerContractor(o);
+    }
+    if (normalizedAddr.length >= 10 && !normalizedAddr.includes('ẩn địa chỉ')) {
+      for (const o of index.byAddr.get(normalizedAddr) || []) considerContractor(o);
+    }
+  }
+  const multiContractorLeads = Array.from(contractorMap.values());
 
   const projectContractors = multiContractorLeads.map((c) => ({
     leadId: c.id,
@@ -489,13 +580,10 @@ function evaluateLeadFraudCriteria(
       noteText.includes('dò giá') ||
       noteText.includes('đơn giá') ||
       noteText.includes('kabinet'));
-  const matchedAlert = priceAlerts.find(
-    (a) =>
-      a.status === 'ACTIVE' &&
-      (a.leadId === lead.id ||
-        a.phone === lead.phone ||
-        (a.companyName && a.companyName === lead.companyName)),
-  );
+  const matchedAlert =
+    index.activeAlertsByLeadId.get(lead.id) ||
+    index.activeAlertsByPhone.get(lead.phone) ||
+    (lead.companyName ? index.activeAlertsByCompany.get(lead.companyName) : undefined);
   const hasPriceProbeBehavior = Boolean(
     lead.isPriceCheckSuspect || matchedAlert || asksRawModuleOnly,
   );
@@ -610,6 +698,12 @@ export function LeadsWorkspace() {
   const [isReceivingLeads, setIsReceivingLeads] = useState(true);
   const abortControllerRef = useRef<AbortController | null>(null);
   const fetchSeqRef = useRef<number>(0);
+  const loadedScopeUrlRef = useRef<string>('');
+  const prevSearchQueryRef = useRef<string>('');
+  const consumedDeepLinkRef = useRef<string | null>(null);
+  const populatedLeadIdRef = useRef<number | null>(null);
+  const isDetailDirtyRef = useRef<boolean>(false);
+  const scrollRestoredRef = useRef<boolean>(false);
 
   const [selectedLeadId, setSelectedLeadId] = useState<number | null>(null);
   const [leadDetailTab, setLeadDetailTab] = useState<
@@ -684,6 +778,10 @@ export function LeadsWorkspace() {
     if (params.get('needsReview') === '1') {
       setSpecialAlertFilter('all_alerts');
     }
+    if (params.get('quality')?.toUpperCase() === 'L2') {
+      setValidOnly(true);
+      setIncludeSpam(false);
+    }
     const presetParam = params.get('preset')?.toUpperCase();
     const fromParam = params.get('from');
     const toParam = params.get('to');
@@ -693,7 +791,7 @@ export function LeadsWorkspace() {
       setCustomEndDate(toParam);
     } else if (
       presetParam &&
-      ['TODAY', 'YESTERDAY', '7D', '30D', 'ALL'].includes(presetParam)
+      ['TODAY', 'YESTERDAY', '7D', '30D', '90D', 'THIS_MONTH', 'ALL'].includes(presetParam)
     ) {
       setDateRangePreset(presetParam as StandardDatePreset);
     }
@@ -707,8 +805,10 @@ export function LeadsWorkspace() {
     }
     const q = params.get('search');
     if (q && q.trim()) {
-      setSearchQuery(q.trim());
-      setDebouncedSearchQuery(q.trim());
+      const trimmed = q.trim();
+      setSearchQuery(trimmed);
+      setDebouncedSearchQuery(trimmed);
+      prevSearchQueryRef.current = trimmed;
     }
     if (params.get('validOnly') === '1' || params.get('validOnly') === 'true') {
       setValidOnly(true);
@@ -724,10 +824,40 @@ export function LeadsWorkspace() {
       setStatusFilter('new_lead');
       setIncludeSpam(false);
     }
+
+    // Restore persisted filters/page when navigating back without explicit query overrides
+    if (!params.toString()) {
+      const saved = loadRouteState<{
+        statusFilter?: string;
+        sourceWebsiteFilter?: string;
+        dateRangePreset?: StandardDatePreset;
+        customStartDate?: string;
+        customEndDate?: string;
+        salesIdFilter?: string;
+        productIdFilter?: string;
+        validOnly?: boolean;
+        includeSpam?: boolean;
+        viewMode?: 'table' | 'kanban' | 'reminders';
+        currentPage?: number;
+      }>('leads');
+      if (saved) {
+        if (saved.statusFilter) setStatusFilter(saved.statusFilter);
+        if (saved.sourceWebsiteFilter) setSourceWebsiteFilter(saved.sourceWebsiteFilter);
+        if (saved.dateRangePreset) setDateRangePreset(saved.dateRangePreset);
+        if (saved.customStartDate) setCustomStartDate(saved.customStartDate);
+        if (saved.customEndDate) setCustomEndDate(saved.customEndDate);
+        if (saved.salesIdFilter) setSalesIdFilter(saved.salesIdFilter);
+        if (saved.productIdFilter) setProductIdFilter(saved.productIdFilter);
+        if (typeof saved.validOnly === 'boolean') setValidOnly(saved.validOnly);
+        if (typeof saved.includeSpam === 'boolean') setIncludeSpam(saved.includeSpam);
+        if (saved.viewMode) setViewMode(saved.viewMode);
+        if (saved.currentPage && saved.currentPage > 1) setCurrentPage(saved.currentPage);
+      }
+    }
     setUrlFiltersHydrated(true);
   }, []);
 
-  // Listen to global search bar from WorkspaceShell topbar
+  // Listen to canonical global search bar from WorkspaceShell topbar
   useEffect(() => {
     const handleGlobalSearch = (e: Event) => {
       const custom = e as CustomEvent<string>;
@@ -740,10 +870,8 @@ export function LeadsWorkspace() {
       }
       setSearchQuery(val);
     };
-    window.addEventListener('tt-lead-search', handleGlobalSearch as EventListener);
     window.addEventListener('tt-global-search', handleGlobalSearch as EventListener);
     return () => {
-      window.removeEventListener('tt-lead-search', handleGlobalSearch as EventListener);
       window.removeEventListener('tt-global-search', handleGlobalSearch as EventListener);
     };
   }, [user?.email]);
@@ -772,9 +900,11 @@ export function LeadsWorkspace() {
     );
   }, [statusFilter, specialAlertFilter, reminderFilter]);
 
-  // Debounce search query by 200ms
+  // Debounce search query by 200ms without resetting restored URL page on initial mount
   useEffect(() => {
+    if (searchQuery === prevSearchQueryRef.current) return;
     const timer = setTimeout(() => {
+      prevSearchQueryRef.current = searchQuery;
       setDebouncedSearchQuery(searchQuery);
       setCurrentPage(1);
     }, 200);
@@ -893,47 +1023,62 @@ export function LeadsWorkspace() {
     if (includeSpam && !validOnly) qs.set('includeSpam', 'true');
     const url = `/api/v1/leads?${qs.toString()}`;
 
-    if (!forceFresh) {
-      const cached = peekApiCache<{
-        leads: LeadItemDto[];
-        totalCount?: number;
-        products: ProductCatalogDto[];
-        salesOptions: SalesAssigneeOptionDto[];
-        priceCheckAlerts: PriceCheckAlertDto[];
-        isReceivingLeads?: boolean;
-      }>(url);
+    type LeadsListPayload = {
+      leads: LeadItemDto[];
+      totalCount?: number;
+      products: ProductCatalogDto[];
+      salesOptions: SalesAssigneeOptionDto[];
+      priceCheckAlerts: PriceCheckAlertDto[];
+      isReceivingLeads?: boolean;
+    };
 
-      if (cached) {
-        setLeads(cached.leads);
-        setTotalCount(cached.totalCount ?? cached.leads.length);
-        setProducts(cached.products);
-        setSalesOptions(cached.salesOptions);
-        setPriceCheckAlerts(cached.priceCheckAlerts);
-        if (typeof cached.isReceivingLeads === 'boolean') {
-          setIsReceivingLeads(cached.isReceivingLeads);
-        }
-        setLoading(false);
-      } else {
-        setLoading((prev) => (leads.length === 0 ? true : prev));
+    const cachedEntry = !forceFresh ? peekApiCacheEntry<LeadsListPayload>(url) : null;
+    if (cachedEntry) {
+      loadedScopeUrlRef.current = url;
+      setLeads(cachedEntry.data.leads);
+      setTotalCount(cachedEntry.data.totalCount ?? cachedEntry.data.leads.length);
+      setProducts(cachedEntry.data.products);
+      setSalesOptions(cachedEntry.data.salesOptions);
+      setPriceCheckAlerts(cachedEntry.data.priceCheckAlerts);
+      if (typeof cachedEntry.data.isReceivingLeads === 'boolean') {
+        setIsReceivingLeads(cachedEntry.data.isReceivingLeads);
       }
-    } else {
+      setLoading(false);
+      if (cachedEntry.isFresh) {
+        return;
+      }
+    } else if (!forceFresh && loadedScopeUrlRef.current !== url) {
+      setLeads([]);
+      setLoading(true);
+    }
+
+    if (forceFresh || cachedEntry) {
       setIsLeadsPolling(true);
     }
 
     setErrorMsg(null);
     try {
-      const data = await apiRequest<{
-        leads: LeadItemDto[];
-        totalCount?: number;
-        products: ProductCatalogDto[];
-        salesOptions: SalesAssigneeOptionDto[];
-        priceCheckAlerts: PriceCheckAlertDto[];
-        isReceivingLeads?: boolean;
-      }>(url, { signal: controller.signal, skipCache: forceFresh });
+      const data = await apiRequest<LeadsListPayload>(url, {
+        signal: controller.signal,
+        skipCache: forceFresh,
+        onRevalidated: (fresh) => {
+          if (controller.signal.aborted) return;
+          loadedScopeUrlRef.current = url;
+          setLeads(fresh.leads);
+          setTotalCount(fresh.totalCount ?? fresh.leads.length);
+          setProducts(fresh.products);
+          setSalesOptions(fresh.salesOptions);
+          setPriceCheckAlerts(fresh.priceCheckAlerts);
+          if (typeof fresh.isReceivingLeads === 'boolean') {
+            setIsReceivingLeads(fresh.isReceivingLeads);
+          }
+          setLastLeadsPolledAt(new Date());
+        },
+      });
 
       if (seq !== fetchSeqRef.current || controller.signal.aborted) return;
 
-      // C10: Đồng bộ định kỳ chạy ngầm không bật toast lặp trên màn hình
+      loadedScopeUrlRef.current = url;
       setLeads(data.leads);
       setTotalCount(data.totalCount ?? data.leads.length);
       setProducts(data.products);
@@ -955,14 +1100,19 @@ export function LeadsWorkspace() {
     }
   }, [includeSpam, validOnly]);
 
+  const gmailSyncProbeRequestedRef = useRef(false);
   useEffect(() => {
+    if (!urlFiltersHydrated) return;
+    // Fetch Gmail sync status lazily once after mount (cached 20s) or when modal closes
+    if (gmailSyncProbeRequestedRef.current && showGmailSyncModal) return;
+    gmailSyncProbeRequestedRef.current = true;
     let active = true;
     apiRequest<{
       connected: boolean;
       hasGmailScope: boolean;
       isSandboxDemo: boolean;
       config?: { enabled?: boolean };
-    }>('/api/v1/leads/gmail-sync')
+    }>('/api/v1/leads/gmail-sync', { skipCache: !showGmailSyncModal && gmailAutoSyncLive })
       .then((res) => {
         if (!active) return;
         setGmailAutoSyncLive(
@@ -975,38 +1125,35 @@ export function LeadsWorkspace() {
     return () => {
       active = false;
     };
-  }, [showGmailSyncModal]);
+  }, [urlFiltersHydrated, showGmailSyncModal, gmailAutoSyncLive]);
 
   useEffect(() => {
+    if (!urlFiltersHydrated) return;
     let lastFetchMs = Date.now();
-    void fetchLeads(true);
-    // Continuous Realtime Live Auto-Polling (every 25s when visible) + throttled sync on tab focus
-    const interval = setInterval(() => {
-      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-        lastFetchMs = Date.now();
-        void fetchLeads(true);
-      }
-    }, 25000);
+    void fetchLeads(false);
 
-    const handleFocusOrVisible = () => {
+    const unsubscribe = subscribeDataSync(['leads', 'design', 'tracking'], () => {
+      lastFetchMs = Date.now();
+      void fetchLeads(true);
+    });
+
+    const handleVisibleRefresh = () => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
         const now = Date.now();
-        if (now - lastFetchMs >= 8000) {
+        if (now - lastFetchMs >= 15_000) {
           lastFetchMs = now;
           void fetchLeads(true);
         }
       }
     };
-    window.addEventListener('focus', handleFocusOrVisible);
-    document.addEventListener('visibilitychange', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleVisibleRefresh);
 
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', handleFocusOrVisible);
-      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+      unsubscribe();
+      document.removeEventListener('visibilitychange', handleVisibleRefresh);
       abortControllerRef.current?.abort();
     };
-  }, [fetchLeads]);
+  }, [urlFiltersHydrated, fetchLeads]);
 
   const openLeadDetail = useCallback(
     (leadId: number, tab: 'info' | 'pipeline' | 'attachments' | 'activity' = 'info') => {
@@ -1021,8 +1168,21 @@ export function LeadsWorkspace() {
   );
 
   const closeLeadDetail = useCallback(() => {
+    isDetailDirtyRef.current = false;
+    populatedLeadIdRef.current = null;
     setSelectedLeadId(null);
     if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (
+        url.searchParams.has('leadId') ||
+        url.searchParams.has('highlight') ||
+        url.searchParams.has('highlightLeadId')
+      ) {
+        url.searchParams.delete('leadId');
+        url.searchParams.delete('highlight');
+        url.searchParams.delete('highlightLeadId');
+        window.history.replaceState({}, '', url.toString());
+      }
       requestAnimationFrame(() => {
         const scroller = document.getElementById('main-workspace-content');
         if (scroller) scroller.scrollTop = savedScrollTopRef.current;
@@ -1033,29 +1193,38 @@ export function LeadsWorkspace() {
   useEffect(() => {
     if (typeof window === 'undefined' || leads.length === 0) return;
     const params = new URLSearchParams(window.location.search);
-    const highlightId = Number(params.get('leadId') || params.get('highlight'));
+    const highlightRaw =
+      params.get('leadId') || params.get('highlightLeadId') || params.get('highlight');
+    const highlightId = Number(highlightRaw);
     if (Number.isInteger(highlightId) && highlightId > 0) {
+      const deepKey = `id:${highlightId}`;
+      if (consumedDeepLinkRef.current === deepKey) return;
       const target = leads.find((l) => l.id === highlightId);
       if (target && selectedLeadId === null) {
+        consumedDeepLinkRef.current = deepKey;
         openLeadDetail(target.id, 'info');
         return;
       }
     }
     const q = params.get('search');
     if (q && q.trim()) {
+      const deepKey = `search:${q.trim().toLowerCase()}`;
+      if (consumedDeepLinkRef.current === deepKey) return;
       const matched = leads.find(
         (l) => l.leadCode.toLowerCase() === q.trim().toLowerCase(),
       );
       if (matched && selectedLeadId === null) {
+        consumedDeepLinkRef.current = deepKey;
         openLeadDetail(matched.id, 'info');
       }
     }
   }, [leads, selectedLeadId, openLeadDetail]);
 
   const fraudByLeadId = useMemo(() => {
+    const index = buildLeadsFraudIndex(leads, priceCheckAlerts);
     const map = new Map<number, FraudEvaluationResult>();
     for (const l of leads) {
-      map.set(l.id, evaluateLeadFraudCriteria(l, leads, priceCheckAlerts));
+      map.set(l.id, evaluateLeadFraudCriteria(l, leads, priceCheckAlerts, index));
     }
     return map;
   }, [leads, priceCheckAlerts]);
@@ -1538,7 +1707,7 @@ export function LeadsWorkspace() {
     setSearchQuery('');
     setCurrentPage(1);
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('tt-lead-search', { detail: '' }));
+      window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
     }
   }, []);
 
@@ -1606,6 +1775,19 @@ export function LeadsWorkspace() {
     else url.searchParams.delete('page');
 
     window.history.replaceState({}, '', url.toString());
+    saveRouteState('leads', {
+      statusFilter,
+      sourceWebsiteFilter,
+      dateRangePreset,
+      customStartDate,
+      customEndDate,
+      salesIdFilter,
+      productIdFilter,
+      validOnly,
+      includeSpam,
+      viewMode,
+      currentPage: safePage,
+    });
   }, [
     urlFiltersHydrated,
     statusFilter,
@@ -1616,6 +1798,7 @@ export function LeadsWorkspace() {
     salesIdFilter,
     productIdFilter,
     validOnly,
+    includeSpam,
     overdueOnly,
     unreceivedOnly,
     specialAlertFilter,
@@ -1623,6 +1806,25 @@ export function LeadsWorkspace() {
     viewMode,
     safePage,
   ]);
+
+  // Restore & persist scroll position on /leads
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const scroller = document.getElementById('main-workspace-content');
+    if (!scroller) return;
+    if (!scrollRestoredRef.current && leads.length > 0) {
+      scrollRestoredRef.current = true;
+      const saved = loadRouteState<{ scrollTop?: number }>('leads_scroll');
+      if (saved?.scrollTop && saved.scrollTop > 0) {
+        requestAnimationFrame(() => {
+          scroller.scrollTop = saved.scrollTop ?? 0;
+        });
+      }
+    }
+    return () => {
+      saveRouteState('leads_scroll', { scrollTop: scroller.scrollTop });
+    };
+  }, [leads.length]);
 
   const paginatedLeads = useMemo(() => {
     const start = (safePage - 1) * pageSize;
@@ -1706,6 +1908,11 @@ export function LeadsWorkspace() {
     if (missingProductOnly) qs.set('missingProduct', '1');
     if (salesIdFilter !== 'all') qs.set('salesId', salesIdFilter);
     if (productIdFilter !== 'all') qs.set('productId', productIdFilter);
+    const bounds = resolvePresetDatesClient(dateRangePreset, customStartDate, customEndDate);
+    if (bounds) {
+      qs.set('fromDate', bounds.startDate);
+      qs.set('toDate', bounds.endDate);
+    }
     const queryStr = qs.toString();
     return queryStr ? `/api/v1/leads/export?${queryStr}` : '/api/v1/leads/export';
   }, [
@@ -1719,6 +1926,9 @@ export function LeadsWorkspace() {
     missingProductOnly,
     salesIdFilter,
     productIdFilter,
+    dateRangePreset,
+    customStartDate,
+    customEndDate,
   ]);
 
   const selectedLead = useMemo(
@@ -1742,8 +1952,19 @@ export function LeadsWorkspace() {
   );
 
   useEffect(() => {
-    if (selectedLead) {
-      setTargetStatus(selectedLead.pipelineStatus);
+    if (!selectedLead) {
+      populatedLeadIdRef.current = null;
+      isDetailDirtyRef.current = false;
+      return;
+    }
+    // Protect unsaved inline form edits/notes from background refresh clobber
+    if (populatedLeadIdRef.current === selectedLead.id && isDetailDirtyRef.current) {
+      return;
+    }
+    populatedLeadIdRef.current = selectedLead.id;
+    isDetailDirtyRef.current = false;
+
+    setTargetStatus(selectedLead.pipelineStatus);
       setStatusReason(selectedLead.lostReason || '');
       setStatusNote('');
       setMarkQuoteResponded(Boolean(selectedLead.quoteRespondedAt));
@@ -1791,7 +2012,6 @@ export function LeadsWorkspace() {
       const detectedHorizon = getB2bFollowUpHorizon(selectedLead);
       setEditB2bHorizon(detectedHorizon.key);
       setEditUpdateNote('');
-    }
   }, [selectedLead]);
 
   const canSeePrivateQuote = useMemo(() => {
@@ -1932,6 +2152,7 @@ export function LeadsWorkspace() {
               .join(' '),
         },
       });
+      isDetailDirtyRef.current = false;
       setFeedbackMsg(
         `Đã lưu cập nhật trực tiếp thông tin hồ sơ ${selectedLead.leadCode} thành công.`,
       );
@@ -1962,6 +2183,7 @@ export function LeadsWorkspace() {
           bypassPriceCheckConfirmed,
         },
       });
+      isDetailDirtyRef.current = false;
       setFeedbackMsg(`Đã cập nhật trạng thái Pipeline của ${selectedLead.leadCode} sang "${PIPELINE_STATUS_LABELS[targetStatus]}".`);
       // UC01 4.6f: Nếu lý do Thất bại là "Đối thủ khảo giá", hỏi NVKD có muốn đăng cảnh báo dò giá không (5.1)
       if (
@@ -1995,6 +2217,7 @@ export function LeadsWorkspace() {
           reasonDetail: reassignDetail || null,
         },
       });
+      isDetailDirtyRef.current = false;
       setFeedbackMsg(`Đã chuyển giao Lead ${selectedLead.leadCode} thành công.`);
       await fetchLeads();
     } catch (err) {
@@ -2618,7 +2841,7 @@ export function LeadsWorkspace() {
             customStartDate={customStartDate}
             customEndDate={customEndDate}
             onChangePreset={(p) => {
-              setDateRangePreset(p as any);
+              setDateRangePreset(p);
               setCustomStartDate('');
               setCustomEndDate('');
               setCurrentPage(1);
@@ -2626,10 +2849,12 @@ export function LeadsWorkspace() {
             onChangeCustomRange={(start, end) => {
               setCustomStartDate(start);
               setCustomEndDate(end);
-              setDateRangePreset('CUSTOM');
+              if (start || end) {
+                setDateRangePreset('CUSTOM');
+              }
               setCurrentPage(1);
             }}
-            include90Days={false}
+            include90Days={true}
             size="sm"
           />
 
@@ -3226,7 +3451,7 @@ export function LeadsWorkspace() {
           <div className="md:hidden space-y-2.5">
             {paginatedLeads.map((lead) => {
               const cleanDigits = lead.phone.replace(/\D/g, '');
-              const fraud = evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
+              const fraud = fraudByLeadId.get(lead.id) || evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
               const primaryProduct = lead.products[0];
               const extraProductsCount = Math.max(0, lead.products.length - 1);
               const horizon = getB2bFollowUpHorizon(lead);
@@ -3391,7 +3616,7 @@ export function LeadsWorkspace() {
                   ) : (
                     paginatedLeads.map((lead) => {
                       const cleanDigits = lead.phone.replace(/\D/g, '');
-                      const fraud = evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
+                      const fraud = fraudByLeadId.get(lead.id) || evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
                       const primaryProduct = lead.products[0];
                       const extraProducts = lead.products.slice(1);
                       const horizon = getB2bFollowUpHorizon(lead);
@@ -3748,7 +3973,7 @@ export function LeadsWorkspace() {
                     colLeads.map((lead) => {
                       const primaryProduct = lead.products[0];
                       const extraCount = Math.max(0, lead.products.length - 1);
-                      const fraud = evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
+                      const fraud = fraudByLeadId.get(lead.id) || evaluateLeadFraudCriteria(lead, leads, priceCheckAlerts);
                       const isPriceShoppingReasonOnly =
                         fraud.hasPriceProbeBehavior &&
                         lead.spamStatus === 'PENDING_REVIEW' &&
@@ -3849,34 +4074,38 @@ export function LeadsWorkspace() {
       )}
 
       {/* Modal Tạo Lead Thủ Công */}
-      <ManualLeadModal
-        open={showCreateModal}
-        onClose={() => setShowCreateModal(false)}
-        products={products}
-        salesOptions={salesOptions}
-        currentUserId={user?.id}
-        csrfToken={user?.csrfToken}
-        existingLeads={leads}
-        onOpenExistingLead={(leadId) => {
-          setShowCreateModal(false);
-          setSelectedLeadId(leadId);
-          setLeadDetailTab('info');
-        }}
-        onCreatedSuccess={async (leadCode, assignedMsg) => {
-          setFeedbackMsg(`Đã tạo thành công hồ sơ ${leadCode}. ${assignedMsg}`);
-          await fetchLeads();
-        }}
-      />
+      {showCreateModal && (
+        <ManualLeadModal
+          open={showCreateModal}
+          onClose={() => setShowCreateModal(false)}
+          products={products}
+          salesOptions={salesOptions}
+          currentUserId={user?.id}
+          csrfToken={user?.csrfToken}
+          existingLeads={leads}
+          onOpenExistingLead={(leadId) => {
+            setShowCreateModal(false);
+            setSelectedLeadId(leadId);
+            setLeadDetailTab('info');
+          }}
+          onCreatedSuccess={async (leadCode, assignedMsg) => {
+            setFeedbackMsg(`Đã tạo thành công hồ sơ ${leadCode}. ${assignedMsg}`);
+            await fetchLeads();
+          }}
+        />
+      )}
 
       {/* Modal Tạo Lead Tự Động Từ Gmail */}
-      <GmailSyncModal
-        open={showGmailSyncModal}
-        onClose={() => setShowGmailSyncModal(false)}
-        csrfToken={user?.csrfToken}
-        onSynced={() => {
-          void fetchLeads();
-        }}
-      />
+      {showGmailSyncModal && (
+        <GmailSyncModal
+          open={showGmailSyncModal}
+          onClose={() => setShowGmailSyncModal(false)}
+          csrfToken={user?.csrfToken}
+          onSynced={() => {
+            void fetchLeads();
+          }}
+        />
+      )}
 
       {/* Modal Nhập Danh Sách Lead Từ Excel (.xlsx / .csv) kèm Kiểm Tra Trùng Lặp Tức Thì */}
       {showImportModal && (() => {
@@ -4400,7 +4629,7 @@ export function LeadsWorkspace() {
 
       {/* Investigative Popover for Separate Warnings (UI-03) */}
       {investigativeLead && (() => {
-        const evalResult = evaluateLeadFraudCriteria(investigativeLead, leads, priceCheckAlerts);
+        const evalResult = fraudByLeadId.get(investigativeLead.id) || evaluateLeadFraudCriteria(investigativeLead, leads, priceCheckAlerts);
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
             <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden text-sm animate-in fade-in zoom-in-95 duration-150">
@@ -4709,7 +4938,7 @@ export function LeadsWorkspace() {
       {/* Modal / Dialog Chi tiết Lead & Chỉnh sửa Trực tiếp theo Phân quyền (Giao diện Gọn, Hiện đại) */}
       {selectedLead && (() => {
         const selectedHorizon = getB2bFollowUpHorizon(selectedLead);
-        const selectedFraud = evaluateLeadFraudCriteria(selectedLead, leads, priceCheckAlerts);
+        const selectedFraud = fraudByLeadId.get(selectedLead.id) || evaluateLeadFraudCriteria(selectedLead, leads, priceCheckAlerts);
         return (
           <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4 overflow-hidden">
             <div className="bg-white w-full max-w-4xl max-h-[90vh] rounded-2xl shadow-xl border border-slate-200 flex flex-col overflow-hidden text-sm animate-in fade-in zoom-in-95 duration-150">
@@ -4899,7 +5128,15 @@ export function LeadsWorkspace() {
               </div>
 
               {/* Nội dung cuộn */}
-              <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5 bg-slate-50/40">
+              <div
+                onInputCapture={() => {
+                  isDetailDirtyRef.current = true;
+                }}
+                onChangeCapture={() => {
+                  isDetailDirtyRef.current = true;
+                }}
+                className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-3.5 bg-slate-50/40"
+              >
                 {/* Hiển thị thông báo lỗi / thành công ngay trong Modal để người dùng thấy tức thì */}
                 {errorMsg && (
                   <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center justify-between gap-2">

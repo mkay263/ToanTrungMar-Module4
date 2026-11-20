@@ -117,7 +117,7 @@ export function savePrivateBusinessFile(input: SavePrivateFileInput): SavedPriva
   };
 }
 
-export function readPrivateBusinessFile(storageObjectKeyOrPath: string): ReadPrivateFileResult | null {
+export function resolvePrivateBusinessFilePath(storageObjectKeyOrPath: string): string | null {
   if (!storageObjectKeyOrPath) return null;
 
   // Prevent path traversal
@@ -126,22 +126,25 @@ export function readPrivateBusinessFile(storageObjectKeyOrPath: string): ReadPri
     return null;
   }
 
-  let fullPath = path.resolve(APP_CONFIG.getStorageRoot(), normalizedKey);
-  if (!fs.existsSync(fullPath)) {
-    // Check if filename only
-    const base = path.basename(normalizedKey);
-    const candidateBuckets = ['leads', 'design', 'avatars', 'branding'];
-    let found = false;
-    for (const b of candidateBuckets) {
-      const p = path.join(APP_CONFIG.getStorageRoot(), b, base);
-      if (fs.existsSync(p)) {
-        fullPath = p;
-        found = true;
-        break;
-      }
-    }
-    if (!found) return null;
+  const fullPath = path.resolve(APP_CONFIG.getStorageRoot(), normalizedKey);
+  if (fs.existsSync(fullPath)) {
+    return fullPath;
   }
+
+  const base = path.basename(normalizedKey);
+  const candidateBuckets = ['leads', 'design', 'avatars', 'branding'];
+  for (const b of candidateBuckets) {
+    const p = path.join(APP_CONFIG.getStorageRoot(), b, base);
+    if (fs.existsSync(p)) {
+      return p;
+    }
+  }
+  return null;
+}
+
+export function readPrivateBusinessFile(storageObjectKeyOrPath: string): ReadPrivateFileResult | null {
+  const fullPath = resolvePrivateBusinessFilePath(storageObjectKeyOrPath);
+  if (!fullPath) return null;
 
   try {
     const buffer = fs.readFileSync(fullPath);

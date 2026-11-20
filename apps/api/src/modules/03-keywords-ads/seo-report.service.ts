@@ -1,5 +1,6 @@
 import { prisma, recordAiUsageAttempt } from '@toantrung/database';
 import type { SessionUserDto } from '@toantrung/contracts';
+import { bumpDomainRevisions, getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import { buildStandardXlsxBuffer, ZipArchive } from '../../core/export/xlsx-builder';
 import { AiDesignProviderFactory } from '../05-ai-design/providers';
 
@@ -727,29 +728,69 @@ export function validateAiClaimsAgainstSnapshot(
   };
 }
 
-const inFlightSeoReportLocks = new Map<string, Promise<SeoAiReportRecord>>();
+const globalSeoReportStore = globalThis as unknown as {
+  __toantrungSeoReportLocks?: Map<string, Promise<SeoAiReportRecord>>;
+};
+
+function getInFlightSeoReportLocks(): Map<string, Promise<SeoAiReportRecord>> {
+  if (!globalSeoReportStore.__toantrungSeoReportLocks) {
+    globalSeoReportStore.__toantrungSeoReportLocks = new Map();
+  }
+  return globalSeoReportStore.__toantrungSeoReportLocks;
+}
 
 export async function listSeoAiReports(): Promise<SeoAiReportRecord[]> {
-  const row = await prisma.systemSetting.findUnique({
-    where: { key: SETTING_KEY_SEO_AI_REPORTS },
+  const cached = await getOrComputeScopedCache<SeoAiReportRecord[]>({
+    key: 'seo-ai-reports-list',
+    domains: ['seo_reports'],
+    ttlMs: 60_000,
+    compute: async () => {
+      const row = await prisma.systemSetting.findUnique({
+        where: { key: SETTING_KEY_SEO_AI_REPORTS },
+      });
+      if (!row?.value) return [];
+      try {
+        const parsed = JSON.parse(row.value);
+        if (!Array.isArray(parsed)) return [];
+        return parsed.map((item: SeoAiReportRecord) => ({
+          ...item,
+          generationMode:
+            item.generationMode ||
+            (item.modelUsed && item.modelUsed !== 'grounded-snapshot-template' && item.modelUsed !== 'deterministic-snapshot-engine'
+              ? 'LIVE_AI'
+              : 'DETERMINISTIC_FALLBACK'),
+          fallbackReason: item.fallbackReason ?? null,
+          validationResult: item.validationResult || { valid: true, violations: [] },
+        }));
+      } catch {
+        return [];
+      }
+    },
   });
-  if (!row?.value) return [];
-  try {
-    const parsed = JSON.parse(row.value);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((item: SeoAiReportRecord) => ({
-      ...item,
-      generationMode:
-        item.generationMode ||
-        (item.modelUsed && item.modelUsed !== 'grounded-snapshot-template' && item.modelUsed !== 'deterministic-snapshot-engine'
-          ? 'LIVE_AI'
-          : 'DETERMINISTIC_FALLBACK'),
-      fallbackReason: item.fallbackReason ?? null,
-      validationResult: item.validationResult || { valid: true, violations: [] },
-    }));
-  } catch {
-    return [];
-  }
+  return cached.data;
+}
+
+export async function getLatestSeoAiReportExcerptCached(): Promise<{
+  id: string;
+  title: string;
+  generatedAt: string;
+  excerpt: string;
+} | null> {
+  const list = await listSeoAiReports();
+  const latest = list[0];
+  if (!latest) return null;
+  const rawContent = (latest.editedContent || latest.aiOriginalContent || '').trim();
+  const firstLines = rawContent
+    .split(/\r?\n/)
+    .map((l: string) => l.replace(/^[#*\-\s]+/, '').trim())
+    .filter(Boolean);
+  const excerpt = firstLines.slice(0, 3).join(' · ').slice(0, 220);
+  return {
+    id: latest.id,
+    title: firstLines[0] || `Báo cáo SEO AI (${latest.website || 'Toàn hệ thống'})`,
+    generatedAt: latest.snapshot?.generatedAt || latest.updatedAt || latest.createdAt,
+    excerpt,
+  };
 }
 
 async function saveSeoAiReportsList(reports: SeoAiReportRecord[]): Promise<void> {
@@ -761,6 +802,7 @@ async function saveSeoAiReportsList(reports: SeoAiReportRecord[]): Promise<void>
       value: JSON.stringify(reports.slice(0, 50)),
     },
   });
+  bumpDomainRevisions(['seo_reports', 'ads', 'reports'], 'seo_ai_report_saved');
 }
 
 export async function generateSeoAiReportFromSnapshot(params: {
@@ -770,7 +812,8 @@ export async function generateSeoAiReportFromSnapshot(params: {
   endDate?: string;
 }): Promise<SeoAiReportRecord> {
   const lockKey = `${params.user.id}:${params.website}:${params.periodDays}:${params.endDate || 'today'}`;
-  const existingLock = inFlightSeoReportLocks.get(lockKey);
+  const locks = getInFlightSeoReportLocks();
+  const existingLock = locks.get(lockKey);
   if (existingLock) {
     return existingLock;
   }
@@ -971,9 +1014,9 @@ export async function generateSeoAiReportFromSnapshot(params: {
   };
 
   const promise = run().finally(() => {
-    inFlightSeoReportLocks.delete(lockKey);
+    locks.delete(lockKey);
   });
-  inFlightSeoReportLocks.set(lockKey, promise);
+  locks.set(lockKey, promise);
   return promise;
 }
 

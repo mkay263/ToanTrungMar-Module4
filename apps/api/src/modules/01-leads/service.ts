@@ -5,6 +5,7 @@ import {
   parseBigIntString,
   transitionLeadWithVersion,
 } from '@toantrung/database';
+import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import {
   containsMonetaryAmountText,
   hasBaPermission,
@@ -241,46 +242,67 @@ export async function selectAutoAssignedSales(preferredOldSalesId?: number | nul
 }
 
 export async function listProductsAndSalesOptions(currentUser: SessionUserDto) {
-  const products = await prisma.product.findMany({
-    where: { isActive: true },
-    orderBy: { id: 'asc' },
+  const cached = await getOrComputeScopedCache({
+    key: 'leads-products-and-sales-raw',
+    domains: ['leads', 'auth'],
+    ttlMs: 60_000,
+    compute: async () => {
+      const [products, salesUsers] = await Promise.all([
+        prisma.product.findMany({
+          where: { isActive: true },
+          orderBy: { id: 'asc' },
+        }),
+        prisma.user.findMany({
+          where: {
+            isActive: true,
+            deletedAt: null,
+            role: { roleCode: { in: ['SALES', 'SALES_LEAD'] } },
+          },
+          select: {
+            id: true,
+            fullName: true,
+            email: true,
+            isOnline: true,
+            isReceivingLeads: true,
+            _count: {
+              select: {
+                assignedLeads: {
+                  where: {
+                    isSpam: false,
+                    pipelineStatus: { in: ['new_lead', 'quoting', 'quote_sent'] },
+                  },
+                },
+              },
+            },
+          },
+          orderBy: { id: 'asc' },
+        }),
+      ]);
+      return { products, salesUsers };
+    },
   });
 
-  const salesUsers = await prisma.user.findMany({
-    where: {
-      isActive: true,
-      deletedAt: null,
-      role: { roleCode: { in: ['SALES', 'SALES_LEAD'] } },
-    },
-    include: {
-      assignedLeads: {
-        where: {
-          isSpam: false,
-          pipelineStatus: { in: ['new_lead', 'quoting', 'quote_sent'] },
-        },
-        select: { id: true },
-      },
-    },
-    orderBy: { id: 'asc' },
-  });
-
+  const { products, salesUsers } = cached.data;
   const senderEntry = salesUsers.find((u) => u.id === currentUser.id);
-  const senderActiveCount = senderEntry ? senderEntry.assignedLeads.length : 999;
+  const senderActiveCount = senderEntry ? senderEntry._count.assignedLeads : 999;
 
-  const salesOptions: SalesAssigneeOptionDto[] = salesUsers.map((u) => ({
-    id: u.id,
-    fullName: u.fullName,
-    email: u.email,
-    isOnline: u.isOnline,
-    isReceivingLeads: u.isReceivingLeads,
-    activeLeadCount: u.assignedLeads.length,
-    // UC02 5.2: Khi lý do chuyển là "Bận", người nhận phải online, đang nhận lead và có số Lead đang xử lý ít hơn người chuyển
-    eligibleForBusyTransfer:
-      u.id !== currentUser.id &&
-      u.isOnline &&
-      u.isReceivingLeads &&
-      u.assignedLeads.length < senderActiveCount,
-  }));
+  const salesOptions: SalesAssigneeOptionDto[] = salesUsers.map((u) => {
+    const activeLeadCount = u._count.assignedLeads;
+    return {
+      id: u.id,
+      fullName: u.fullName,
+      email: u.email,
+      isOnline: u.isOnline,
+      isReceivingLeads: u.isReceivingLeads,
+      activeLeadCount,
+      // UC02 5.2: Khi lý do chuyển là "Bận", người nhận phải online, đang nhận lead và có số Lead đang xử lý ít hơn người chuyển
+      eligibleForBusyTransfer:
+        u.id !== currentUser.id &&
+        u.isOnline &&
+        u.isReceivingLeads &&
+        activeLeadCount < senderActiveCount,
+    };
+  });
 
   const productDtos: ProductCatalogDto[] = products.map((p) => ({
     id: p.id,
@@ -322,6 +344,12 @@ export async function listLeadsForUser(
   products: ProductCatalogDto[];
   salesOptions: SalesAssigneeOptionDto[];
   priceCheckAlerts: PriceCheckAlertDto[];
+  freshness: {
+    checkedAt: string;
+    lastSyncedAt: string | null;
+    latestSourceDataAt: string | null;
+    fromCache: boolean;
+  };
 }> {
   const canViewAll = hasBaPermission(user.roleCode, 'LEAD_VIEW_ALL');
   const isAnonymized = shouldAnonymizeLeadForRole(user.roleCode);
@@ -422,61 +450,103 @@ export async function listLeadsForUser(
   const page = usePagePagination ? Math.max(filters?.page ?? 1, 1) : 1;
   const skipCount = usePagePagination && !filters?.cursorId ? (page - 1) * pageSize : 0;
 
-  const [rows, totalCount, { products, salesOptions }, alertRows] = await Promise.all([
-    prisma.lead.findMany({
-      where: whereClause,
-      ...(filters?.cursorId
-        ? { cursor: { id: filters.cursorId }, skip: 1 }
-        : skipCount > 0
-          ? { skip: skipCount }
-          : {}),
-      take: pageSize,
-      include: {
-        assignedSales: { select: { id: true, fullName: true } },
-        createdBy: { select: { id: true, fullName: true } },
-        receivedBy: { select: { id: true, fullName: true } },
-        matchedOldLead: { select: { id: true, leadCode: true, pipelineStatus: true } },
-        leadProducts: { include: { product: true } },
-        tracking: { include: { campaign: { select: { id: true, campaignCode: true, campaignName: true } } } },
-        attachments: {
-          include: { uploadedBy: { select: { id: true, fullName: true } } },
-          orderBy: { uploadedAt: 'desc' },
-          take: 15,
-        },
-        activities: {
+  const filterKey = JSON.stringify({
+    uid: user.roleCode === 'SALES' ? user.id : user.roleCode,
+    anon: isAnonymized,
+    status: filters?.status || '',
+    sourceWebsite: filters?.sourceWebsite || '',
+    search: filters?.search || '',
+    includeSpam: Boolean(filters?.includeSpam),
+    validOnly: Boolean(filters?.validOnly),
+    overdueOnly: Boolean(filters?.overdueOnly),
+    unreceivedOnly: Boolean(filters?.unreceivedOnly),
+    missingProductOnly: Boolean(filters?.missingProductOnly),
+    salesId: filters?.salesId || '',
+    productId: filters?.productId || '',
+    from: filters?.fromDateStr || '',
+    to: filters?.toDateStr || '',
+    page,
+    pageSize,
+    cursorId: filters?.cursorId || 0,
+  });
+
+  const cachedList = await getOrComputeScopedCache({
+    key: `m01-leads:${filterKey}`,
+    domains: ['leads', 'design', 'auth'],
+    ttlMs: 15_000,
+    compute: async () => {
+      const [rows, totalCount, { products, salesOptions }, alertRows, gmailCfgRow] = await Promise.all([
+        prisma.lead.findMany({
+          where: whereClause,
+          ...(filters?.cursorId
+            ? { cursor: { id: filters.cursorId }, skip: 1 }
+            : skipCount > 0
+              ? { skip: skipCount }
+              : {}),
+          take: pageSize,
           include: {
-            actionBy: { select: { fullName: true } },
-            fromSales: { select: { fullName: true } },
-            toSales: { select: { fullName: true } },
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 25,
-        },
-        designRequests: {
-          include: {
-            assignedDesigner: { select: { fullName: true } },
-            assetVersions: {
-              orderBy: { versionNumber: 'desc' },
-              take: 1,
+            assignedSales: { select: { id: true, fullName: true } },
+            createdBy: { select: { id: true, fullName: true } },
+            receivedBy: { select: { id: true, fullName: true } },
+            matchedOldLead: { select: { id: true, leadCode: true, pipelineStatus: true } },
+            leadProducts: { include: { product: true } },
+            tracking: { include: { campaign: { select: { id: true, campaignCode: true, campaignName: true } } } },
+            attachments: {
+              include: { uploadedBy: { select: { id: true, fullName: true } } },
+              orderBy: { uploadedAt: 'desc' },
+              take: 15,
+            },
+            activities: {
+              include: {
+                actionBy: { select: { fullName: true } },
+                fromSales: { select: { fullName: true } },
+                toSales: { select: { fullName: true } },
+              },
+              orderBy: { createdAt: 'desc' },
+              take: 25,
+            },
+            designRequests: {
+              include: {
+                assignedDesigner: { select: { fullName: true } },
+                assetVersions: {
+                  orderBy: { versionNumber: 'desc' },
+                  take: 1,
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+              take: 10,
             },
           },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        }),
+        prisma.lead.count({ where: whereClause }),
+        listProductsAndSalesOptions(user),
+        prisma.priceCheckAlert.findMany({
+          include: {
+            lead: { select: { leadCode: true } },
+            createdBy: { select: { id: true, fullName: true } },
+          },
           orderBy: { createdAt: 'desc' },
-          take: 10,
-        },
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    }),
-    prisma.lead.count({ where: whereClause }),
-    listProductsAndSalesOptions(user),
-    prisma.priceCheckAlert.findMany({
-      include: {
-        lead: { select: { leadCode: true } },
-        createdBy: { select: { id: true, fullName: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    }),
-  ]);
+          take: 100,
+        }),
+        prisma.systemSetting
+          .findUnique({ where: { key: 'gmail_lead_sync_config_v1' } })
+          .catch(() => null),
+      ]);
+      return { rows, totalCount, products, salesOptions, alertRows, gmailCfgRow };
+    },
+  });
+
+  const { rows, totalCount, products, salesOptions, alertRows, gmailCfgRow } = cachedList.data;
+  let lastGmailSyncAt: string | null = null;
+  if (gmailCfgRow?.value) {
+    try {
+      const parsedCfg = JSON.parse(gmailCfgRow.value) as { lastSyncAt?: string | null };
+      lastGmailSyncAt = parsedCfg?.lastSyncAt || null;
+    } catch {
+      // ignore
+    }
+  }
 
   const nowMs = Date.now();
   const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
@@ -747,6 +817,7 @@ export async function listLeadsForUser(
   }));
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+  const latestSourceDataAt = rows[0]?.createdAt ? rows[0].createdAt.toISOString() : null;
 
   return {
     leads,
@@ -757,6 +828,12 @@ export async function listLeadsForUser(
     products,
     salesOptions,
     priceCheckAlerts,
+    freshness: {
+      checkedAt: new Date().toISOString(),
+      lastSyncedAt: lastGmailSyncAt || latestSourceDataAt,
+      latestSourceDataAt,
+      fromCache: cachedList.fromCache,
+    },
   };
 }
 
@@ -1068,15 +1145,19 @@ export async function updateLeadInformation(
 
     if (input.productIds) {
       await tx.leadProduct.deleteMany({ where: { leadId } });
-      for (const productId of input.productIds) {
-        await tx.leadProduct.create({
-          data: {
-            leadId,
-            productId,
-            customProductName: input.customProductNote || null,
-            requestedDimension: input.customProductNote || null,
-          },
-        });
+      if (input.productIds.length > 0) {
+        await Promise.all(
+          input.productIds.map((productId) =>
+            tx.leadProduct.create({
+              data: {
+                leadId,
+                productId,
+                customProductName: input.customProductNote || null,
+                requestedDimension: input.customProductNote || null,
+              },
+            }),
+          ),
+        );
       }
     }
 

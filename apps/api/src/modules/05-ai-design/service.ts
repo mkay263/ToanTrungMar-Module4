@@ -3,6 +3,7 @@
  * Owner: Nhóm 5 (05-ai-design)
  */
 
+import fs from 'node:fs';
 import {
   prisma,
   ConcurrencyConflictError,
@@ -36,8 +37,14 @@ import {
 } from '@toantrung/contracts';
 import {
   readPrivateBusinessFile,
+  resolvePrivateBusinessFilePath,
   savePrivateBusinessFile,
 } from '../../core/storage/private-files.service';
+import {
+  bumpDomainRevisions,
+  getOrComputeScopedCache,
+} from '../../core/cache/server-data-cache';
+import { upsertActionableNotification } from '../../core/notifications/service';
 import { notifyLeadSalesOnDesignCompleted } from '../01-leads/service';
 import {
   AiDesignProviderFactory,
@@ -325,6 +332,400 @@ export async function assertCanAccessStorageObjectKey(
   }
 }
 
+const DESIGN_REQUEST_INCLUDE = {
+  lead: true,
+  requestedBySales: true,
+  assignedDesigner: true,
+  assetVersions: {
+    include: {
+      uploadedBy: true,
+      aiUsageLog: true,
+    },
+    orderBy: { versionNumber: 'asc' as const },
+  },
+} as const;
+
+async function findSingleDesignRequestRow(requestId: number) {
+  return prisma.designRequest.findUnique({
+    where: { id: requestId },
+    include: DESIGN_REQUEST_INCLUDE,
+  });
+}
+
+type DesignRequestFullRow = NonNullable<Awaited<ReturnType<typeof findSingleDesignRequestRow>>>;
+
+interface CachedAssetFileMeta {
+  fileAvailable: boolean;
+  fileSizeBytes: number;
+  mimeType: string | null;
+  widthPx: number | null;
+  heightPx: number | null;
+}
+
+const globalForDesignRuntime = globalThis as unknown as {
+  __toantrungDesignJobLocks?: Map<number, { jobId: string; startedAt: number }>;
+  __toantrungPrivateAssetMetaCache?: Map<string, CachedAssetFileMeta>;
+};
+
+const activeDesignJobLocks =
+  globalForDesignRuntime.__toantrungDesignJobLocks ??
+  (globalForDesignRuntime.__toantrungDesignJobLocks = new Map<
+    number,
+    { jobId: string; startedAt: number }
+  >());
+
+function getPrivateAssetMetaCached(storageObjectKey: string): CachedAssetFileMeta | null {
+  if (!storageObjectKey) return null;
+  const fullPath = resolvePrivateBusinessFilePath(storageObjectKey);
+  if (!fullPath) return null;
+  try {
+    const stat = fs.statSync(fullPath);
+    if (!stat.isFile() || stat.size <= 0) {
+      return { fileAvailable: false, fileSizeBytes: 0, mimeType: null, widthPx: null, heightPx: null };
+    }
+    const cache =
+      globalForDesignRuntime.__toantrungPrivateAssetMetaCache ??
+      (globalForDesignRuntime.__toantrungPrivateAssetMetaCache = new Map<string, CachedAssetFileMeta>());
+    const cacheKey = `${fullPath}:${stat.mtimeMs}:${stat.size}`;
+    const hit = cache.get(cacheKey);
+    if (hit) return hit;
+
+    const fileData = readPrivateBusinessFile(storageObjectKey);
+    const measured = fileData && fileData.buffer.length > 0 ? validateGeneratedImageBuffer(fileData.buffer) : null;
+    const entry: CachedAssetFileMeta = {
+      fileAvailable: Boolean(fileData && fileData.buffer.length > 0),
+      fileSizeBytes: fileData ? fileData.buffer.length : stat.size,
+      mimeType: measured?.detectedMimeType || fileData?.mimeType || null,
+      widthPx: measured?.widthPx ?? null,
+      heightPx: measured?.heightPx ?? null,
+    };
+    if (cache.size >= 500) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey) cache.delete(oldestKey);
+    }
+    cache.set(cacheKey, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+async function expireStaleActiveJobInDb(requestId: number): Promise<void> {
+  try {
+    const row = await prisma.designRequest.findUnique({
+      where: { id: requestId },
+      include: { assetVersions: { take: 1, select: { id: true } } },
+    });
+    if (!row) return;
+    const meta = parseProjectMetadata(row.installPositionJson);
+    if (meta.activeJob?.status !== 'running') return;
+    if (Date.now() - Date.parse(meta.activeJob.startedAt) <= 5 * 60_000) return;
+    meta.activeJob = {
+      ...meta.activeJob,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      message: 'Tác vụ quá thời gian xử lý trên máy chủ (5 phút) hoặc tiến trình bị gián đoạn.',
+    };
+    await prisma.designRequest.update({
+      where: { id: requestId },
+      data: {
+        designStatus: row.assetVersions.length > 0 ? 'ai_drafted' : 'pending',
+        installPositionJson: JSON.stringify(meta),
+      },
+    });
+    bumpDomainRevisions(['design'], 'design_stale_job_expired');
+  } catch {
+    // non-fatal cleanup
+  }
+}
+
+function mapDesignRequestRowToDto(
+  r: DesignRequestFullRow,
+  opts: {
+    fallbackDesignerId: number;
+    isAnonymizedLead: boolean;
+    providerStatus: ProviderStatusInfo;
+  }
+): DesignRequestItemDto {
+  const { fallbackDesignerId, isAnonymizedLead, providerStatus } = opts;
+  const dims = parseDimensions(r.screenDimensions);
+  const meta = parseProjectMetadata(r.installPositionJson);
+
+  let effectiveActiveJob = meta.activeJob ?? null;
+  let effectiveDbStatus = r.designStatus;
+  if (
+    effectiveActiveJob?.status === 'running' &&
+    !activeDesignJobLocks.has(r.id) &&
+    Date.now() - Date.parse(effectiveActiveJob.startedAt) > 5 * 60_000
+  ) {
+    effectiveActiveJob = {
+      ...effectiveActiveJob,
+      status: 'failed',
+      finishedAt: new Date().toISOString(),
+      message: 'Tác vụ quá thời gian xử lý trên máy chủ (5 phút) hoặc tiến trình bị gián đoạn.',
+    };
+    effectiveDbStatus = r.assetVersions.length > 0 ? 'ai_drafted' : 'pending';
+    void expireStaleActiveJobInDb(r.id);
+  }
+
+  const assetVersions: DesignAssetVersionItemDto[] = r.assetVersions.map((v) => {
+    let parsedVerParams: {
+      providerId?: string;
+      modelUsed?: string;
+      requestedModel?: string | null;
+      reportedModel?: string | null;
+      reportedModelNote?: string | null;
+      costState?: 'actual' | 'estimated' | 'unknown' | null;
+      tokensActual?: boolean;
+      taskCode?: DesignTaskCode | null;
+      taskId?: string | null;
+      inputAssetIds?: string[];
+      parentVersionId?: number | null;
+      generationOrigin?: 'CLOUD_AI' | 'AI_PLUS_LAYOUT' | 'LOCAL_COMPOSITE_FALLBACK' | 'DESIGNER_UPLOAD' | null;
+      studioComposite?: boolean;
+      referenceSitePhotoId?: string | null;
+      sourcePhotoId?: string | null;
+      referenceProductPhotoIds?: string[];
+      sourceVersionId?: number | null;
+      effectivePrompt?: string | null;
+      actualWidthPx?: number | null;
+      actualHeightPx?: number | null;
+    } = {};
+    if (v.parametersJson) {
+      try {
+        parsedVerParams = JSON.parse(v.parametersJson);
+      } catch {
+        parsedVerParams = {};
+      }
+    }
+    const cachedFileMeta = getPrivateAssetMetaCached(v.storageObjectKey);
+    const fileAvailable = Boolean(cachedFileMeta?.fileAvailable);
+    const realWidthPx =
+      parsedVerParams.actualWidthPx ??
+      cachedFileMeta?.widthPx ??
+      dims.bannerWidthPx ??
+      null;
+    const realHeightPx =
+      parsedVerParams.actualHeightPx ??
+      cachedFileMeta?.heightPx ??
+      dims.bannerHeightPx ??
+      null;
+    const inferredOrigin: DesignAssetVersionItemDto['generationOrigin'] =
+      parsedVerParams.generationOrigin ||
+      (v.versionType === 'final_render'
+        ? 'DESIGNER_UPLOAD'
+        : parsedVerParams.providerId === 'local_sandbox' ||
+            parsedVerParams.studioComposite ||
+            (parsedVerParams.modelUsed || '').includes('toantrung-studio') ||
+            (parsedVerParams.modelUsed || '').includes('Compositor')
+          ? 'LOCAL_COMPOSITE_FALLBACK'
+          : 'CLOUD_AI');
+    return {
+      id: v.id,
+      designRequestId: v.designRequestId,
+      versionNumber: v.versionNumber,
+      sourceType: v.versionType === 'final_render' ? 'DESIGNER_FINAL_UPLOAD' : 'AI_DRAFT',
+      generationOrigin: inferredOrigin,
+      providerId: parsedVerParams.providerId ?? null,
+      modelUsed: parsedVerParams.modelUsed ?? v.aiUsageLog?.modelName ?? null,
+      requestedModel: parsedVerParams.requestedModel ?? parsedVerParams.modelUsed ?? null,
+      reportedModel: parsedVerParams.reportedModel ?? null,
+      reportedModelNote: parsedVerParams.reportedModelNote ?? null,
+      costState: parsedVerParams.costState ?? (v.aiUsageLog?.costMicros ? 'estimated' : 'unknown'),
+      taskCode: parsedVerParams.taskCode ?? meta.taskCode ?? null,
+      taskId: parsedVerParams.taskId ?? null,
+      inputAssetIds: Array.isArray(parsedVerParams.inputAssetIds) ? parsedVerParams.inputAssetIds : [],
+      parentVersionId: parsedVerParams.parentVersionId ?? parsedVerParams.sourceVersionId ?? null,
+      storageObjectKey: v.storageObjectKey,
+      downloadUrl: `/api/v1/design/asset/${v.id}`,
+      mimeType: cachedFileMeta?.mimeType || v.mimeType,
+      fileSizeBytes: cachedFileMeta ? cachedFileMeta.fileSizeBytes : v.fileSizeBytes,
+      widthPx: realWidthPx,
+      heightPx: realHeightPx,
+      aspectRatio:
+        realWidthPx && realHeightPx
+          ? `${realWidthPx}×${realHeightPx}px (${r.aspectRatio || '16:9'})`
+          : r.aspectRatio,
+      promptUsed: v.promptUsed,
+      processingDurationMs: v.aiUsageLog?.durationMs ?? r.processingTimeMs,
+      tokenUsed:
+        parsedVerParams.tokensActual === false
+          ? null
+          : v.aiUsageLog?.totalTokens ?? r.tokenCost ?? null,
+      cost:
+        v.aiUsageLog?.costMicros != null && v.aiUsageLog.costMicros > 0n
+          ? toMonetaryAmountDto(v.aiUsageLog.costMicros, 'USD', 'micros')
+          : null,
+      isApprovedFinal: v.isApprovedFinal,
+      uploadedByName: v.uploadedBy?.fullName || r.assignedDesigner?.fullName || 'Hệ thống AI',
+      createdAt: v.createdAt.toISOString(),
+      fileAvailable,
+      referenceSitePhotoId:
+        parsedVerParams.referenceSitePhotoId ?? parsedVerParams.sourcePhotoId ?? null,
+      referenceProductPhotoIds: Array.isArray(parsedVerParams.referenceProductPhotoIds)
+        ? parsedVerParams.referenceProductPhotoIds
+        : [],
+      sourceVersionId: parsedVerParams.sourceVersionId ?? null,
+      effectivePrompt: parsedVerParams.effectivePrompt ?? v.promptUsed ?? null,
+    };
+  });
+
+  const latestAiDraft = [...assetVersions].reverse().find((v) => v.sourceType === 'AI_DRAFT');
+  const latestFinal = [...assetVersions]
+    .reverse()
+    .find((v) => v.sourceType === 'DESIGNER_FINAL_UPLOAD' || v.isApprovedFinal);
+
+  const currency: 'VND' | 'USD' = r.costCurrency === 'VND' ? 'VND' : 'USD';
+
+  const photos: ProjectPhotoItemDto[] = Array.isArray(meta.photos)
+    ? meta.photos
+    : r.sitePhotoUrl
+      ? [
+          {
+            id: `photo-site-${r.id}`,
+            name: 'Ảnh hiện trạng công trình',
+            url:
+              r.sitePhotoUrl.startsWith('/') || r.sitePhotoUrl.startsWith('http')
+                ? r.sitePhotoUrl
+                : `/api/v1/design/asset-file?key=${encodeURIComponent(r.sitePhotoUrl)}`,
+            storageObjectKey: r.sitePhotoUrl,
+            selected: true,
+            uploadedAt: r.createdAt.toISOString(),
+          },
+        ]
+      : [];
+
+  const cleanedStoredChat = (meta.chatMessages || []).filter(
+    (m) =>
+      !m.text?.includes('Phân tích Kỹ thuật Chuyên sâu (Chuẩn thi công LED Toàn Trung') &&
+      !m.text?.includes('Mình đã nhận được chia sẻ của bạn:')
+  );
+  const chatMessages: DesignChatMessageDto[] =
+    cleanedStoredChat.length > 0
+      ? cleanedStoredChat
+      : [
+          {
+            id: `msg-ai-welcome-${r.id}`,
+            role: 'assistant',
+            text: providerStatus.isConfigured
+              ? 'Chào bạn! Trợ lý thiết kế AI đã kết nối khóa API. Bạn có thể chọn ảnh hiện trạng công trình, kiểm tra cấu hình cabinet LED chuẩn mm hoặc gửi yêu cầu tạo phối cảnh / banner.'
+              : 'Chào bạn! Hiện máy chủ chưa gắn khóa API tạo ảnh đám mây (GEMINI_API_KEY). Bạn vẫn có thể dựng phối cảnh trực tiếp trên ảnh công trình thật, kiểm tra tính toán kỹ thuật cabinet LED độc lập (mm) và lưu lịch sử phiên bản.',
+            timestamp: r.createdAt.toISOString(),
+            chatMode: 'consultant_free',
+            modelUsed: providerStatus.isConfigured
+              ? providerStatus.activeModel
+              : 'Chế độ dựng kỹ thuật nội bộ (chưa kết nối khóa AI)',
+            cost: '$0.00',
+            status: 'success',
+          },
+        ];
+
+  const hasMeasuredPhysicalDims =
+    meta.screenWidthM != null || dims.screenWidthM != null;
+  const isUnmeasuredBannerOrBrief =
+    r.requestType === 'banner' && !hasMeasuredPhysicalDims;
+
+  const effectiveWidthM = meta.screenWidthM ?? dims.screenWidthM ?? 4.8;
+  const effectiveHeightM = meta.screenHeightM ?? dims.screenHeightM ?? 2.7;
+  const effectiveBannerW = meta.bannerWidthPx ?? dims.bannerWidthPx ?? 1536;
+  const effectiveBannerH = meta.bannerHeightPx ?? dims.bannerHeightPx ?? 1024;
+  const effectivePitch = meta.pixelPitch || meta.productSpec?.pixelPitch || 'P2.5';
+  const effectiveStyle = meta.screenStyle || meta.productSpec?.screenStyle || 'flat';
+
+  const productSpec = isUnmeasuredBannerOrBrief
+    ? null
+    : computeLedProductSpec({
+        productCode: meta.productSpec?.productCode,
+        productName: r.ledCategory || 'Màn hình LED Indoor',
+        categoryGroup: meta.productSpec?.categoryGroup,
+        widthM: effectiveWidthM,
+        heightM: effectiveHeightM,
+        pitch: effectivePitch,
+        screenStyle: effectiveStyle,
+      });
+  if (productSpec && meta.productId) {
+    productSpec.productId = meta.productId;
+  }
+
+  const cleanLeadProject = r.lead ? sanitizeProjectOrSubjectText(r.lead.projectName) : null;
+  const projectName =
+    meta.projectName ||
+    (r.lead
+      ? cleanLeadProject || r.lead.companyName || 'Dự án LED'
+      : r.requestType === 'banner'
+        ? 'Banner Quảng cáo LED'
+        : 'Showroom LED');
+  const selectedPhoto = photos.find((p) => p.selected) || photos[0];
+
+  return {
+    id: r.id,
+    version: r.version,
+    projectName,
+    contactName: isAnonymizedLead
+      ? 'Khách hàng ẩn danh (UC01)'
+      : meta.contactName ?? r.lead?.contactName ?? null,
+    installationInfo: isUnmeasuredBannerOrBrief
+      ? meta.installationInfo ?? null
+      : meta.installationInfo || 'Tường bên phải showroom, cách sàn 1.2m',
+    notes: r.notes,
+    leadId: r.leadId,
+    leadCode: r.lead?.leadCode ?? null,
+    leadProjectLabel: r.lead
+      ? `${r.lead.leadCode} — ${
+          isAnonymizedLead
+            ? cleanLeadProject || 'Dự án LED (Ẩn danh)'
+            : r.lead.companyName || r.lead.contactName || 'Dự án LED'
+        }`
+      : null,
+    productId: meta.productId ?? null,
+    productName: r.ledCategory,
+    websiteId: meta.websiteId ?? null,
+    websiteDomain: meta.websiteDomain ?? null,
+    campaignId: meta.campaignId ?? null,
+    campaignName: meta.campaignName ?? null,
+    contentId: meta.contentId ?? null,
+    sourceModule: meta.sourceModule ?? null,
+    taskCode: meta.taskCode ?? (r.requestType === 'banner' ? 'banner_generate' : 'perspective_compose'),
+    designBrief: meta.designBrief ?? null,
+    requestedBySalesId: r.requestedBySalesId,
+    requestedBySalesName: r.requestedBySales?.fullName ?? null,
+    assignedDesignerId: r.assignedDesignerId ?? fallbackDesignerId,
+    assignedDesignerName: r.assignedDesigner?.fullName ?? 'Designer Toàn Trung',
+    designType: mapDbRequestTypeToDto(r.requestType),
+    ledModuleSpec: r.ledCategory,
+    screenWidthM: meta.screenWidthM ?? dims.screenWidthM,
+    screenHeightM: meta.screenHeightM ?? dims.screenHeightM,
+    installZoneBboxJson: meta.placementQuad ? JSON.stringify(meta.placementQuad) : null,
+    placementQuad: meta.placementQuad || DEFAULT_PLACEMENT_QUAD,
+    bannerWidthPx: meta.bannerWidthPx ?? dims.bannerWidthPx ?? effectiveBannerW,
+    bannerHeightPx: meta.bannerHeightPx ?? dims.bannerHeightPx ?? effectiveBannerH,
+    aspectRatio: r.aspectRatio || '16:9',
+    aspectLocked: meta.aspectLocked ?? true,
+    isArchived: meta.isArchived ?? false,
+    sitePhotoDownloadUrl: selectedPhoto?.url || null,
+    photos,
+    chatMessages,
+    productSpec,
+    aiPrompt: r.prompt ?? '',
+    aiDraftDownloadUrl: latestAiDraft?.downloadUrl ?? null,
+    finalRenderDownloadUrl: latestFinal?.downloadUrl ?? null,
+    approvedVersionId: r.approvedVersionId,
+    processingDurationSec:
+      r.processingTimeMs != null ? Number((r.processingTimeMs / 1000).toFixed(2)) : null,
+    tokenCost: r.tokenCost,
+    totalCost:
+      r.totalCostMicros != null
+        ? toMonetaryAmountDto(r.totalCostMicros, currency, 'micros')
+        : null,
+    status: mapDbStatusToDto(effectiveDbStatus),
+    activeJob: effectiveActiveJob,
+    createdAt: r.createdAt.toISOString(),
+    updatedAt: (r.completedAt ?? r.createdAt).toISOString(),
+    completedAt: r.completedAt ? r.completedAt.toISOString() : null,
+    assetVersions,
+  };
+}
+
 export async function getDesignProjectForUser(
   user: SessionUserDto,
   requestId: number
@@ -332,14 +733,20 @@ export async function getDesignProjectForUser(
   project: DesignRequestItemDto;
   designContext: ProjectDesignContext;
 }> {
-  await assertCanAccessDesignProject(user, requestId);
-  const { requests } = await listDesignRequestsForUser(user);
-  const project = requests.find((r) => r.id === requestId);
-  if (!project) {
+  const rawRow = await findSingleDesignRequestRow(requestId);
+  if (!rawRow) {
+    throw new Error('Không tìm thấy yêu cầu thiết kế.');
+  }
+  if (!canUserAccessDesignProject(user, rawRow)) {
     throw new ForbiddenDesignProjectAccessError();
   }
-  const rawRow = await prisma.designRequest.findUnique({ where: { id: requestId } });
-  const meta = parseProjectMetadata(rawRow?.installPositionJson ?? null);
+  const providerStatus = AiDesignProviderFactory.getActiveProviderInfo();
+  const project = mapDesignRequestRowToDto(rawRow, {
+    fallbackDesignerId: user.id,
+    isAnonymizedLead: user.roleCode === 'DESIGNER',
+    providerStatus,
+  });
+  const meta = parseProjectMetadata(rawRow.installPositionJson);
   const designContext =
     meta.designContext ||
     createInitialDesignContext({
@@ -487,6 +894,8 @@ export async function createMarketingDesignBrief(
     },
   });
 
+  bumpDomainRevisions(['design', 'notifications', 'reports'], 'marketing_design_brief_created');
+
   return {
     ok: true,
     projectId: created.id,
@@ -515,6 +924,7 @@ export async function configureAiProviders(
       }),
     },
   });
+  bumpDomainRevisions(['design'], 'ai_providers_configured');
   return updatedStatus;
 }
 
@@ -536,346 +946,95 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
     );
   }
 
-  const isAnonymizedLead = user.roleCode === 'DESIGNER';
-  const requestScopeWhere =
-    user.roleCode === 'SALES'
-      ? {
-          OR: [
-            { requestedBySalesId: user.id },
-            { lead: { assignedSalesId: user.id } },
-          ],
-        }
-      : undefined;
+  const cached = await getOrComputeScopedCache({
+    key: `design:list:${user.roleCode}:${user.roleCode === 'SALES' ? user.id : 'all'}`,
+    domains: ['design', 'leads'],
+    ttlMs: 15_000,
+    compute: async () => {
+      const isAnonymizedLead = user.roleCode === 'DESIGNER';
+      const requestScopeWhere =
+        user.roleCode === 'SALES'
+          ? {
+              OR: [
+                { requestedBySalesId: user.id },
+                { lead: { assignedSalesId: user.id } },
+              ],
+            }
+          : undefined;
 
-  const [rows, leads, products] = await Promise.all([
-    prisma.designRequest.findMany({
-      where: requestScopeWhere,
-      take: 100,
-      include: {
-        lead: true,
-        requestedBySales: true,
-        assignedDesigner: true,
-        assetVersions: {
-          include: {
-            uploadedBy: true,
-            aiUsageLog: true,
+      const [rows, leads, products, providerStatus, modelRegistry] = await Promise.all([
+        prisma.designRequest.findMany({
+          where: requestScopeWhere,
+          take: 100,
+          include: DESIGN_REQUEST_INCLUDE,
+          orderBy: { createdAt: 'desc' },
+        }),
+        prisma.lead.findMany({
+          where: {
+            isSpam: false,
+            ...(user.roleCode === 'SALES'
+              ? { OR: [{ assignedSalesId: user.id }, { createdByUserId: user.id }] }
+              : {}),
           },
-          orderBy: { versionNumber: 'asc' },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    }),
-    prisma.lead.findMany({
-      where: {
-        isSpam: false,
-        ...(user.roleCode === 'SALES'
-          ? { OR: [{ assignedSalesId: user.id }, { createdByUserId: user.id }] }
-          : {}),
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    }),
-    prisma.product.findMany({
-      where: { isActive: true },
-      orderBy: { id: 'asc' },
-    }),
-  ]);
+          orderBy: { createdAt: 'desc' },
+          take: 50,
+          select: {
+            id: true,
+            leadCode: true,
+            projectName: true,
+            companyName: true,
+            contactName: true,
+          },
+        }),
+        prisma.product.findMany({
+          where: { isActive: true },
+          orderBy: { id: 'asc' },
+          select: {
+            id: true,
+            productCode: true,
+            productName: true,
+            categoryGroup: true,
+          },
+        }),
+        Promise.resolve(AiDesignProviderFactory.getActiveProviderInfo()),
+        AiDesignProviderFactory.getModelRegistry(false).catch(() => undefined),
+      ]);
 
-  const [providerStatus, modelRegistry] = await Promise.all([
-    Promise.resolve(AiDesignProviderFactory.getActiveProviderInfo()),
-    AiDesignProviderFactory.getModelRegistry(false).catch(() => undefined),
-  ]);
+      const requests: DesignRequestItemDto[] = rows.map((r) =>
+        mapDesignRequestRowToDto(r, {
+          fallbackDesignerId: user.id,
+          isAnonymizedLead,
+          providerStatus,
+        })
+      );
 
-  const requests: DesignRequestItemDto[] = rows.map((r) => {
-    const dims = parseDimensions(r.screenDimensions);
-    const meta = parseProjectMetadata(r.installPositionJson);
-
-    const assetVersions: DesignAssetVersionItemDto[] = r.assetVersions.map((v) => {
-      let parsedVerParams: {
-        providerId?: string;
-        modelUsed?: string;
-        requestedModel?: string | null;
-        reportedModel?: string | null;
-        reportedModelNote?: string | null;
-        costState?: 'actual' | 'estimated' | 'unknown' | null;
-        tokensActual?: boolean;
-        taskCode?: DesignTaskCode | null;
-        taskId?: string | null;
-        inputAssetIds?: string[];
-        parentVersionId?: number | null;
-        generationOrigin?: 'CLOUD_AI' | 'AI_PLUS_LAYOUT' | 'LOCAL_COMPOSITE_FALLBACK' | 'DESIGNER_UPLOAD' | null;
-        studioComposite?: boolean;
-        referenceSitePhotoId?: string | null;
-        sourcePhotoId?: string | null;
-        referenceProductPhotoIds?: string[];
-        sourceVersionId?: number | null;
-        effectivePrompt?: string | null;
-        actualWidthPx?: number | null;
-        actualHeightPx?: number | null;
-      } = {};
-      if (v.parametersJson) {
-        try {
-          parsedVerParams = JSON.parse(v.parametersJson);
-        } catch {
-          parsedVerParams = {};
-        }
-      }
-      const storedFile = readPrivateBusinessFile(v.storageObjectKey);
-      const fileAvailable = Boolean(storedFile && storedFile.buffer.length > 0);
-      const measuredImg = fileAvailable && storedFile
-        ? validateGeneratedImageBuffer(storedFile.buffer)
-        : null;
-      const realWidthPx =
-        parsedVerParams.actualWidthPx ??
-        measuredImg?.widthPx ??
-        dims.bannerWidthPx ??
-        null;
-      const realHeightPx =
-        parsedVerParams.actualHeightPx ??
-        measuredImg?.heightPx ??
-        dims.bannerHeightPx ??
-        null;
-      const inferredOrigin: DesignAssetVersionItemDto['generationOrigin'] =
-        parsedVerParams.generationOrigin ||
-        (v.versionType === 'final_render'
-          ? 'DESIGNER_UPLOAD'
-          : parsedVerParams.providerId === 'local_sandbox' ||
-              parsedVerParams.studioComposite ||
-              (parsedVerParams.modelUsed || '').includes('toantrung-studio') ||
-              (parsedVerParams.modelUsed || '').includes('Compositor')
-            ? 'LOCAL_COMPOSITE_FALLBACK'
-            : 'CLOUD_AI');
       return {
-        id: v.id,
-        designRequestId: v.designRequestId,
-        versionNumber: v.versionNumber,
-        sourceType: v.versionType === 'final_render' ? 'DESIGNER_FINAL_UPLOAD' : 'AI_DRAFT',
-        generationOrigin: inferredOrigin,
-        providerId: parsedVerParams.providerId ?? null,
-        modelUsed: parsedVerParams.modelUsed ?? v.aiUsageLog?.modelName ?? null,
-        requestedModel: parsedVerParams.requestedModel ?? parsedVerParams.modelUsed ?? null,
-        reportedModel: parsedVerParams.reportedModel ?? null,
-        reportedModelNote: parsedVerParams.reportedModelNote ?? null,
-        costState: parsedVerParams.costState ?? (v.aiUsageLog?.costMicros ? 'estimated' : 'unknown'),
-        taskCode: parsedVerParams.taskCode ?? meta.taskCode ?? null,
-        taskId: parsedVerParams.taskId ?? null,
-        inputAssetIds: Array.isArray(parsedVerParams.inputAssetIds) ? parsedVerParams.inputAssetIds : [],
-        parentVersionId: parsedVerParams.parentVersionId ?? parsedVerParams.sourceVersionId ?? null,
-        storageObjectKey: v.storageObjectKey,
-        downloadUrl: `/api/v1/design/asset/${v.id}`,
-        mimeType: measuredImg?.detectedMimeType || v.mimeType,
-        fileSizeBytes: storedFile ? storedFile.buffer.length : v.fileSizeBytes,
-        widthPx: realWidthPx,
-        heightPx: realHeightPx,
-        aspectRatio:
-          realWidthPx && realHeightPx
-            ? `${realWidthPx}×${realHeightPx}px (${r.aspectRatio || '16:9'})`
-            : r.aspectRatio,
-        promptUsed: v.promptUsed,
-        processingDurationMs: v.aiUsageLog?.durationMs ?? r.processingTimeMs,
-        tokenUsed:
-          parsedVerParams.tokensActual === false
-            ? null
-            : v.aiUsageLog?.totalTokens ?? r.tokenCost ?? null,
-        cost:
-          v.aiUsageLog?.costMicros != null && v.aiUsageLog.costMicros > 0n
-            ? toMonetaryAmountDto(v.aiUsageLog.costMicros, 'USD', 'micros')
-            : null,
-        isApprovedFinal: v.isApprovedFinal,
-        uploadedByName: v.uploadedBy?.fullName || r.assignedDesigner?.fullName || 'Hệ thống AI',
-        createdAt: v.createdAt.toISOString(),
-        fileAvailable,
-        referenceSitePhotoId:
-          parsedVerParams.referenceSitePhotoId ?? parsedVerParams.sourcePhotoId ?? null,
-        referenceProductPhotoIds: Array.isArray(parsedVerParams.referenceProductPhotoIds)
-          ? parsedVerParams.referenceProductPhotoIds
-          : [],
-        sourceVersionId: parsedVerParams.sourceVersionId ?? null,
-        effectivePrompt: parsedVerParams.effectivePrompt ?? v.promptUsed ?? null,
+        requests,
+        leadOptions: leads.map((l) => {
+          const projLabel = sanitizeProjectOrSubjectText(l.projectName) || 'Dự án LED';
+          return {
+            id: l.id,
+            leadCode: l.leadCode,
+            label: isAnonymizedLead
+              ? `${l.leadCode} · Khách hàng ẩn danh (${projLabel})`
+              : `${l.leadCode} · ${l.companyName || l.contactName || 'Khách hàng'} (${projLabel})`,
+          };
+        }),
+        productOptions: products.map((p) => ({
+          id: p.id,
+          code: p.productCode,
+          name: p.productName,
+          categoryGroup: p.categoryGroup,
+        })),
+        providerStatus: {
+          ...providerStatus,
+          modelRegistry,
+        },
       };
-    });
-
-    const latestAiDraft = [...assetVersions].reverse().find((v) => v.sourceType === 'AI_DRAFT');
-    const latestFinal = [...assetVersions]
-      .reverse()
-      .find((v) => v.sourceType === 'DESIGNER_FINAL_UPLOAD' || v.isApprovedFinal);
-
-    const currency: 'VND' | 'USD' = r.costCurrency === 'VND' ? 'VND' : 'USD';
-
-    // Photos list: respect meta.photos (including empty array [] when user deleted all photos or created a fresh project)
-    const photos: ProjectPhotoItemDto[] = Array.isArray(meta.photos)
-      ? meta.photos
-      : r.sitePhotoUrl
-        ? [
-            {
-              id: `photo-site-${r.id}`,
-              name: 'Ảnh hiện trạng công trình',
-              url:
-                r.sitePhotoUrl.startsWith('/') || r.sitePhotoUrl.startsWith('http')
-                  ? r.sitePhotoUrl
-                  : `/api/v1/design/asset-file?key=${encodeURIComponent(r.sitePhotoUrl)}`,
-              storageObjectKey: r.sitePhotoUrl,
-              selected: true,
-              uploadedAt: r.createdAt.toISOString(),
-            },
-          ]
-        : [];
-
-    // Initial chat messages: filter out legacy rigid template messages and keep natural conversation
-    const cleanedStoredChat = (meta.chatMessages || []).filter(
-      (m) =>
-        !m.text?.includes('Phân tích Kỹ thuật Chuyên sâu (Chuẩn thi công LED Toàn Trung') &&
-        !m.text?.includes('Mình đã nhận được chia sẻ của bạn:')
-    );
-    const chatMessages: DesignChatMessageDto[] =
-      cleanedStoredChat.length > 0
-        ? cleanedStoredChat
-        : [
-            {
-              id: `msg-ai-welcome-${r.id}`,
-              role: 'assistant',
-              text: providerStatus.isConfigured
-                ? 'Chào bạn! Trợ lý thiết kế AI đã kết nối khóa API. Bạn có thể chọn ảnh hiện trạng công trình, kiểm tra cấu hình cabinet LED chuẩn mm hoặc gửi yêu cầu tạo phối cảnh / banner.'
-                : 'Chào bạn! Hiện máy chủ chưa gắn khóa API tạo ảnh đám mây (GEMINI_API_KEY). Bạn vẫn có thể dựng phối cảnh trực tiếp trên ảnh công trình thật, kiểm tra tính toán kỹ thuật cabinet LED độc lập (mm) và lưu lịch sử phiên bản.',
-              timestamp: r.createdAt.toISOString(),
-              chatMode: 'consultant_free',
-              modelUsed: providerStatus.isConfigured
-                ? providerStatus.activeModel
-                : 'Chế độ dựng kỹ thuật nội bộ (chưa kết nối khóa AI)',
-              cost: '$0.00',
-              status: 'success',
-            },
-          ];
-
-    const hasMeasuredPhysicalDims =
-      meta.screenWidthM != null || dims.screenWidthM != null;
-    const isUnmeasuredBannerOrBrief =
-      r.requestType === 'banner' && !hasMeasuredPhysicalDims;
-
-    const effectiveWidthM = meta.screenWidthM ?? dims.screenWidthM ?? 4.8;
-    const effectiveHeightM = meta.screenHeightM ?? dims.screenHeightM ?? 2.7;
-    const effectiveBannerW = meta.bannerWidthPx ?? dims.bannerWidthPx ?? 1536;
-    const effectiveBannerH = meta.bannerHeightPx ?? dims.bannerHeightPx ?? 1024;
-    const effectivePitch = meta.pixelPitch || meta.productSpec?.pixelPitch || 'P2.5';
-    const effectiveStyle = meta.screenStyle || meta.productSpec?.screenStyle || 'flat';
-
-    const productSpec = isUnmeasuredBannerOrBrief
-      ? null
-      : computeLedProductSpec({
-          productCode: meta.productSpec?.productCode,
-          productName: r.ledCategory || 'Màn hình LED Indoor',
-          categoryGroup: meta.productSpec?.categoryGroup,
-          widthM: effectiveWidthM,
-          heightM: effectiveHeightM,
-          pitch: effectivePitch,
-          screenStyle: effectiveStyle,
-        });
-    if (productSpec && meta.productId) {
-      productSpec.productId = meta.productId;
-    }
-
-    const cleanLeadProject = r.lead ? sanitizeProjectOrSubjectText(r.lead.projectName) : null;
-    const projectName =
-      meta.projectName ||
-      (r.lead
-        ? cleanLeadProject || r.lead.companyName || 'Dự án LED'
-        : r.requestType === 'banner'
-          ? 'Banner Quảng cáo LED'
-          : 'Showroom LED');
-    const selectedPhoto = photos.find((p) => p.selected) || photos[0];
-
-    return {
-      id: r.id,
-      version: r.version,
-      projectName,
-      contactName: isAnonymizedLead
-        ? 'Khách hàng ẩn danh (UC01)'
-        : meta.contactName ?? r.lead?.contactName ?? null,
-      installationInfo: isUnmeasuredBannerOrBrief
-        ? meta.installationInfo ?? null
-        : meta.installationInfo || 'Tường bên phải showroom, cách sàn 1.2m',
-      notes: r.notes,
-      leadId: r.leadId,
-      leadCode: r.lead?.leadCode ?? null,
-      leadProjectLabel: r.lead
-        ? `${r.lead.leadCode} — ${
-            isAnonymizedLead
-              ? cleanLeadProject || 'Dự án LED (Ẩn danh)'
-              : r.lead.companyName || r.lead.contactName || 'Dự án LED'
-          }`
-        : null,
-      productId: meta.productId ?? null,
-      productName: r.ledCategory,
-      websiteId: meta.websiteId ?? null,
-      websiteDomain: meta.websiteDomain ?? null,
-      campaignId: meta.campaignId ?? null,
-      campaignName: meta.campaignName ?? null,
-      contentId: meta.contentId ?? null,
-      sourceModule: meta.sourceModule ?? null,
-      taskCode: meta.taskCode ?? (r.requestType === 'banner' ? 'banner_generate' : 'perspective_compose'),
-      designBrief: meta.designBrief ?? null,
-      requestedBySalesId: r.requestedBySalesId,
-      requestedBySalesName: r.requestedBySales?.fullName ?? null,
-      assignedDesignerId: r.assignedDesignerId ?? user.id,
-      assignedDesignerName: r.assignedDesigner?.fullName ?? 'Designer Toàn Trung',
-      designType: mapDbRequestTypeToDto(r.requestType),
-      ledModuleSpec: r.ledCategory,
-      screenWidthM: meta.screenWidthM ?? dims.screenWidthM,
-      screenHeightM: meta.screenHeightM ?? dims.screenHeightM,
-      installZoneBboxJson: r.installPositionJson,
-      placementQuad: meta.placementQuad || DEFAULT_PLACEMENT_QUAD,
-      bannerWidthPx: meta.bannerWidthPx ?? dims.bannerWidthPx ?? effectiveBannerW,
-      bannerHeightPx: meta.bannerHeightPx ?? dims.bannerHeightPx ?? effectiveBannerH,
-      aspectRatio: r.aspectRatio || '16:9',
-      aspectLocked: meta.aspectLocked ?? true,
-      isArchived: meta.isArchived ?? false,
-      sitePhotoDownloadUrl: selectedPhoto?.url || null,
-      photos,
-      chatMessages,
-      productSpec,
-      aiPrompt: r.prompt ?? '',
-      aiDraftDownloadUrl: latestAiDraft?.downloadUrl ?? null,
-      finalRenderDownloadUrl: latestFinal?.downloadUrl ?? null,
-      approvedVersionId: r.approvedVersionId,
-      processingDurationSec:
-        r.processingTimeMs != null ? Number((r.processingTimeMs / 1000).toFixed(2)) : null,
-      tokenCost: r.tokenCost,
-      totalCost:
-        r.totalCostMicros != null
-          ? toMonetaryAmountDto(r.totalCostMicros, currency, 'micros')
-          : null,
-      status: mapDbStatusToDto(r.designStatus),
-      activeJob: meta.activeJob ?? null,
-      createdAt: r.createdAt.toISOString(),
-      updatedAt: (r.completedAt ?? r.createdAt).toISOString(),
-      completedAt: r.completedAt ? r.completedAt.toISOString() : null,
-      assetVersions,
-    };
+    },
   });
 
-  return {
-    requests,
-    leadOptions: leads.map((l) => {
-      const projLabel = sanitizeProjectOrSubjectText(l.projectName) || 'Dự án LED';
-      return {
-        id: l.id,
-        leadCode: l.leadCode,
-        label: isAnonymizedLead
-          ? `${l.leadCode} · Khách hàng ẩn danh (${projLabel})`
-          : `${l.leadCode} · ${l.companyName || l.contactName || 'Khách hàng'} (${projLabel})`,
-      };
-    }),
-    productOptions: products.map((p) => ({
-      id: p.id,
-      code: p.productCode,
-      name: p.productName,
-      categoryGroup: p.categoryGroup,
-    })),
-    providerStatus: {
-      ...providerStatus,
-      modelRegistry,
-    },
-  };
+  return cached.data;
 }
 
 export async function createDesignRequestWithAiDraft(
@@ -1031,6 +1190,8 @@ export async function createDesignRequestWithAiDraft(
       },
     });
 
+    bumpDomainRevisions(['design', 'leads', 'reports'], 'design_request_init');
+
     return {
       id: createdRequest.id,
       status: 'pending',
@@ -1132,6 +1293,8 @@ export async function createDesignRequestWithAiDraft(
       status: 'timeout',
       errorMessage: 'Hệ thống AI dựng ảnh quá thời gian phản hồi 60s (Simulated UC06 E1).',
     });
+
+    bumpDomainRevisions(['design', 'leads', 'reports', 'notifications'], 'design_request_timeout');
 
     return {
       id: pendingReq.id,
@@ -1331,6 +1494,8 @@ export async function createDesignRequestWithAiDraft(
       }),
     },
   });
+
+  bumpDomainRevisions(['design', 'leads', 'reports', 'notifications'], 'design_request_created');
 
   return {
     id: createdRequest.id,
@@ -1564,6 +1729,24 @@ export async function processChatDesignRequest(
       designContext: currentMeta.designContext,
     };
   }
+  if (
+    input.idempotencyKey &&
+    currentMeta.activeJob?.status === 'running' &&
+    currentMeta.activeJob.idempotencyKey === input.idempotencyKey &&
+    activeDesignJobLocks.has(requestId)
+  ) {
+    return {
+      accepted: true,
+      asyncQueued: true,
+      idempotentReplay: true,
+      requestId,
+      jobId: currentMeta.activeJob.jobId,
+      activeJob: currentMeta.activeJob,
+      status: 'running' as const,
+      chatMessages: currentMeta.chatMessages || [],
+      designContext: currentMeta.designContext,
+    };
+  }
 
   const nextVersionNumber = (existing.assetVersions[0]?.versionNumber ?? 0) + 1;
 
@@ -1617,8 +1800,10 @@ export async function processChatDesignRequest(
     if (input.designBrief.outputHeightPx) currentMeta.bannerHeightPx = input.designBrief.outputHeightPx;
   }
 
-  // 2. Deterministic Command Router (honors explicit 4 tasks first, then natural command routing)
+  // 2. Deterministic Command Router (free chat mode stays CHAT unless explicit @TaoAnh/@TaoBanner command is typed)
+  const isExplicitImageCommand = DAO_TAO_ANH_REGEX.test(input.prompt);
   const routeDecision =
+    (input.chatMode === 'consultant_free' && !isExplicitImageCommand) ||
     input.taskCode === 'brief_analyze'
       ? {
           action: 'CHAT' as const,
@@ -1626,7 +1811,10 @@ export async function processChatDesignRequest(
           cleanInstruction: input.prompt,
           isMetaQuestionAboutCommand: false,
           blockedNonUserTrigger: false,
-          reason: 'taskCode:brief_analyze',
+          reason:
+            input.chatMode === 'consultant_free'
+              ? 'chatMode:consultant_free'
+              : 'taskCode:brief_analyze',
         }
       : input.taskCode === 'banner_generate'
         ? {
@@ -2169,6 +2357,8 @@ export async function processChatDesignRequest(
       },
     });
 
+    bumpDomainRevisions(['design'], 'design_chat_consultant_reply');
+
     return {
       requestId,
       mode: 'consultant_free' as const,
@@ -2248,6 +2438,8 @@ export async function processChatDesignRequest(
       },
     });
 
+    bumpDomainRevisions(['design'], 'design_chat_clarification');
+
     return {
       requestId,
       mode: 'consultant_free' as const,
@@ -2282,6 +2474,13 @@ export async function processChatDesignRequest(
   }
 
   // MODE 2: IMAGE GENERATION (@taoanh -> GENERATE_SCENE | @taobanner -> GENERATE_BANNER)
+  const existingLock = activeDesignJobLocks.get(requestId);
+  if (existingLock) {
+    throw new Error(
+      `Dự án #${requestId} đang có tiến trình sinh ảnh AI chạy nền (${existingLock.jobId}). Vui lòng chờ hoàn tất trước khi gửi yêu cầu tiếp.`
+    );
+  }
+
   const cleanImagePrompt =
     routeDecision.cleanInstruction ||
     input.prompt.replace(DAO_TAO_ANH_REGEX, '').trim() ||
@@ -2319,8 +2518,11 @@ export async function processChatDesignRequest(
     finishedAt: null,
     resultVersionNo: null,
     fallbackUsed: false,
-    message: 'Đang xử lý tạo bản thiết kế trên máy chủ...',
+    idempotencyKey: input.idempotencyKey ?? null,
+    message: 'Đang chuẩn bị dữ liệu và gửi yêu cầu tới AI...',
   };
+
+  activeDesignJobLocks.set(requestId, { jobId: runningJob.jobId, startedAt: Date.now() });
 
   await prisma.designRequest.update({
     where: { id: requestId },
@@ -2334,6 +2536,28 @@ export async function processChatDesignRequest(
       }),
     },
   });
+  bumpDomainRevisions(['design'], 'design_job_started');
+
+  const updateRunningJobStage = async (stageMessage: string) => {
+    try {
+      const latestRow = await prisma.designRequest.findUnique({
+        where: { id: requestId },
+        select: { installPositionJson: true },
+      });
+      const latestMeta = parseProjectMetadata(latestRow?.installPositionJson ?? null);
+      if (latestMeta.activeJob?.jobId !== runningJob.jobId) return;
+      latestMeta.activeJob = {
+        ...latestMeta.activeJob,
+        message: stageMessage,
+      };
+      await prisma.designRequest.update({
+        where: { id: requestId },
+        data: { installPositionJson: JSON.stringify(latestMeta) },
+      });
+    } catch {
+      // non-fatal stage progress update
+    }
+  };
 
   const markActiveJobFailed = async (errMessage: string, fallbackUsed = false) => {
     const failedJob: DesignActiveJobDto = {
@@ -2360,146 +2584,406 @@ export async function processChatDesignRequest(
         },
       })
       .catch(() => null);
+    await upsertActionableNotification({
+      userId: actor.id,
+      title: `Sinh ảnh thiết kế #${requestId} chưa thành công`,
+      summary: errMessage,
+      category: 'Thiết kế AI',
+      actionLabel: 'Kiểm tra dự án',
+      actionUrl: `/design?projectId=${requestId}`,
+      requiredPermission: 'AI_DESIGN',
+    }).catch(() => null);
+    bumpDomainRevisions(['design', 'notifications'], 'design_job_failed');
   };
 
-  let providerResult: Awaited<ReturnType<typeof AiDesignProviderFactory.executePerspectiveWithFallback>>;
-  try {
-    providerResult =
-      dbType === '3d_perspective'
-        ? await AiDesignProviderFactory.executePerspectiveWithFallback(
-            {
-              workflow: 'perspective_3d',
-              prompt: cleanImagePrompt,
-              referenceImageUrl:
-                input.selectedPhotoUrl ||
-                activePhotoObj?.url ||
-                existing.sitePhotoUrl ||
-                DEFAULT_SHOWROOM_PHOTO,
-              referenceImageBuffer: activePhotoFileData?.buffer,
-              referenceImageMimeType: activePhotoFileData?.mimeType,
-              productReferenceBuffers:
-                productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
-              placementQuad: effectiveQuad,
-              compositingMode: effectiveCompositingMode,
-              productSpec: {
-                productCode: currentMeta.productSpec?.productCode || 'LED_INDOOR',
-                productName:
-                  input.referenceProductName ||
-                  productReferencePhotoObjs[0]?.name ||
-                  existing.ledCategory ||
-                  'Màn hình LED Indoor',
-                pitch: effectivePitch,
-                screenStyle: effectiveStyle,
-              },
-              dimensions: {
-                widthM: effectiveWidthM,
-                heightM: effectiveHeightM,
-                aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
-              },
-              quality: input.quality || 'draft',
-              modelId: input.modelId,
-              idempotencyKey:
-                input.idempotencyKey ||
-                `chat-design-${requestId}-v${nextVersionNumber}-${Date.now()}`,
-              simulateTimeout: input.simulateAiTimeout,
-              disableLocalFallback:
-                input.disableLocalFallback || effectiveTaskCode === 'design_edit',
-              requireReferenceEdit: effectiveTaskCode === 'design_edit',
-            },
-            normalizedProviderId
-          )
-        : await AiDesignProviderFactory.executeBannerWithFallback(
-            {
-              workflow: 'banner',
-              prompt: cleanImagePrompt,
-              referenceImageBuffer: activePhotoFileData?.buffer,
-              referenceImageMimeType: activePhotoFileData?.mimeType,
-              productReferenceBuffers:
-                productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
-              sourceVersionId: requestedParentVerId,
-              dimensions: {
-                widthPx: effectiveBannerW,
-                heightPx: effectiveBannerH,
-                aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
-              },
-              quality: input.quality || 'draft',
-              modelId: input.modelId,
-              idempotencyKey:
-                input.idempotencyKey ||
-                `chat-banner-${requestId}-v${nextVersionNumber}-${Date.now()}`,
-              simulateTimeout: input.simulateAiTimeout,
-              disableLocalFallback:
-                input.disableLocalFallback || effectiveTaskCode === 'design_edit',
-              requireReferenceEdit: effectiveTaskCode === 'design_edit',
-            },
-            normalizedProviderId
-          );
-  } catch (execErr) {
-    const msg = execErr instanceof Error ? execErr.message : 'Lỗi kết xuất hình ảnh AI.';
-    await markActiveJobFailed(msg);
-    throw execErr;
-  }
+  const executeImageGenerationCore = async () => {
+    await updateRunningJobStage(`Đang gọi nhà cung cấp AI (${runningJob.modelId})...`);
 
-  if (Array.isArray(providerResult.failedCloudAttempts)) {
-    for (let idx = 0; idx < providerResult.failedCloudAttempts.length; idx++) {
-      const attempt = providerResult.failedCloudAttempts[idx];
+    let providerResult: Awaited<ReturnType<typeof AiDesignProviderFactory.executePerspectiveWithFallback>>;
+    try {
+      providerResult =
+        dbType === '3d_perspective'
+          ? await AiDesignProviderFactory.executePerspectiveWithFallback(
+              {
+                workflow: 'perspective_3d',
+                prompt: cleanImagePrompt,
+                referenceImageUrl:
+                  input.selectedPhotoUrl ||
+                  activePhotoObj?.url ||
+                  existing.sitePhotoUrl ||
+                  DEFAULT_SHOWROOM_PHOTO,
+                referenceImageBuffer: activePhotoFileData?.buffer,
+                referenceImageMimeType: activePhotoFileData?.mimeType,
+                productReferenceBuffers:
+                  productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
+                placementQuad: effectiveQuad,
+                compositingMode: effectiveCompositingMode,
+                productSpec: {
+                  productCode: currentMeta.productSpec?.productCode || 'LED_INDOOR',
+                  productName:
+                    input.referenceProductName ||
+                    productReferencePhotoObjs[0]?.name ||
+                    existing.ledCategory ||
+                    'Màn hình LED Indoor',
+                  pitch: effectivePitch,
+                  screenStyle: effectiveStyle,
+                },
+                dimensions: {
+                  widthM: effectiveWidthM,
+                  heightM: effectiveHeightM,
+                  aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
+                },
+                quality: input.quality || 'draft',
+                modelId: input.modelId,
+                idempotencyKey:
+                  input.idempotencyKey ||
+                  `chat-design-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+                simulateTimeout: input.simulateAiTimeout,
+                disableLocalFallback:
+                  input.disableLocalFallback || effectiveTaskCode === 'design_edit',
+                requireReferenceEdit: effectiveTaskCode === 'design_edit',
+              },
+              normalizedProviderId
+            )
+          : await AiDesignProviderFactory.executeBannerWithFallback(
+              {
+                workflow: 'banner',
+                prompt: cleanImagePrompt,
+                referenceImageBuffer: activePhotoFileData?.buffer,
+                referenceImageMimeType: activePhotoFileData?.mimeType,
+                productReferenceBuffers:
+                  productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
+                sourceVersionId: requestedParentVerId,
+                dimensions: {
+                  widthPx: effectiveBannerW,
+                  heightPx: effectiveBannerH,
+                  aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
+                },
+                quality: input.quality || 'draft',
+                modelId: input.modelId,
+                idempotencyKey:
+                  input.idempotencyKey ||
+                  `chat-banner-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+                simulateTimeout: input.simulateAiTimeout,
+                disableLocalFallback:
+                  input.disableLocalFallback || effectiveTaskCode === 'design_edit',
+                requireReferenceEdit: effectiveTaskCode === 'design_edit',
+              },
+              normalizedProviderId
+            );
+    } catch (execErr) {
+      const msg = execErr instanceof Error ? execErr.message : 'Lỗi kết xuất hình ảnh AI.';
+      await markActiveJobFailed(msg);
+      throw execErr;
+    }
+
+    if (Array.isArray(providerResult.failedCloudAttempts)) {
+      for (let idx = 0; idx < providerResult.failedCloudAttempts.length; idx++) {
+        const attempt = providerResult.failedCloudAttempts[idx];
+        await recordAiUsageAttempt(prisma, {
+          idempotencyKey: `${runningJob.jobId}-cloud-fail-${idx}-${attempt.provider}`,
+          attemptNumber: idx + 1,
+          providerRequestId: `${attempt.provider}-${requestId}-v${nextVersionNumber}-fail`,
+          moduleCode: '05-ai-design',
+          taskType: dbType,
+          userId: actor.id,
+          designRequestId: requestId,
+          modelName: attempt.modelUsed,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          costMicros: null,
+          durationMs: attempt.durationMs ?? null,
+          status: 'failed',
+          errorMessage: attempt.errorMessage || attempt.errorCode || 'Cloud AI image generation failed',
+        }).catch(() => null);
+      }
+    }
+
+    if (providerResult.status === 'timeout' || input.simulateAiTimeout) {
       await recordAiUsageAttempt(prisma, {
-        idempotencyKey: `${runningJob.jobId}-cloud-fail-${idx}-${attempt.provider}`,
-        attemptNumber: idx + 1,
-        providerRequestId: `${attempt.provider}-${requestId}-v${nextVersionNumber}-fail`,
+        idempotencyKey: `chat-design-timeout-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+        attemptNumber: nextVersionNumber,
         moduleCode: '05-ai-design',
         taskType: dbType,
         userId: actor.id,
         designRequestId: requestId,
-        modelName: attempt.modelUsed,
+        modelName: providerResult.modelUsed || 'imagen-3.0-generate-002',
         promptTokens: null,
         completionTokens: null,
         totalTokens: null,
         costMicros: null,
-        durationMs: attempt.durationMs ?? null,
-        status: 'failed',
-        errorMessage: attempt.errorMessage || attempt.errorCode || 'Cloud AI image generation failed',
-      }).catch(() => null);
+        durationMs: providerResult.durationMs,
+        status: 'timeout',
+        errorMessage: 'Hệ thống AI dựng ảnh quá thời gian phản hồi (UC06 E1).',
+      });
+      await markActiveJobFailed('Kết nối AI quá thời gian phản hồi (UC06 E1).');
+      throw new Error(
+        'Kết nối hệ thống AI quá thời gian phản hồi (UC06 E1). Phiên bản hiện tại vẫn được bảo toàn an toàn.'
+      );
     }
-  }
 
-  if (providerResult.status === 'timeout' || input.simulateAiTimeout) {
-    await recordAiUsageAttempt(prisma, {
-      idempotencyKey: `chat-design-timeout-${requestId}-v${nextVersionNumber}-${Date.now()}`,
+    // Validate binary output strictly: NEVER mark success if provider returned text-only, empty buffer, or invalid image bytes!
+    const imageValidation = validateGeneratedImageBuffer(providerResult.imageBuffer);
+
+    if (providerResult.status === 'failed' || !imageValidation.isValid) {
+      const latestRow = await prisma.designRequest.findUnique({
+        where: { id: requestId },
+        include: { assetVersions: { orderBy: { versionNumber: 'desc' }, take: 1 } },
+      });
+      const latestMeta = parseProjectMetadata(latestRow?.installPositionJson ?? null);
+      const existingChat = latestMeta.chatMessages || currentMeta.chatMessages || [];
+      const explainText = providerResult.errorMessage?.startsWith('FREE_TIER_IMAGE_LIMIT_0')
+        ? [
+            `⚠️ **Giữ nguyên ảnh gốc của bạn (Không tự ý nhảy sang ảnh giả lập):**`,
+            `• Mã **API Key Gmail Miễn phí ($0)** của Google AI Studio hiện được Google mở miễn phí cho **Chat & Nhìn ảnh (Vision)**, nhưng khóa hạn mức **\`limit: 0\`** đối với tính năng **Tạo/Sửa xuất ra file ảnh mới** (\`gemini-3.1-flash-image\` / \`imagen-3\`).`,
+            `• Để AI tự động vẽ/chỉnh sửa trực tiếp ra file ảnh mới (thêm/bớt vật thể trong ảnh), bạn cần bật **Billing Tier 1** trên Google AI Studio hoặc gắn Key **OpenAI (\`gpt-image-1\`) / FLUX.1 Pro** trong mục **Setting**.`,
+            `• Nếu bạn chỉ muốn **ghép khung màn hình LED 3D Toàn Trung** vào điểm chạm trên bức ảnh này, hãy gõ: \`@TaoAnh: Ghép màn hình LED vào điểm chạm\`.`,
+          ].join('\n')
+        : `Không thể xuất ảnh mới từ AI (${providerResult.errorMessage || imageValidation.errorMessage || 'AI chỉ trả về văn bản hoặc thiếu dữ liệu ảnh hợp lệ'}). Hệ thống không tạo phiên bản lỗi và giữ nguyên bức ảnh hiện tại của bạn trên màn hình.`;
+
+      const updatedChat: DesignChatMessageDto[] = [
+        ...existingChat,
+        {
+          id: `msg-user-${Date.now()}`,
+          role: 'user',
+          text: input.prompt,
+          timestamp: new Date().toISOString(),
+          chatMode: 'consultant_free',
+          attachedProductPhotos:
+            attachedProductPhotosMeta.length > 0 ? attachedProductPhotosMeta : undefined,
+        },
+        {
+          id: `msg-ai-limit-${Date.now() + 1}`,
+          role: 'assistant',
+          text: explainText,
+          timestamp: new Date().toISOString(),
+          chatMode: 'consultant_free',
+          modelUsed: providerResult.modelUsed || 'Google Gemini API',
+          durationSec: Number((providerResult.durationMs / 1000).toFixed(2)),
+          cost: '$0.00',
+          status: 'failed',
+        },
+      ];
+
+      const errSummary =
+        providerResult.errorMessage ||
+        imageValidation.errorMessage ||
+        'Không sinh được ảnh từ Cloud AI.';
+
+      const updatedMetadata: StoredMetadata = {
+        ...latestMeta,
+        placementQuad: effectiveQuad,
+        chatMessages: updatedChat,
+        designContext,
+        activeJob: {
+          ...runningJob,
+          status: 'failed',
+          finishedAt: new Date().toISOString(),
+          message: errSummary,
+        },
+      };
+
+      await prisma.designRequest.update({
+        where: { id: requestId },
+        data: {
+          designStatus: latestRow?.assetVersions?.length ? 'ai_drafted' : latestRow?.designStatus || 'pending',
+          installPositionJson: JSON.stringify(updatedMetadata),
+          version: { increment: 1 },
+        },
+      });
+      await upsertActionableNotification({
+        userId: actor.id,
+        title: `Sinh ảnh thiết kế #${requestId} chưa thành công`,
+        summary: errSummary,
+        category: 'Thiết kế AI',
+        actionLabel: 'Kiểm tra dự án',
+        actionUrl: `/design?projectId=${requestId}`,
+        requiredPermission: 'AI_DESIGN',
+      }).catch(() => null);
+      bumpDomainRevisions(['design', 'notifications'], 'design_job_failed_validation');
+
+      return {
+        requestId,
+        mode: 'consultant_free' as const,
+        freeTierImageBlocked: true,
+        errorReason: providerResult.errorMessage || imageValidation.errorMessage,
+        versionNumber: existing.assetVersions[0]?.versionNumber ?? 1,
+        versionId: existing.assetVersions[0]?.id,
+        chatMessages: updatedChat,
+        designContext,
+      };
+    }
+
+    await updateRunningJobStage('Đang kiểm định chất lượng ảnh & lưu phiên bản...');
+
+    // Post-process banner resolution & typography warning when action is GENERATE_BANNER
+    let finalBufferToSave = providerResult.imageBuffer;
+    let finalMimeToSave = providerResult.mimeType || 'image/png';
+
+    if (
+      input.clientRenderedBase64 &&
+      (normalizedProviderId === 'local_sandbox' || Boolean(providerResult.fallbackNotice))
+    ) {
+      try {
+        const clientBuf = Buffer.from(input.clientRenderedBase64, 'base64');
+        const clientCheck = validateGeneratedImageBuffer(clientBuf);
+        if (clientCheck.isValid) {
+          finalBufferToSave = clientBuf;
+          finalMimeToSave = clientCheck.detectedMimeType || 'image/jpeg';
+        }
+      } catch {
+        // keep providerResult.imageBuffer
+      }
+    }
+
+    let bannerTypographyWarning: string | null = null;
+    let bannerResizeExplanation: string | null = null;
+    let curvedDistortionWarning: string | null = null;
+
+    let layoutOverlayApplied = false;
+    let layoutOverlayNote: string | null = null;
+    if (dbType === 'banner') {
+      const bannerProcessed = processBannerToTargetResolution({
+        sourceBuffer: finalBufferToSave,
+        sourceMimeType: finalMimeToSave,
+        targetWidthPx: effectiveBannerW,
+        targetHeightPx: effectiveBannerH,
+        prompt: cleanImagePrompt,
+      });
+      finalBufferToSave = bannerProcessed.imageBuffer;
+      bannerTypographyWarning = bannerProcessed.typographyWarning;
+      bannerResizeExplanation = bannerProcessed.resizeExplanation;
+      if (input.applyLayoutOverlay) {
+        const overlaid = renderBrandLayoutOverlayOnImage({
+          sourceBuffer: finalBufferToSave,
+          brandPrimaryColor: currentMeta.designBrief?.brandPrimaryColor || input.designBrief?.brandPrimaryColor,
+          headlineText: currentMeta.designBrief?.headlineText || input.designBrief?.headlineText,
+          ctaText: currentMeta.designBrief?.ctaText || input.designBrief?.ctaText,
+          websiteDomain: currentMeta.websiteDomain || input.designBrief?.websiteDomain,
+        });
+        finalBufferToSave = overlaid.imageBuffer;
+        layoutOverlayApplied = overlaid.applied;
+        layoutOverlayNote = overlaid.overlayNote;
+      }
+    } else if (effectiveStyle === 'curved') {
+      curvedDistortionWarning =
+        'Cấu hình màn hình LED cong (Curved): Phép biến đổi mặt phẳng 4 góc chỉ là xấp xỉ; cần kiểm tra biến dạng phi phẳng theo bán kính cong thực tế.';
+    }
+
+    const savedFile = savePrivateBusinessFile({
+      bucket: 'design',
+      prefix: `ai-draft-req-${requestId}-v${nextVersionNumber}`,
+      fileBuffer: finalBufferToSave,
+      declaredMimeType: finalMimeToSave,
+    });
+
+    const hasActualTokens = providerResult.tokensActual !== false && providerResult.totalTokens > 0;
+    const aiLog = await recordAiUsageAttempt(prisma, {
+      idempotencyKey:
+        input.idempotencyKey || `chat-design-run-${requestId}-v${nextVersionNumber}-${Date.now()}`,
       attemptNumber: nextVersionNumber,
+      providerRequestId: `${providerResult.provider}-${requestId}-v${nextVersionNumber}`,
       moduleCode: '05-ai-design',
       taskType: dbType,
       userId: actor.id,
       designRequestId: requestId,
-      modelName: providerResult.modelUsed || 'imagen-3.0-generate-002',
-      promptTokens: null,
-      completionTokens: null,
-      totalTokens: null,
-      costMicros: null,
+      modelName: providerResult.modelUsed,
+      promptTokens: hasActualTokens ? providerResult.promptTokens : null,
+      completionTokens: hasActualTokens ? providerResult.completionTokens : null,
+      totalTokens: hasActualTokens ? providerResult.totalTokens : null,
+      costMicros: providerResult.costMicros > 0n ? providerResult.costMicros : null,
+      costCurrency: providerResult.costCurrency,
       durationMs: providerResult.durationMs,
-      status: 'timeout',
-      errorMessage: 'Hệ thống AI dựng ảnh quá thời gian phản hồi (UC06 E1).',
+      status: 'success',
     });
-    await markActiveJobFailed('Kết nối AI quá thời gian phản hồi (UC06 E1).');
-    throw new Error(
-      'Kết nối hệ thống AI quá thời gian phản hồi (UC06 E1). Phiên bản hiện tại vẫn được bảo toàn an toàn.'
-    );
-  }
 
-  // Validate binary output strictly: NEVER mark success if provider returned text-only, empty buffer, or invalid image bytes!
-  const imageValidation = validateGeneratedImageBuffer(providerResult.imageBuffer);
+    const savedFileMeta = validateGeneratedImageBuffer(finalBufferToSave);
 
-  if (providerResult.status === 'failed' || !imageValidation.isValid) {
-    const existingChat = currentMeta.chatMessages || [];
-    const explainText = providerResult.errorMessage?.startsWith('FREE_TIER_IMAGE_LIMIT_0')
-      ? [
-          `⚠️ **Giữ nguyên ảnh gốc của bạn (Không tự ý nhảy sang ảnh giả lập):**`,
-          `• Mã **API Key Gmail Miễn phí ($0)** của Google AI Studio hiện được Google mở miễn phí cho **Chat & Nhìn ảnh (Vision)**, nhưng khóa hạn mức **\`limit: 0\`** đối với tính năng **Tạo/Sửa xuất ra file ảnh mới** (\`gemini-3.1-flash-image\` / \`imagen-3\`).`,
-          `• Để AI tự động vẽ/chỉnh sửa trực tiếp ra file ảnh mới (thêm/bớt vật thể trong ảnh), bạn cần bật **Billing Tier 1** trên Google AI Studio hoặc gắn Key **OpenAI (\`gpt-image-1\`) / FLUX.1 Pro** trong mục **Setting**.`,
-          `• Nếu bạn chỉ muốn **ghép khung màn hình LED 3D Toàn Trung** vào điểm chạm trên bức ảnh này, hãy gõ: \`@TaoAnh: Ghép màn hình LED vào điểm chạm\`.`,
-        ].join('\n')
-      : `Không thể xuất ảnh mới từ AI (${providerResult.errorMessage || imageValidation.errorMessage || 'AI chỉ trả về văn bản hoặc thiếu dữ liệu ảnh hợp lệ'}). Hệ thống không tạo phiên bản lỗi và giữ nguyên bức ảnh hiện tại của bạn trên màn hình.`;
+    const isLocalStudioOutput =
+      Boolean(providerResult.isLocalFallback) || providerResult.provider === 'local_sandbox';
+    const generationOrigin: 'CLOUD_AI' | 'AI_PLUS_LAYOUT' | 'LOCAL_COMPOSITE_FALLBACK' =
+      isLocalStudioOutput
+        ? 'LOCAL_COMPOSITE_FALLBACK'
+        : layoutOverlayApplied
+          ? 'AI_PLUS_LAYOUT'
+          : 'CLOUD_AI';
 
+    const createdVersion = await createDesignAssetVersionSafe(requestId, (versionNumber) => ({
+      designRequestId: requestId,
+      versionNumber,
+      versionType: 'ai_draft',
+      storageObjectKey: savedFile.storageObjectKey,
+      mimeType: savedFile.mimeType,
+      fileSizeBytes: savedFile.fileSizeBytes,
+      promptUsed: input.prompt,
+      parametersJson: JSON.stringify({
+        regeneratedFromVersion: existing.version,
+        sourceOrigin: sourceImageOrigin,
+        generationOrigin,
+        taskCode: effectiveTaskCode,
+        taskId: runningJob.jobId,
+        inputAssetIds: resolvedInputAssetIds,
+        parentVersionId: requestedParentVerId,
+        requestedModel: providerResult.requestedModel || input.modelId || providerResult.modelUsed,
+        reportedModel: providerResult.reportedModel ?? null,
+        reportedModelNote: providerResult.reportedModelNote ?? null,
+        costState: providerResult.costState || 'unknown',
+        tokensActual: Boolean(providerResult.tokensActual),
+        isLocalFallback: Boolean(providerResult.isLocalFallback),
+        sourcePhotoId: activePhotoObj?.id ?? null,
+        referenceSitePhotoId: activePhotoObj?.id ?? null,
+        referenceProductPhotoIds: productReferencePhotoObjs.map((p) => p.id),
+        sourceVersionId: sourceVersionObj?.id ?? null,
+        effectivePrompt: cleanImagePrompt,
+        actualWidthPx: savedFileMeta.widthPx,
+        actualHeightPx: savedFileMeta.heightPx,
+        sha256: savedFile.sha256,
+        compositingMode: effectiveCompositingMode,
+        placementQuad: effectiveQuad,
+        screenDimensionsMm:
+          currentMeta.screenWidthM || dbType === '3d_perspective'
+            ? {
+                widthMm: Math.round(effectiveWidthM * 1000),
+                heightMm: Math.round(effectiveHeightM * 1000),
+              }
+            : undefined,
+        bannerResolutionPx:
+          dbType === 'banner'
+            ? { widthPx: effectiveBannerW, heightPx: effectiveBannerH }
+            : undefined,
+        curvedDistortionWarning,
+        bannerResizeExplanation,
+        bannerTypographyWarning,
+        layoutOverlayNote,
+        quality: input.quality,
+        providerId: providerResult.provider,
+        modelUsed: providerResult.modelUsed,
+      }),
+      aiUsageLogId: aiLog.log.id,
+      uploadedByUserId: actor.id,
+      isApprovedFinal: false,
+    }));
+
+    designContext.fields.activeVersionId = createdVersion.id;
+
+    const extraNotices: string[] = [];
+    if (providerResult.fallbackNotice) {
+      extraNotices.push(`• ⚠️ ${providerResult.fallbackNotice}`);
+    }
+    if (dbType === 'banner') {
+      if (bannerResizeExplanation) extraNotices.push(`• 📐 ${bannerResizeExplanation}`);
+      if (bannerTypographyWarning) extraNotices.push(`• ${bannerTypographyWarning}`);
+    } else {
+      extraNotices.push(
+        `• 🛡️ Chế độ bảo vệ nền: **${effectiveCompositingMode}** (giữ nguyên toạ độ 4 góc & kích thước ${Math.round(effectiveWidthM * 1000)}×${Math.round(effectiveHeightM * 1000)}mm).`
+      );
+      if (curvedDistortionWarning) extraNotices.push(`• ⚠️ ${curvedDistortionWarning}`);
+    }
+
+    const latestRowAfter = await prisma.designRequest.findUnique({ where: { id: requestId } });
+    const latestMetaAfter = parseProjectMetadata(latestRowAfter?.installPositionJson ?? null);
+    const existingChat = latestMetaAfter.chatMessages || currentMeta.chatMessages || [];
     const updatedChat: DesignChatMessageDto[] = [
       ...existingChat,
       {
@@ -2507,327 +2991,148 @@ export async function processChatDesignRequest(
         role: 'user',
         text: input.prompt,
         timestamp: new Date().toISOString(),
-        chatMode: 'consultant_free',
+        chatMode: 'image_generator',
         attachedProductPhotos:
           attachedProductPhotosMeta.length > 0 ? attachedProductPhotosMeta : undefined,
       },
       {
-        id: `msg-ai-limit-${Date.now() + 1}`,
+        id: `msg-ai-${Date.now() + 1}`,
         role: 'assistant',
-        text: explainText,
+        text: [
+          isLocalStudioOutput
+            ? `Đã dựng bản phối cảnh kỹ thuật nội bộ (v${createdVersion.versionNumber} · Studio Engine ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`
+            : `Đã kết xuất phiên bản thiết kế Cloud AI (v${createdVersion.versionNumber} · ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`,
+          ...extraNotices,
+        ].join('\n'),
         timestamp: new Date().toISOString(),
-        chatMode: 'consultant_free',
-        modelUsed: providerResult.modelUsed || 'Google Gemini API',
+        chatMode: 'image_generator',
+        versionNumber: createdVersion.versionNumber,
+        versionId: createdVersion.id,
+        providerId: providerResult.provider,
+        modelUsed: providerResult.modelUsed,
         durationSec: Number((providerResult.durationMs / 1000).toFixed(2)),
-        cost: '$0.00',
-        status: 'failed',
+        tokenUsed: providerResult.totalTokens,
+        cost: `$${(Number(providerResult.costMicros) / 1_000_000).toFixed(3)}`,
+        status: 'success',
       },
     ];
 
+    const processedKeys = { ...(latestMetaAfter.processedIdempotencyKeys || currentMeta.processedIdempotencyKeys || {}) };
+    if (input.idempotencyKey) {
+      processedKeys[input.idempotencyKey] = {
+        versionId: createdVersion.id,
+        versionNumber: createdVersion.versionNumber,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    const completedJob: DesignActiveJobDto = {
+      ...runningJob,
+      status: 'succeeded',
+      providerId: providerResult.provider,
+      modelId: providerResult.modelUsed,
+      finishedAt: new Date().toISOString(),
+      resultVersionNo: createdVersion.versionNumber,
+      fallbackUsed: Boolean(providerResult.isLocalFallback),
+      message: providerResult.fallbackNotice || 'Hoàn tất kết xuất bản thiết kế.',
+    };
+
     const updatedMetadata: StoredMetadata = {
       ...currentMeta,
+      ...latestMetaAfter,
       placementQuad: effectiveQuad,
       chatMessages: updatedChat,
       designContext,
-      activeJob: {
-        ...runningJob,
-        status: 'failed',
-        finishedAt: new Date().toISOString(),
-        message: providerResult.errorMessage || imageValidation.errorMessage || 'Không sinh được ảnh từ Cloud AI.',
-      },
+      activeJob: completedJob,
+      processedIdempotencyKeys: processedKeys,
     };
+
+    const baseRowForTotals = latestRowAfter || existing;
+    const newTotalTokens =
+      (baseRowForTotals.tokenCost ?? 0) + (hasActualTokens ? providerResult.totalTokens : 0);
+    const newTotalCostMicros = (baseRowForTotals.totalCostMicros ?? 0n) + providerResult.costMicros;
 
     await prisma.designRequest.update({
       where: { id: requestId },
       data: {
+        prompt: input.prompt,
+        aiDraftImageUrl: savedFile.storageObjectKey,
         installPositionJson: JSON.stringify(updatedMetadata),
+        designStatus: 'ai_drafted',
+        processingTimeMs: (baseRowForTotals.processingTimeMs ?? 0) + providerResult.durationMs,
+        tokenCost: newTotalTokens,
+        totalCostMicros: newTotalCostMicros,
         version: { increment: 1 },
       },
     });
 
+    if (input.asyncMode) {
+      await upsertActionableNotification({
+        userId: actor.id,
+        title: `Hoàn tất kết xuất bản thiết kế v${createdVersion.versionNumber} (#${requestId})`,
+        summary: `Phiên bản v${createdVersion.versionNumber} (${providerResult.modelUsed}) đã sẵn sàng trong Studio AI.`,
+        category: 'Thiết kế AI',
+        actionLabel: 'Mở bản vẽ',
+        actionUrl: `/design?projectId=${requestId}`,
+        requiredPermission: 'AI_DESIGN',
+      }).catch(() => null);
+    }
+
+    bumpDomainRevisions(['design', 'reports', 'notifications'], 'design_image_generated');
+
     return {
       requestId,
-      mode: 'consultant_free' as const,
-      freeTierImageBlocked: true,
-      errorReason: providerResult.errorMessage || imageValidation.errorMessage,
-      versionNumber: existing.assetVersions[0]?.versionNumber ?? 1,
-      versionId: existing.assetVersions[0]?.id,
-      chatMessages: updatedChat,
-      designContext,
-    };
-  }
-
-  // Post-process banner resolution & typography warning when action is GENERATE_BANNER
-  let finalBufferToSave = providerResult.imageBuffer;
-  let finalMimeToSave = providerResult.mimeType || 'image/png';
-
-  // When the browser passed a high-res clientRenderedBase64 composite (e.g. real site photo + real company product photo)
-  // and the provider used local_sandbox or fallback, use the high-res composited image!
-  if (
-    input.clientRenderedBase64 &&
-    (normalizedProviderId === 'local_sandbox' || Boolean(providerResult.fallbackNotice))
-  ) {
-    try {
-      const clientBuf = Buffer.from(input.clientRenderedBase64, 'base64');
-      const clientCheck = validateGeneratedImageBuffer(clientBuf);
-      if (clientCheck.isValid) {
-        finalBufferToSave = clientBuf;
-        finalMimeToSave = clientCheck.detectedMimeType || 'image/jpeg';
-      }
-    } catch {
-      // keep providerResult.imageBuffer
-    }
-  }
-
-  let bannerTypographyWarning: string | null = null;
-  let bannerResizeExplanation: string | null = null;
-  let curvedDistortionWarning: string | null = null;
-
-  let layoutOverlayApplied = false;
-  let layoutOverlayNote: string | null = null;
-  if (dbType === 'banner') {
-    const bannerProcessed = processBannerToTargetResolution({
-      sourceBuffer: finalBufferToSave,
-      sourceMimeType: finalMimeToSave,
-      targetWidthPx: effectiveBannerW,
-      targetHeightPx: effectiveBannerH,
-      prompt: cleanImagePrompt,
-    });
-    finalBufferToSave = bannerProcessed.imageBuffer;
-    bannerTypographyWarning = bannerProcessed.typographyWarning;
-    bannerResizeExplanation = bannerProcessed.resizeExplanation;
-    if (input.applyLayoutOverlay) {
-      const overlaid = renderBrandLayoutOverlayOnImage({
-        sourceBuffer: finalBufferToSave,
-        brandPrimaryColor: currentMeta.designBrief?.brandPrimaryColor || input.designBrief?.brandPrimaryColor,
-        headlineText: currentMeta.designBrief?.headlineText || input.designBrief?.headlineText,
-        ctaText: currentMeta.designBrief?.ctaText || input.designBrief?.ctaText,
-        websiteDomain: currentMeta.websiteDomain || input.designBrief?.websiteDomain,
-      });
-      finalBufferToSave = overlaid.imageBuffer;
-      layoutOverlayApplied = overlaid.applied;
-      layoutOverlayNote = overlaid.overlayNote;
-    }
-  } else if (effectiveStyle === 'curved') {
-    curvedDistortionWarning =
-      'Cấu hình màn hình LED cong (Curved): Phép biến đổi mặt phẳng 4 góc chỉ là xấp xỉ; cần kiểm tra biến dạng phi phẳng theo bán kính cong thực tế.';
-  }
-
-  const savedFile = savePrivateBusinessFile({
-    bucket: 'design',
-    prefix: `ai-draft-req-${requestId}-v${nextVersionNumber}`,
-    fileBuffer: finalBufferToSave,
-    declaredMimeType: finalMimeToSave,
-  });
-
-  const hasActualTokens = providerResult.tokensActual !== false && providerResult.totalTokens > 0;
-  const aiLog = await recordAiUsageAttempt(prisma, {
-    idempotencyKey:
-      input.idempotencyKey || `chat-design-run-${requestId}-v${nextVersionNumber}-${Date.now()}`,
-    attemptNumber: nextVersionNumber,
-    providerRequestId: `${providerResult.provider}-${requestId}-v${nextVersionNumber}`,
-    moduleCode: '05-ai-design',
-    taskType: dbType,
-    userId: actor.id,
-    designRequestId: requestId,
-    modelName: providerResult.modelUsed,
-    promptTokens: hasActualTokens ? providerResult.promptTokens : null,
-    completionTokens: hasActualTokens ? providerResult.completionTokens : null,
-    totalTokens: hasActualTokens ? providerResult.totalTokens : null,
-    costMicros: providerResult.costMicros > 0n ? providerResult.costMicros : null,
-    costCurrency: providerResult.costCurrency,
-    durationMs: providerResult.durationMs,
-    status: 'success',
-  });
-
-  const savedFileMeta = validateGeneratedImageBuffer(finalBufferToSave);
-
-  const isLocalStudioOutput =
-    Boolean(providerResult.isLocalFallback) || providerResult.provider === 'local_sandbox';
-  const generationOrigin: 'CLOUD_AI' | 'AI_PLUS_LAYOUT' | 'LOCAL_COMPOSITE_FALLBACK' =
-    isLocalStudioOutput
-      ? 'LOCAL_COMPOSITE_FALLBACK'
-      : layoutOverlayApplied
-        ? 'AI_PLUS_LAYOUT'
-        : 'CLOUD_AI';
-
-  const createdVersion = await createDesignAssetVersionSafe(requestId, (versionNumber) => ({
-    designRequestId: requestId,
-    versionNumber,
-    versionType: 'ai_draft',
-    storageObjectKey: savedFile.storageObjectKey,
-    mimeType: savedFile.mimeType,
-    fileSizeBytes: savedFile.fileSizeBytes,
-    promptUsed: input.prompt,
-    parametersJson: JSON.stringify({
-      regeneratedFromVersion: existing.version,
-      sourceOrigin: sourceImageOrigin,
-      generationOrigin,
+      commandAction: routeDecision.action,
       taskCode: effectiveTaskCode,
       taskId: runningJob.jobId,
-      inputAssetIds: resolvedInputAssetIds,
-      parentVersionId: requestedParentVerId,
+      generationOrigin,
       requestedModel: providerResult.requestedModel || input.modelId || providerResult.modelUsed,
       reportedModel: providerResult.reportedModel ?? null,
       reportedModelNote: providerResult.reportedModelNote ?? null,
-      costState: providerResult.costState || 'unknown',
-      tokensActual: Boolean(providerResult.tokensActual),
-      isLocalFallback: Boolean(providerResult.isLocalFallback),
-      sourcePhotoId: activePhotoObj?.id ?? null,
-      referenceSitePhotoId: activePhotoObj?.id ?? null,
-      referenceProductPhotoIds: productReferencePhotoObjs.map((p) => p.id),
-      sourceVersionId: sourceVersionObj?.id ?? null,
-      effectivePrompt: cleanImagePrompt,
-      actualWidthPx: savedFileMeta.widthPx,
-      actualHeightPx: savedFileMeta.heightPx,
-      sha256: savedFile.sha256,
+      parentVersionId: requestedParentVerId,
+      versionNumber: createdVersion.versionNumber,
+      versionId: createdVersion.id,
+      downloadUrl: `/api/v1/design/asset/${createdVersion.id}`,
       compositingMode: effectiveCompositingMode,
-      placementQuad: effectiveQuad,
-      screenDimensionsMm:
-        currentMeta.screenWidthM || dbType === '3d_perspective'
-          ? {
-              widthMm: Math.round(effectiveWidthM * 1000),
-              heightMm: Math.round(effectiveHeightM * 1000),
-            }
-          : undefined,
-      bannerResolutionPx:
-        dbType === 'banner'
-          ? { widthPx: effectiveBannerW, heightPx: effectiveBannerH }
-          : undefined,
+      sourcePhotoId: activePhotoObj?.id ?? null,
+      sourceVersionId: sourceVersionObj?.id ?? null,
+      typographyWarning: bannerTypographyWarning,
+      resizeExplanation: bannerResizeExplanation,
       curvedDistortionWarning,
-      bannerResizeExplanation,
-      bannerTypographyWarning,
       layoutOverlayNote,
-      quality: input.quality,
-      providerId: providerResult.provider,
-      modelUsed: providerResult.modelUsed,
-    }),
-    aiUsageLogId: aiLog.log.id,
-    uploadedByUserId: actor.id,
-    isApprovedFinal: false,
-  }));
+      chatMessages: updatedChat,
+      designContext,
+    };
+  };
 
-  designContext.fields.activeVersionId = createdVersion.id;
+  if (input.asyncMode) {
+    void (async () => {
+      try {
+        await executeImageGenerationCore();
+      } catch {
+        // Error state + notification already persisted inside executeImageGenerationCore / markActiveJobFailed
+      } finally {
+        activeDesignJobLocks.delete(requestId);
+      }
+    })();
 
-  const extraNotices: string[] = [];
-  if (providerResult.fallbackNotice) {
-    extraNotices.push(`• ⚠️ ${providerResult.fallbackNotice}`);
-  }
-  if (dbType === 'banner') {
-    if (bannerResizeExplanation) extraNotices.push(`• 📐 ${bannerResizeExplanation}`);
-    if (bannerTypographyWarning) extraNotices.push(`• ${bannerTypographyWarning}`);
-  } else {
-    extraNotices.push(
-      `• 🛡️ Chế độ bảo vệ nền: **${effectiveCompositingMode}** (giữ nguyên toạ độ 4 góc & kích thước ${Math.round(effectiveWidthM * 1000)}×${Math.round(effectiveHeightM * 1000)}mm).`
-    );
-    if (curvedDistortionWarning) extraNotices.push(`• ⚠️ ${curvedDistortionWarning}`);
-  }
-
-  // Append to chat messages
-  const existingChat = currentMeta.chatMessages || [];
-  const updatedChat: DesignChatMessageDto[] = [
-    ...existingChat,
-    {
-      id: `msg-user-${Date.now()}`,
-      role: 'user',
-      text: input.prompt,
-      timestamp: new Date().toISOString(),
-      chatMode: 'image_generator',
-      attachedProductPhotos:
-        attachedProductPhotosMeta.length > 0 ? attachedProductPhotosMeta : undefined,
-    },
-    {
-      id: `msg-ai-${Date.now() + 1}`,
-      role: 'assistant',
-      text: [
-        isLocalStudioOutput
-          ? `Đã dựng bản phối cảnh kỹ thuật nội bộ (v${createdVersion.versionNumber} · Studio Engine ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`
-          : `Đã kết xuất phiên bản thiết kế Cloud AI (v${createdVersion.versionNumber} · ${providerResult.modelUsed}) và cập nhật lên màn hình chính.`,
-        ...extraNotices,
-      ].join('\n'),
-      timestamp: new Date().toISOString(),
-      chatMode: 'image_generator',
-      versionNumber: createdVersion.versionNumber,
-      versionId: createdVersion.id,
-      providerId: providerResult.provider,
-      modelUsed: providerResult.modelUsed,
-      durationSec: Number((providerResult.durationMs / 1000).toFixed(2)),
-      tokenUsed: providerResult.totalTokens,
-      cost: `$${(Number(providerResult.costMicros) / 1_000_000).toFixed(3)}`,
-      status: 'success',
-    },
-  ];
-
-  const processedKeys = { ...(currentMeta.processedIdempotencyKeys || {}) };
-  if (input.idempotencyKey) {
-    processedKeys[input.idempotencyKey] = {
-      versionId: createdVersion.id,
-      versionNumber: createdVersion.versionNumber,
-      timestamp: new Date().toISOString(),
+    return {
+      accepted: true,
+      asyncQueued: true,
+      requestId,
+      jobId: runningJob.jobId,
+      activeJob: runningJob,
+      status: 'running' as const,
+      commandAction: routeDecision.action,
+      taskCode: effectiveTaskCode,
     };
   }
 
-  const completedJob: DesignActiveJobDto = {
-    ...runningJob,
-    status: 'succeeded',
-    providerId: providerResult.provider,
-    modelId: providerResult.modelUsed,
-    finishedAt: new Date().toISOString(),
-    resultVersionNo: createdVersion.versionNumber,
-    fallbackUsed: Boolean(providerResult.isLocalFallback),
-    message: providerResult.fallbackNotice || 'Hoàn tất kết xuất bản thiết kế.',
-  };
-
-  const updatedMetadata: StoredMetadata = {
-    ...currentMeta,
-    placementQuad: effectiveQuad,
-    chatMessages: updatedChat,
-    designContext,
-    activeJob: completedJob,
-    processedIdempotencyKeys: processedKeys,
-  };
-
-  const newTotalTokens =
-    (existing.tokenCost ?? 0) + (hasActualTokens ? providerResult.totalTokens : 0);
-  const newTotalCostMicros = (existing.totalCostMicros ?? 0n) + providerResult.costMicros;
-
-  await prisma.designRequest.update({
-    where: { id: requestId },
-    data: {
-      prompt: input.prompt,
-      aiDraftImageUrl: savedFile.storageObjectKey,
-      installPositionJson: JSON.stringify(updatedMetadata),
-      designStatus: 'ai_drafted',
-      processingTimeMs: (existing.processingTimeMs ?? 0) + providerResult.durationMs,
-      tokenCost: newTotalTokens,
-      totalCostMicros: newTotalCostMicros,
-      version: { increment: 1 },
-    },
-  });
-
-  return {
-    requestId,
-    commandAction: routeDecision.action,
-    taskCode: effectiveTaskCode,
-    taskId: runningJob.jobId,
-    generationOrigin,
-    requestedModel: providerResult.requestedModel || input.modelId || providerResult.modelUsed,
-    reportedModel: providerResult.reportedModel ?? null,
-    reportedModelNote: providerResult.reportedModelNote ?? null,
-    parentVersionId: requestedParentVerId,
-    versionNumber: createdVersion.versionNumber,
-    versionId: createdVersion.id,
-    downloadUrl: `/api/v1/design/asset/${createdVersion.id}`,
-    compositingMode: effectiveCompositingMode,
-    sourcePhotoId: activePhotoObj?.id ?? null,
-    sourceVersionId: sourceVersionObj?.id ?? null,
-    typographyWarning: bannerTypographyWarning,
-    resizeExplanation: bannerResizeExplanation,
-    curvedDistortionWarning,
-    layoutOverlayNote,
-    chatMessages: updatedChat,
-    designContext,
-  };
+  try {
+    return await executeImageGenerationCore();
+  } finally {
+    activeDesignJobLocks.delete(requestId);
+  }
 }
 
 export async function updateDesignProject(
@@ -3061,6 +3366,8 @@ export async function updateDesignProject(
     },
   });
 
+  bumpDomainRevisions(['design', 'leads'], 'design_project_updated');
+
   return { id: requestId, ok: true };
 }
 
@@ -3118,6 +3425,8 @@ export async function addProjectPhoto(
     },
   });
 
+  bumpDomainRevisions(['design'], 'design_photo_added');
+
   return newPhoto;
 }
 
@@ -3156,6 +3465,8 @@ export async function deleteProjectPhoto(
       version: { increment: 1 },
     },
   });
+
+  bumpDomainRevisions(['design'], 'design_photo_deleted');
 
   return { ok: true, remainingCount: updatedPhotos.length };
 }
@@ -3206,6 +3517,8 @@ export async function deleteDesignAssetVersion(
     },
   });
 
+  bumpDomainRevisions(['design', 'reports'], 'design_version_deleted');
+
   return {
     ok: true,
     deletedVersionId: versionId,
@@ -3235,6 +3548,8 @@ export async function deleteDesignProject(
       },
     }),
   ]);
+
+  bumpDomainRevisions(['design', 'leads', 'reports', 'notifications'], 'design_project_deleted');
 
   return { ok: true, deletedId: requestId };
 }
@@ -3312,6 +3627,8 @@ export async function approveDesignAssetVersion(
     });
   }
 
+  bumpDomainRevisions(['design', 'leads', 'reports', 'notifications'], 'design_version_approved');
+
   return {
     requestId,
     approvedVersionId: targetVer.id,
@@ -3336,6 +3653,8 @@ export async function regenerateDesignDraftByAi(
     bannerHeightPx: input.bannerHeightPx,
     aspectRatio: input.aspectRatio,
     simulateAiTimeout: input.simulateAiTimeout,
+    asyncMode: input.asyncMode,
+    idempotencyKey: input.idempotencyKey,
   });
 }
 
@@ -3446,6 +3765,8 @@ export async function saveCompositedDraftVersion(
     },
   });
 
+  bumpDomainRevisions(['design', 'reports'], 'design_composited_saved');
+
   return {
     requestId,
     versionId: createdVersion.id,
@@ -3525,14 +3846,14 @@ export async function uploadDesignerFinalRender(
     });
   }
 
+  bumpDomainRevisions(['design', 'leads', 'reports', 'notifications'], 'design_final_uploaded');
+
   return {
     requestId,
     versionId: finalVer.id,
     versionNumber: finalVer.versionNumber,
   };
 }
-
-const activeDesignRetryLocks = new Set<number>();
 
 /**
  * Đánh giá thông số kỹ thuật LED, cấu hình ghép cabinet chuẩn mm và danh mục vật tư BOM hoàn toàn độc lập ở phía Server.
@@ -3595,48 +3916,45 @@ export async function evaluateProjectTechnicalBom(
  */
 export async function retryLastFailedDesignGeneration(
   actor: SessionUserDto,
-  requestId: number
+  requestId: number,
+  asyncMode = false
 ) {
   await assertCanAccessDesignProject(actor, requestId);
-  if (activeDesignRetryLocks.has(requestId)) {
+  if (activeDesignJobLocks.has(requestId)) {
     throw new Error('Dự án đang có tiến trình kết xuất chạy nền, vui lòng chờ hoàn tất.');
   }
 
-  activeDesignRetryLocks.add(requestId);
-  try {
-    const existing = await prisma.designRequest.findUnique({ where: { id: requestId } });
-    if (!existing) {
-      throw new Error('Không tìm thấy dự án thiết kế.');
-    }
-    const meta = parseProjectMetadata(existing.installPositionJson);
-    const messages = meta.chatMessages || [];
-    let promptToRetry: string | null = null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.role === 'assistant' && (m.status === 'failed' || m.status === 'timeout')) {
-        const prevUser = messages
-          .slice(0, i)
-          .reverse()
-          .find((u) => u.role === 'user');
-        if (prevUser?.text) {
-          promptToRetry = prevUser.text;
-          break;
-        }
+  const existing = await prisma.designRequest.findUnique({ where: { id: requestId } });
+  if (!existing) {
+    throw new Error('Không tìm thấy dự án thiết kế.');
+  }
+  const meta = parseProjectMetadata(existing.installPositionJson);
+  const messages = meta.chatMessages || [];
+  let promptToRetry: string | null = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === 'assistant' && (m.status === 'failed' || m.status === 'timeout')) {
+      const prevUser = messages
+        .slice(0, i)
+        .reverse()
+        .find((u) => u.role === 'user');
+      if (prevUser?.text) {
+        promptToRetry = prevUser.text;
+        break;
       }
     }
-    if (!promptToRetry) {
-      promptToRetry = existing.prompt?.startsWith('@')
-        ? existing.prompt
-        : `@TaoAnh: ${existing.prompt || 'Ghép phối cảnh màn hình LED theo thông số hiện tại'}`;
-    }
-
-    return await processChatDesignRequest(actor, requestId, {
-      expectedVersion: existing.version,
-      prompt: promptToRetry,
-      quality: 'draft',
-      idempotencyKey: `retry-design-${requestId}-${existing.version}-${Date.now()}`,
-    });
-  } finally {
-    activeDesignRetryLocks.delete(requestId);
   }
+  if (!promptToRetry) {
+    promptToRetry = existing.prompt?.startsWith('@')
+      ? existing.prompt
+      : `@TaoAnh: ${existing.prompt || 'Ghép phối cảnh màn hình LED theo thông số hiện tại'}`;
+  }
+
+  return await processChatDesignRequest(actor, requestId, {
+    expectedVersion: existing.version,
+    prompt: promptToRetry,
+    quality: 'draft',
+    asyncMode,
+    idempotencyKey: `retry-design-${requestId}-${existing.version}-${Date.now()}`,
+  });
 }

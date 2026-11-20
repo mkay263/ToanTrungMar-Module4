@@ -2,10 +2,28 @@ import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import type { ApiErrorPayload, ApiSuccess } from '@toantrung/contracts';
 
-const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const globalRateStore = globalThis as unknown as {
+  __toantrungRateBuckets?: Map<string, { count: number; resetAt: number }>;
+  __toantrungRatePruneCounter?: number;
+};
+
+function getRateBuckets(): Map<string, { count: number; resetAt: number }> {
+  if (!globalRateStore.__toantrungRateBuckets) {
+    globalRateStore.__toantrungRateBuckets = new Map();
+  }
+  return globalRateStore.__toantrungRateBuckets;
+}
 
 export function checkRateLimit(key: string, maxRequests = 20, windowMs = 60_000): boolean {
   const now = Date.now();
+  const rateBuckets = getRateBuckets();
+  const counter = (globalRateStore.__toantrungRatePruneCounter =
+    (globalRateStore.__toantrungRatePruneCounter || 0) + 1);
+  if (counter % 100 === 0 && rateBuckets.size > 100) {
+    for (const [k, v] of rateBuckets.entries()) {
+      if (v.resetAt <= now) rateBuckets.delete(k);
+    }
+  }
   const existing = rateBuckets.get(key);
   if (!existing || existing.resetAt <= now) {
     rateBuckets.set(key, { count: 1, resetAt: now + windowMs });

@@ -2,8 +2,10 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import type { WebsiteConfigItemDto } from '@toantrung/contracts';
 import { hasBaPermission } from '@toantrung/contracts';
 import { apiRequest } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
 import { useSession } from '@/core/session/SessionContext';
 import {
   ArrowUpRight,
@@ -93,10 +95,39 @@ interface SeoAiReportRecord {
   updatedAt: string;
 }
 
+function editorDomToMarkdownText(root: HTMLElement): string {
+  const walk = (node: Node): string => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent || '';
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return '';
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'table') return '\n';
+    const inner = Array.from(el.childNodes).map(walk).join('');
+    if (tag === 'b' || tag === 'strong') return `**${inner}**`;
+    if (tag === 'h1') return `# ${inner.trim()}\n`;
+    if (tag === 'h2') return `## ${inner.trim()}\n`;
+    if (tag === 'li') return `• ${inner.trim()}\n`;
+    if (tag === 'br') return '\n';
+    if (tag === 'p' || tag === 'div' || tag === 'ul' || tag === 'ol') {
+      const cleaned = inner.trimEnd();
+      return cleaned ? `${cleaned}\n` : '\n';
+    }
+    return inner;
+  };
+  return Array.from(root.childNodes)
+    .map(walk)
+    .join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 export function SeoAiReportPanel({
   csrfToken,
   initialWebsite,
   initialPeriodDays,
+  availableWebsites = [],
   canEditContent = true,
   onSelectKeyword,
   onContentCreated,
@@ -105,6 +136,7 @@ export function SeoAiReportPanel({
   csrfToken?: string;
   initialWebsite?: string;
   initialPeriodDays?: number;
+  availableWebsites?: WebsiteConfigItemDto[];
   canEditContent?: boolean;
   onSelectKeyword?: (keyword: string) => void;
   onContentCreated?: () => void;
@@ -278,39 +310,46 @@ export function SeoAiReportPanel({
     return r.editedContent;
   };
 
-  const loadReports = useCallback(async () => {
+  const selectedIdRef = useRef<string | null>(selectedId);
+  selectedIdRef.current = selectedId;
+
+  const loadReports = useCallback(async (forceFresh = false) => {
     try {
-      const res = await apiRequest<{ reports: SeoAiReportRecord[] }>('/api/v1/ads/seo-reports');
+      const res = await apiRequest<{ reports: SeoAiReportRecord[] }>('/api/v1/ads/seo-reports', {
+        skipCache: forceFresh,
+      });
       const list = (res.reports || []).filter(
         (r) => !(r.editedContent || '').includes('Ghi chú nghiệm thu R02'),
       );
       setReports(list);
-      if (!selectedId && list.length > 0) {
+      if (!selectedIdRef.current && list.length > 0) {
         setSelectedId(list[0].id);
         setDraftContent(cleanContent(list[0]));
       }
     } catch {
       // ignore
     }
-  }, [selectedId]);
+  }, []);
 
   useEffect(() => {
-    void loadReports();
+    void loadReports(false);
+    return subscribeDataSync(['seo_reports'], () => {
+      void loadReports(true);
+    });
   }, [loadReports]);
 
   const activeReport = reports.find((r) => r.id === selectedId) || null;
 
   useEffect(() => {
-    if (editorRef.current && activeReport) {
+    if (editorRef.current && activeReport && !isEditingDoc) {
       editorRef.current.innerHTML = textToCleanReportHtml(draftContent, activeReport.snapshot);
     }
-  }, [selectedId, editorSyncKey, draftContent, activeReport, textToCleanReportHtml, activeViewTab]);
+  }, [selectedId, editorSyncKey, activeReport, isEditingDoc, textToCleanReportHtml, activeViewTab, draftContent]);
 
   const execFormat = (cmd: string, value?: string) => {
     if (!editorRef.current) return;
     editorRef.current.focus();
     document.execCommand(cmd, false, value);
-    setDraftContent(editorRef.current.innerText || '');
   };
 
   const handleGenerate = async () => {
@@ -342,6 +381,8 @@ export function SeoAiReportPanel({
 
   const handleSaveEdit = async () => {
     if (!activeReport || saving) return;
+    const latestDraft = editorRef.current ? editorDomToMarkdownText(editorRef.current) : draftContent;
+    setDraftContent(latestDraft);
     setSaving(true);
     setErrorMsg(null);
     setStatusMsg(null);
@@ -349,7 +390,7 @@ export function SeoAiReportPanel({
       const res = await apiRequest<{ report: SeoAiReportRecord }>('/api/v1/ads/seo-reports', {
         method: 'PATCH',
         csrfToken,
-        body: { reportId: activeReport.id, editedContent: draftContent },
+        body: { reportId: activeReport.id, editedContent: latestDraft },
       });
       setReports((prev) => prev.map((r) => (r.id === res.report.id ? res.report : r)));
       setIsEditingDoc(false);
@@ -434,9 +475,18 @@ export function SeoAiReportPanel({
             className="h-8 px-2.5 rounded-lg bg-white/15 hover:bg-white/20 border border-white/25 text-white text-xs font-semibold outline-none [&>option]:text-slate-900"
           >
             <option value="all">Tất cả website</option>
-            <option value="toantrung.com.vn">toantrung.com.vn</option>
-            <option value="manhinhled.net.vn">manhinhled.net.vn</option>
-            <option value="bangled.vn">bangled.vn</option>
+            {(availableWebsites.length > 0
+              ? availableWebsites.map((w) => ({ id: w.domain, label: w.domain }))
+              : [
+                  { id: 'toantrung.com.vn', label: 'toantrung.com.vn' },
+                  { id: 'manhinhled.net.vn', label: 'manhinhled.net.vn' },
+                  { id: 'bangled.vn', label: 'bangled.vn' },
+                ]
+            ).map((opt) => (
+              <option key={opt.id} value={opt.id}>
+                {opt.label}
+              </option>
+            ))}
           </select>
 
           <select
@@ -725,7 +775,7 @@ export function SeoAiReportPanel({
               contentEditable={isEditingDoc}
               suppressContentEditableWarning
               onBlur={(e) => {
-                if (isEditingDoc) setDraftContent(e.currentTarget.innerText || '');
+                if (isEditingDoc) setDraftContent(editorDomToMarkdownText(e.currentTarget));
               }}
               className={`mx-auto max-w-3xl bg-white rounded-xl border px-6 py-6 sm:px-8 sm:py-7 text-sm shadow-2xs transition ${
                 isEditingDoc

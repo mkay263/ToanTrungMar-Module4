@@ -4,6 +4,9 @@ import zlib from 'node:zlib';
 import { prisma } from '@toantrung/database';
 import { hasBaPermission, isL2Valid, isL3Effective } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
+import { encryptSecret } from '../../../../../core/security/vault';
+import { refreshKeywordDerivedCacheFromCanonicalMetrics } from '../../../../../modules/03-keywords-ads/service';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { buildStandardXlsxBuffer } from '../../../../../core/export/xlsx-builder';
 import {
@@ -838,6 +841,10 @@ async function ingestGridsIntoAdsDatabase(grids: string[][][]): Promise<{
     }
   }
 
+  if (importedCampaigns > 0 || importedKeywords > 0) {
+    bumpDomainRevisions(['ads', 'seo_articles', 'tracking', 'reports'], 'ads_export_ingest');
+    void refreshKeywordDerivedCacheFromCanonicalMetrics({ force: true }).catch(() => {});
+  }
   return { importedCampaigns, importedKeywords };
 }
 
@@ -1510,7 +1517,7 @@ export async function POST(request: Request) {
 
         writeRealtimeConfig({
           ga4PropertyId: cleanPropId,
-          ga4AccessToken: bearerToken,
+          ga4AccessToken: encryptSecret(bearerToken),
           autoRealtimeEnabled: true,
           lastRealtimeSyncAt: new Date().toISOString(),
         });

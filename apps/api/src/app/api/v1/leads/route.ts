@@ -1,6 +1,7 @@
 import { CreateManualLeadSchema } from '@toantrung/contracts';
 import { prisma } from '@toantrung/database';
 import { jsonError, jsonSuccess } from '../../../../core/http';
+import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   requireAuthenticatedSession,
   requirePermissionSession,
@@ -10,17 +11,14 @@ import {
   listLeadsForUser,
   setSalesReceivingStatus,
 } from '../../../../modules/01-leads/service';
-import {
-  ensureGmailAutoSyncPollerStarted,
-  triggerGmailAutoSyncOnRead,
-} from '../../../../modules/01-leads/gmail-sync.service';
+import { ensureGmailAutoSyncPollerStarted } from '../../../../modules/01-leads/gmail-sync.service';
 
 export async function GET(req: Request) {
   const auth = await requirePermissionSession(req, 'LEAD_VIEW_OWN');
   if (!auth.ok) return auth.response;
 
-  // Kick off background Gmail check non-blockingly so GET /api/v1/leads responds immediately (<50ms)
-  void triggerGmailAutoSyncOnRead(0);
+  // Ensure server-side background Gmail poller is running independently of client page views
+  ensureGmailAutoSyncPollerStarted();
 
   try {
     const url = new URL(req.url);
@@ -95,6 +93,7 @@ export async function PATCH(req: Request) {
     const raw = (await req.json()) as Record<string, unknown>;
     if (raw.action === 'set_receiving_status') {
       const updated = await setSalesReceivingStatus(auth.user, Boolean(raw.isReceivingLeads));
+      bumpDomainRevisions(['leads', 'reports', 'auth'], 'sales_receiving_status');
       return jsonSuccess(updated);
     }
     return jsonError('INVALID_ACTION', 'Thao tác không hợp lệ.', 400);
@@ -124,6 +123,7 @@ export async function POST(req: Request) {
     }
 
     const created = await createManualLead(auth.user, parsed.data);
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'create_manual_lead');
     return jsonSuccess({ id: created.id, leadCode: created.leadCode }, 201);
   } catch (err) {
     return jsonError(

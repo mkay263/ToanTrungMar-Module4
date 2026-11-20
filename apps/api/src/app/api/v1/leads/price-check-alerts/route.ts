@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@toantrung/database';
 import { CreatePriceCheckAlertSchema } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { readPrivateBusinessFile } from '../../../../../core/storage/private-files.service';
 import {
@@ -81,6 +82,7 @@ export async function POST(req: Request) {
         screenshotBuffer,
         screenshotMimeType,
       });
+      bumpDomainRevisions(['leads', 'reports', 'notifications'], 'create_price_alert');
       return jsonSuccess({ id: created.id }, 201);
     }
 
@@ -99,6 +101,7 @@ export async function POST(req: Request) {
       leadId: parsed.data.leadId,
       reasonEvidence: parsed.data.reasonEvidence,
     });
+    bumpDomainRevisions(['leads', 'reports', 'notifications'], 'create_price_alert');
     return jsonSuccess({ id: created.id }, 201);
   } catch (err) {
     return jsonError(
@@ -130,6 +133,7 @@ export async function PATCH(req: Request) {
       alertId,
       dismissReason,
     });
+    bumpDomainRevisions(['leads', 'reports', 'notifications'], 'dismiss_price_alert');
     return jsonSuccess({ id: updated.id, status: updated.status }, 200);
   } catch (err) {
     return jsonError(

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import {
   METRIC_DICTIONARY,
@@ -9,6 +10,7 @@ import {
   hasBaPermission,
   type M04ResultsReportDto,
   type ReportsDashboardDto,
+  type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
 import {
   AlertTriangle,
@@ -30,12 +32,25 @@ import {
   Sparkles,
   X,
 } from 'lucide-react';
-import { apiRequest, peekApiCache, prefetchApiCache } from '@/core/http/client';
+import { apiRequest, peekApiCacheEntry } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
+import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
-import { ReportDocComposer } from './ReportDocComposer';
+
+const ReportDocComposer = dynamic(
+  () => import('./ReportDocComposer').then((m) => m.ReportDocComposer),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-[14px] border border-slate-200 bg-white p-6 text-xs text-slate-500">
+        Đang tải trình soạn thảo báo cáo...
+      </div>
+    ),
+  },
+);
 
 type ReconcileTabKey = 'website' | 'channel' | 'campaign';
 type SortDirection = 'asc' | 'desc';
@@ -51,13 +66,35 @@ export function ReportsWorkspace() {
   const { scope, hydrated, updateScope } = useDashboardScope();
   const tabListId = useId();
 
-  const [pendingPage, setPendingPage] = useState(1);
+  const [pendingPage, setPendingPage] = useState(
+    () => loadRouteState<{ pendingPage?: number }>('reports')?.pendingPage || 1,
+  );
   const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState<ReconcileTabKey>('website');
-  const [sortCol, setSortCol] = useState<string>('valid');
-  const [sortDir, setSortDir] = useState<SortDirection>('desc');
-  const [showPrevPeriod, setShowPrevPeriod] = useState<boolean>(true);
-  const [reportViewMode, setReportViewMode] = useState<'dashboard' | 'doc_composer'>('dashboard');
+  const [activeTab, setActiveTab] = useState<ReconcileTabKey>(() => {
+    if (typeof window !== 'undefined') {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      if (t === 'website' || t === 'channel' || t === 'campaign') return t;
+      const saved = loadRouteState<{ activeTab?: ReconcileTabKey }>('reports');
+      if (saved?.activeTab) return saved.activeTab;
+    }
+    return 'website';
+  });
+  const [sortCol, setSortCol] = useState<string>(
+    () => loadRouteState<{ sortCol?: string }>('reports')?.sortCol || 'valid',
+  );
+  const [sortDir, setSortDir] = useState<SortDirection>(
+    () => loadRouteState<{ sortDir?: SortDirection }>('reports')?.sortDir || 'desc',
+  );
+  const [showPrevPeriod, setShowPrevPeriod] = useState<boolean>(
+    () => loadRouteState<{ showPrevPeriod?: boolean }>('reports')?.showPrevPeriod ?? true,
+  );
+  const [reportViewMode, setReportViewMode] = useState<'dashboard' | 'doc_composer'>(() => {
+    if (typeof window !== 'undefined') {
+      const v = new URLSearchParams(window.location.search).get('view');
+      if (v === 'doc_composer') return 'doc_composer';
+    }
+    return 'dashboard';
+  });
 
   // Inline Marketing Brief Modal (for users creating a Design Brief from /reports)
   const [briefModalOpen, setBriefModalOpen] = useState(false);
@@ -125,12 +162,49 @@ export function ReportsWorkspace() {
     return `/api/v1/reports?${params.toString()}`;
   }, [scope, pendingPage]);
 
-  const [data, setData] = useState<M04ResultsReportDto | null>(() =>
-    peekApiCache<M04ResultsReportDto>(queryUrl),
+  const activeQueryUrlRef = useRef<string>(queryUrl);
+  activeQueryUrlRef.current = queryUrl;
+  const reqSeqRef = useRef<number>(0);
+  const prevScopeSigRef = useRef<string>(`${scope.websiteId}|${scope.preset}|${scope.from}|${scope.to}`);
+  const scrollRestoredRef = useRef<boolean>(false);
+
+  const [dataState, setDataState] = useState<{
+    path: string;
+    data: M04ResultsReportDto;
+  } | null>(() => {
+    const cached = peekApiCacheEntry<M04ResultsReportDto>(queryUrl);
+    return cached ? { path: queryUrl, data: cached.data } : null;
+  });
+  const data = dataState && dataState.path === queryUrl ? dataState.data : null;
+
+  const [knownWebsites, setKnownWebsites] = useState<WebsiteConfigItemDto[]>(
+    () => peekApiCacheEntry<M04ResultsReportDto>(queryUrl)?.data.coverage.availableWebsites || [],
   );
-  const [legacyData, setLegacyData] = useState<ReportsDashboardDto | null>(null);
-  const [loading, setLoading] = useState<boolean>(() => !peekApiCache<M04ResultsReportDto>(queryUrl));
+
+  const legacyQueryUrl = useMemo(() => {
+    const params = new URLSearchParams({
+      websiteId: scope.websiteId || 'all',
+      preset: scope.preset || '7D',
+    });
+    if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
+      params.set('from', scope.from);
+      params.set('to', scope.to);
+    }
+    return `/api/v1/reports?${params.toString()}`;
+  }, [scope.websiteId, scope.preset, scope.from, scope.to]);
+
+  const [legacyDataState, setLegacyDataState] = useState<{
+    path: string;
+    data: ReportsDashboardDto;
+  } | null>(null);
+  const legacyData =
+    legacyDataState && legacyDataState.path === legacyQueryUrl ? legacyDataState.data : null;
+
+  const [loading, setLoading] = useState<boolean>(
+    () => !peekApiCacheEntry<M04ResultsReportDto>(queryUrl),
+  );
   const [refreshing, setRefreshing] = useState(false);
+  const [checkedAtIso, setCheckedAtIso] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hoveredSeriesIdx, setHoveredSeriesIdx] = useState<number | null>(null);
 
@@ -174,69 +248,133 @@ export function ReportsWorkspace() {
     [scope.websiteId, scope.preset, scope.from, scope.to],
   );
 
+  useEffect(() => {
+    const entry = peekApiCacheEntry<M04ResultsReportDto>(queryUrl);
+    if (entry) {
+      setDataState({ path: queryUrl, data: entry.data });
+      if (entry.data.coverage.availableWebsites?.length) {
+        setKnownWebsites(entry.data.coverage.availableWebsites);
+      }
+      setCheckedAtIso(new Date(entry.timestamp).toISOString());
+      setLoading(false);
+      setRefreshing(false);
+    } else {
+      setDataState(null);
+      setLoading(true);
+    }
+  }, [queryUrl]);
+
   const loadReports = useCallback(
-    async (forceFresh = false, signal?: AbortSignal) => {
+    async (opts?: { forceFresh?: boolean; silent?: boolean; signal?: AbortSignal } | boolean) => {
+      const normalized =
+        typeof opts === 'boolean' ? { forceFresh: opts } : opts || {};
       if (!hydrated) return;
-      const cached = !forceFresh ? peekApiCache<M04ResultsReportDto>(queryUrl) : null;
-      if (cached) {
-        setData(cached);
-        setLoading(false);
-        setRefreshing(false);
-      } else {
+      if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
+
+      const requestPath = queryUrl;
+      const seq = ++reqSeqRef.current;
+      if (normalized.forceFresh && !normalized.silent) {
         setRefreshing(true);
       }
-      setError(null);
+      if (!normalized.silent) setError(null);
       try {
-        const res = await apiRequest<M04ResultsReportDto>(queryUrl, {
-          skipCache: forceFresh,
-          signal,
+        const res = await apiRequest<M04ResultsReportDto>(requestPath, {
+          skipCache: Boolean(normalized.forceFresh || normalized.silent),
+          signal: normalized.signal,
+          onRevalidated: (fresh) => {
+            if (activeQueryUrlRef.current !== requestPath) return;
+            setDataState({ path: requestPath, data: fresh });
+            if (fresh.coverage.availableWebsites?.length) {
+              setKnownWebsites(fresh.coverage.availableWebsites);
+            }
+            setCheckedAtIso(new Date().toISOString());
+          },
         });
-        if (signal?.aborted) return;
-        setData(res);
+        if (
+          normalized.signal?.aborted ||
+          seq !== reqSeqRef.current ||
+          activeQueryUrlRef.current !== requestPath
+        ) {
+          return;
+        }
+        setDataState({ path: requestPath, data: res });
+        if (res.coverage.availableWebsites?.length) {
+          setKnownWebsites(res.coverage.availableWebsites);
+        }
+        setCheckedAtIso(new Date().toISOString());
       } catch (err) {
-        if (signal?.aborted) return;
-        setError(err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError);
+        if (
+          normalized.signal?.aborted ||
+          (err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        if (seq === reqSeqRef.current && !normalized.silent) {
+          setError(err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError);
+        }
       } finally {
-        if (!signal?.aborted) {
+        if (!normalized.signal?.aborted && seq === reqSeqRef.current) {
           setLoading(false);
           setRefreshing(false);
         }
       }
     },
-    [hydrated, queryUrl],
+    [hydrated, queryUrl, scope.preset, scope.from, scope.to],
   );
 
   useEffect(() => {
     if (!hydrated) return;
+    if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
+
     const controller = new AbortController();
-    void loadReports(false, controller.signal);
-    return () => controller.abort();
-  }, [hydrated, loadReports]);
+    const cached = peekApiCacheEntry<M04ResultsReportDto>(queryUrl);
+    if (!cached || !cached.isFresh) {
+      void loadReports({ forceFresh: false, silent: Boolean(cached), signal: controller.signal });
+    }
 
-  // Nạp trước ngầm các mốc ngày còn lại để bấm Hôm nay / Hôm qua / 7 ngày / 30 ngày lên số tức thì
-  useEffect(() => {
-    if (!hydrated || !data) return;
-    const timer = window.setTimeout(() => {
-      const presets: Array<'TODAY' | 'YESTERDAY' | '7D' | '30D'> = ['TODAY', 'YESTERDAY', '7D', '30D'];
-      for (const preset of presets) {
-        if (preset === scope.preset) continue;
-        const qs = new URLSearchParams({
-          view: 'spec',
-          websiteId: scope.websiteId || 'all',
-          preset,
-          pendingPage: '1',
-          pageSize: '20',
-        });
-        prefetchApiCache(`/api/v1/reports?${qs.toString()}`);
-      }
-    }, 350);
-    return () => window.clearTimeout(timer);
-  }, [hydrated, Boolean(data), scope.websiteId, scope.preset]);
+    const unsubscribe = subscribeDataSync(
+      ['reports', 'leads', 'tracking', 'ads', 'design', 'websites'],
+      () => {
+        void loadReports({ forceFresh: true, silent: true });
+      },
+    );
+
+    return () => {
+      controller.abort();
+      unsubscribe();
+    };
+  }, [hydrated, queryUrl, scope.preset, scope.from, scope.to, loadReports]);
 
   useEffect(() => {
-    setPendingPage(1);
-    setLegacyData(null);
+    const nextSig = `${scope.websiteId}|${scope.preset}|${scope.from}|${scope.to}`;
+    if (prevScopeSigRef.current !== nextSig) {
+      prevScopeSigRef.current = nextSig;
+      setPendingPage(1);
+      setHoveredSeriesIdx(null);
+    }
   }, [scope.websiteId, scope.preset, scope.from, scope.to]);
+
+  useEffect(() => {
+    saveRouteState('reports', { activeTab, pendingPage, showPrevPeriod, sortCol, sortDir });
+  }, [activeTab, pendingPage, showPrevPeriod, sortCol, sortDir]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const scroller = document.getElementById('main-workspace-content');
+    if (!scroller) return;
+    if (!scrollRestoredRef.current && data) {
+      scrollRestoredRef.current = true;
+      const saved = loadRouteState<{ scrollTop?: number }>('reports_scroll');
+      if (saved?.scrollTop && saved.scrollTop > 0) {
+        requestAnimationFrame(() => {
+          scroller.scrollTop = saved.scrollTop ?? 0;
+        });
+      }
+    }
+    return () => {
+      saveRouteState('reports_scroll', { scrollTop: scroller.scrollTop });
+    };
+  }, [data]);
 
   useEffect(() => {
     const onSearch = (e: Event) => {
@@ -248,31 +386,26 @@ export function ReportsWorkspace() {
   }, []);
 
   useEffect(() => {
-    if (reportViewMode !== 'doc_composer' || legacyData) return;
-    const params = new URLSearchParams({
-      websiteId: scope.websiteId || 'all',
-      preset: 'custom',
-      fromDate: data?.scope.startDate || scope.from || '',
-      toDate: data?.scope.endDate || scope.to || '',
-    });
+    if (reportViewMode !== 'doc_composer') return;
+    if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
+    const reqUrl = legacyQueryUrl;
+    const cached = peekApiCacheEntry<ReportsDashboardDto>(reqUrl);
+    if (cached) {
+      setLegacyDataState({ path: reqUrl, data: cached.data });
+      if (cached.isFresh) return;
+    } else {
+      setLegacyDataState(null);
+    }
     const controller = new AbortController();
-    apiRequest<ReportsDashboardDto>(`/api/v1/reports?${params.toString()}`, {
-      signal: controller.signal,
-    })
+    apiRequest<ReportsDashboardDto>(reqUrl, { signal: controller.signal })
       .then((res) => {
-        if (!controller.signal.aborted) setLegacyData(res);
+        if (!controller.signal.aborted) {
+          setLegacyDataState({ path: reqUrl, data: res });
+        }
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [
-    reportViewMode,
-    legacyData,
-    scope.websiteId,
-    data?.scope.startDate,
-    data?.scope.endDate,
-    scope.from,
-    scope.to,
-  ]);
+  }, [reportViewMode, legacyQueryUrl, scope.preset, scope.from, scope.to]);
 
   const buildScopedExportParams = () => {
     return new URLSearchParams({
@@ -551,11 +684,36 @@ export function ReportsWorkspace() {
       {/* 1. HEADER: Tiêu đề "Hiệu quả Marketing", website, khoảng ngày, so sánh kỳ trước và 1 trạng thái dữ liệu */}
       <WebsiteDashboardHeader
         title="Hiệu quả Marketing"
-        subtitle="Hoạt động Marketing đem lại kết quả gì? · Đối chiếu chi phí → Lead → chất lượng → kết quả xử lý"
+        subtitle={
+          data
+            ? `Hoạt động Marketing đem lại kết quả gì? · ${data.scope.startDate} → ${data.scope.endDate}`
+            : 'Hoạt động Marketing đem lại kết quả gì? · Đối chiếu chi phí → Lead → chất lượng → kết quả xử lý'
+        }
         scope={scope}
-        availableWebsites={data?.coverage.availableWebsites || []}
-        freshnessMessage={data?.freshness.statusMessage}
-        freshnessTone={refreshing || loading ? 'updating' : data?.freshness.state === 'ERROR' ? 'error' : 'ok'}
+        availableWebsites={data?.coverage.availableWebsites || knownWebsites}
+        freshnessMessage={
+          loading && !data
+            ? UI_VOCABULARY.freshness.updating
+            : refreshing
+              ? UI_VOCABULARY.freshness.updating
+              : data?.freshness.statusMessage
+        }
+        freshnessDetail={{
+          checkedAt: checkedAtIso,
+          lastSyncedAt: data?.freshness.lastSyncedAt || data?.freshness.lastSuccessAt || null,
+          latestSourceDataAt:
+            data?.freshness.latestSourceDataAt ||
+            data?.freshness.dataThrough ||
+            data?.scope.endDate ||
+            null,
+        }}
+        freshnessTone={
+          error || data?.freshness.state === 'ERROR'
+            ? 'error'
+            : refreshing || loading
+              ? 'updating'
+              : 'ok'
+        }
         onChangeScope={updateScope}
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -942,7 +1100,10 @@ export function ReportsWorkspace() {
           </div>
 
           {/* 4. BẢNG "ĐỐI CHIẾU HIỆU QUẢ" (Tabs: Website / Kênh / Chiến dịch) */}
-          <div className="rounded-[16px] border border-slate-200 bg-white shadow-xs overflow-hidden">
+          <div
+            className="rounded-[16px] border border-slate-200 bg-white shadow-xs overflow-hidden"
+            style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 380px' }}
+          >
             <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50/70">
               <div>
                 <h2 className="text-sm font-bold text-[#0F172A]">Đối chiếu hiệu quả</h2>

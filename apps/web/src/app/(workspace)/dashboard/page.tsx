@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   UI_VOCABULARY,
@@ -24,7 +24,9 @@ import {
   Users,
 } from 'lucide-react';
 import { useSession } from '@/core/session/SessionContext';
-import { apiRequest, peekApiCache } from '@/core/http/client';
+import { apiRequest, peekApiCacheEntry } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
+import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
@@ -35,10 +37,11 @@ function buildDashboardApiPath(scope: {
   from: string;
   to: string;
 }): string {
-  // Trang Tổng quan LUÔN bao quát toàn bộ hệ thống (không chia lẻ tab từng website)
+  // Trang Tổng quan LUÔN bao quát toàn bộ hệ thống (chế độ compact cho tốc độ tải nhanh)
   const qs = new URLSearchParams({
     websiteId: 'all',
     preset: scope.preset || '7D',
+    compact: '1',
   });
   if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
     qs.set('from', scope.from);
@@ -52,56 +55,83 @@ export default function DashboardPage() {
   const { scope, hydrated, updateScope } = useDashboardScope();
   const apiPath = useMemo(() => buildDashboardApiPath(scope), [scope]);
 
-  const [report, setReport] = useState<ReportsDashboardDto | null>(() =>
-    peekApiCache<ReportsDashboardDto>(apiPath),
-  );
+  const [reportState, setReportState] = useState<{
+    path: string;
+    data: ReportsDashboardDto;
+  } | null>(() => {
+    const cached = peekApiCacheEntry<ReportsDashboardDto>(apiPath);
+    return cached ? { path: apiPath, data: cached.data } : null;
+  });
+  const report = reportState && reportState.path === apiPath ? reportState.data : null;
+
   const [knownWebsites, setKnownWebsites] = useState<WebsiteConfigItemDto[]>(
-    () => peekApiCache<ReportsDashboardDto>(apiPath)?.availableWebsites || [],
+    () => peekApiCacheEntry<ReportsDashboardDto>(apiPath)?.data.availableWebsites || [],
   );
   const [isLoading, setIsLoading] = useState<boolean>(
-    () => !peekApiCache<ReportsDashboardDto>(apiPath),
+    () => !peekApiCacheEntry<ReportsDashboardDto>(apiPath),
   );
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [checkedAtIso, setCheckedAtIso] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
 
+  const reqSeqRef = useRef<number>(0);
+  const activePathRef = useRef<string>(apiPath);
+  activePathRef.current = apiPath;
+
   useEffect(() => {
-    const cached = peekApiCache<ReportsDashboardDto>(apiPath);
-    if (cached) {
-      setReport(cached);
-      if (cached.availableWebsites?.length) {
-        setKnownWebsites(cached.availableWebsites);
+    const entry = peekApiCacheEntry<ReportsDashboardDto>(apiPath);
+    if (entry) {
+      setReportState({ path: apiPath, data: entry.data });
+      if (entry.data.availableWebsites?.length) {
+        setKnownWebsites(entry.data.availableWebsites);
       }
+      setCheckedAtIso(new Date(entry.timestamp).toISOString());
       setIsLoading(false);
     } else {
-      setReport(null);
+      setReportState(null);
       setIsLoading(true);
     }
   }, [apiPath]);
 
   const fetchDashboard = useCallback(
-    async (opts?: { manual?: boolean; signal?: AbortSignal }) => {
+    async (opts?: { manual?: boolean; silent?: boolean; signal?: AbortSignal }) => {
+      const requestPath = apiPath;
+      const seq = ++reqSeqRef.current;
       if (opts?.manual) setIsRefreshing(true);
-      setFetchError(null);
+      if (!opts?.silent) setFetchError(null);
       try {
-        const res = await apiRequest<ReportsDashboardDto>(apiPath, {
+        const res = await apiRequest<ReportsDashboardDto>(requestPath, {
           signal: opts?.signal,
-          skipCache: Boolean(opts?.manual),
+          skipCache: Boolean(opts?.manual || opts?.silent),
+          onRevalidated: (fresh) => {
+            if (activePathRef.current !== requestPath) return;
+            setReportState({ path: requestPath, data: fresh });
+            if (fresh.availableWebsites?.length) {
+              setKnownWebsites(fresh.availableWebsites);
+            }
+            setCheckedAtIso(new Date().toISOString());
+          },
         });
-        if (opts?.signal?.aborted) return;
-        setReport(res);
+        if (opts?.signal?.aborted || seq !== reqSeqRef.current || activePathRef.current !== requestPath) {
+          return;
+        }
+        setReportState({ path: requestPath, data: res });
         if (res.availableWebsites?.length) {
           setKnownWebsites(res.availableWebsites);
         }
+        setCheckedAtIso(new Date().toISOString());
       } catch (err) {
         if (opts?.signal?.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
           return;
         }
-        setFetchError(
-          err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError,
-        );
+        if (seq === reqSeqRef.current && !opts?.silent) {
+          setFetchError(
+            err instanceof Error ? err.message : UI_VOCABULARY.fallbacks.loadError,
+          );
+        }
       } finally {
-        if (!opts?.signal?.aborted) {
+        if (!opts?.signal?.aborted && seq === reqSeqRef.current) {
           setIsLoading(false);
           setIsRefreshing(false);
         }
@@ -115,19 +145,39 @@ export default function DashboardPage() {
     if (scope.preset === 'CUSTOM' && (!scope.from || !scope.to)) return;
 
     const controller = new AbortController();
-    void fetchDashboard({ signal: controller.signal });
+    const cached = peekApiCacheEntry<ReportsDashboardDto>(apiPath);
+    if (!cached || !cached.isFresh) {
+      void fetchDashboard({ silent: Boolean(cached), signal: controller.signal });
+    }
 
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void fetchDashboard();
-      }
-    }, 60_000);
+    const unsubscribe = subscribeDataSync(
+      ['reports', 'leads', 'tracking', 'ads', 'design', 'websites'],
+      () => {
+        void fetchDashboard({ silent: true });
+      },
+    );
 
     return () => {
       controller.abort();
-      window.clearInterval(interval);
+      unsubscribe();
     };
-  }, [hydrated, user, scope.preset, scope.from, scope.to, fetchDashboard]);
+  }, [hydrated, user, apiPath, scope.preset, scope.from, scope.to, fetchDashboard]);
+
+  // Restore & persist scroll position on /dashboard across module transitions
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const scroller = document.getElementById('main-workspace-content');
+    if (!scroller) return;
+    const saved = loadRouteState<{ scrollTop?: number }>('dashboard');
+    if (saved?.scrollTop && saved.scrollTop > 0) {
+      requestAnimationFrame(() => {
+        scroller.scrollTop = saved.scrollTop ?? 0;
+      });
+    }
+    return () => {
+      saveRouteState('dashboard', { scrollTop: scroller.scrollTop });
+    };
+  }, []);
 
   useEffect(() => {
     const handleGlobalSearch = (ev: Event) => {
@@ -266,6 +316,11 @@ export default function DashboardPage() {
         hideWebsiteTabs={true}
         comparisonLabel={periodComp ? periodComp.label : null}
         freshnessMessage={freshnessText}
+        freshnessDetail={{
+          checkedAt: checkedAtIso,
+          lastSyncedAt: report?.lastSyncedAt || null,
+          latestSourceDataAt: report?.toDate || null,
+        }}
         freshnessTone={
           fetchError
             ? 'error'

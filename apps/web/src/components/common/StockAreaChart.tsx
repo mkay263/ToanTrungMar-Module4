@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useId, useMemo, useState } from 'react';
 
 export interface StockChartPoint {
   date: string;
@@ -23,6 +23,11 @@ export function StockAreaChart({
   loading = false,
 }: StockAreaChartProps) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const chartUid = useId().replace(/:/g, '');
+
+  useEffect(() => {
+    setHoverIdx(null);
+  }, [points]);
 
   const width = 760;
   const height = 240;
@@ -118,7 +123,7 @@ export function StockAreaChart({
     );
   }
 
-  const gradId = `stockGrad-${accentColor}`;
+  const gradId = `stockGrad-${accentColor}-${chartUid}`;
   const activePt = hoverIdx !== null ? coords[hoverIdx] : null;
   const prevPt = hoverIdx !== null && hoverIdx > 0 ? coords[hoverIdx - 1] : null;
   const deltaPct =

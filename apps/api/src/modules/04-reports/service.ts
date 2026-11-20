@@ -1,5 +1,6 @@
 import { prisma } from '@toantrung/database';
 import { buildStandardXlsxBuffer } from '../../core/export/xlsx-builder';
+import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import {
   countInclusiveCalendarDays,
   formatVietnamDateTime,
@@ -233,6 +234,7 @@ async function resolveFlexibleReportScope(rawQuery: unknown): Promise<FlexibleRe
 export async function getScopedReportsDashboard(
   user: SessionUserDto,
   rawQuery: unknown,
+  options?: { compact?: boolean; bypassCache?: boolean },
 ): Promise<
   ReportsDashboardDto & {
     websiteId?: string;
@@ -258,157 +260,187 @@ export async function getScopedReportsDashboard(
   const { fromDate, toDate, fromDateStr, toDateStr } = scope;
   const { scopeRole, scopeDescription } = getScopeInfo(user, scope.websiteLabel);
   const anonymized = isAnonymizedViewerRole(user.roleCode);
+  const isCompact = Boolean(
+    options?.compact ||
+      (rawQuery && typeof rawQuery === 'object' && (rawQuery as Record<string, unknown>).compact === '1'),
+  );
+  const scopedUserKey =
+    user.roleCode === 'SALES' || user.roleCode === 'DESIGNER'
+      ? `${user.roleCode}:${user.id}`
+      : `${user.roleCode}:${anonymized ? 'anon' : 'full'}`;
 
-  const roleLeadWhere: Record<string, unknown> =
-    user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
-  const allGa4PropIds = scope.availableWebsites
-    .map((w) => w.ga4PropertyId)
-    .filter((id): id is string => Boolean(id));
+  const cacheResult = await getOrComputeScopedCache({
+    key: `m04-dash:${scopedUserKey}:${scope.websiteId}:${scope.presetLabelKey}:${fromDateStr}:${toDateStr}:${isCompact ? 'compact' : 'full'}`,
+    domains: ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'design', 'websites', 'auth'],
+    ttlMs: 30_000,
+    bypassCache: options?.bypassCache,
+    compute: async () => {
+      const roleLeadWhere: Record<string, unknown> =
+        user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
+      const allGa4PropIds = scope.availableWebsites
+        .map((w) => w.ga4PropertyId)
+        .filter((id): id is string => Boolean(id));
 
-  const [
-    rawLeads,
-    prevRawLeads,
-    salesUsers,
-    allProducts,
-    latestSync,
-    metrics,
-    seoArticles,
-    designRequests,
-    aiLogs,
-    recentSyncLogs,
-    openAlertsCount,
-    siteTrafficMetrics,
-    ga4LiveSnaps,
-    googleOAuthConn,
-  ] = await Promise.all([
-    prisma.lead.findMany({
-      where: {
-        createdAt: { gte: fromDate, lte: toDate },
-        ...roleLeadWhere,
-      },
-      include: {
-        assignedSales: {
-          include: { role: true },
-        },
-        tracking: true,
-        leadProducts: {
-          include: {
-            product: true,
-          },
-        },
-      },
-      orderBy: { createdAt: 'desc' },
-    }),
-    scope.isAllTime
-      ? Promise.resolve([])
-      : prisma.lead.findMany({
+      const [
+        rawLeads,
+        prevRawLeads,
+        salesUsers,
+        allProducts,
+        userCoverMap,
+        metrics,
+        seoArticles,
+        designRequests,
+        aiLogAgg,
+        recentSyncLogs,
+        openAlertsCount,
+        siteTrafficMetrics,
+        ga4LiveSnaps,
+        googleOAuthConn,
+      ] = await Promise.all([
+        prisma.lead.findMany({
           where: {
-            createdAt: { gte: scope.prevFromDate, lte: scope.prevToDate },
+            createdAt: { gte: fromDate, lte: toDate },
             ...roleLeadWhere,
           },
-          select: {
-            id: true,
-            isSpam: true,
-            pipelineStatus: true,
-            receivedAt: true,
-            sourceWebsite: true,
+          include: {
+            assignedSales: {
+              include: { role: true },
+            },
+            tracking: true,
+            leadProducts: {
+              include: {
+                product: true,
+              },
+            },
+          },
+          orderBy: { createdAt: 'desc' },
+        }),
+        scope.isAllTime
+          ? Promise.resolve([])
+          : prisma.lead.findMany({
+              where: {
+                createdAt: { gte: scope.prevFromDate, lte: scope.prevToDate },
+                ...roleLeadWhere,
+              },
+              select: {
+                id: true,
+                isSpam: true,
+                pipelineStatus: true,
+                receivedAt: true,
+                sourceWebsite: true,
+              },
+            }),
+        prisma.user.findMany({
+          where: {
+            isActive: true,
+            role: {
+              roleCode: { in: ['SALES', 'SALES_LEAD'] },
+            },
+          },
+          include: { role: true },
+          orderBy: { id: 'asc' },
+        }),
+        prisma.product.findMany({
+          where: { isActive: true },
+          orderBy: { id: 'asc' },
+        }),
+        getUserCoverMap(),
+        prisma.platformDailyMetric.findMany({
+          where: {
+            platform: { in: ['google_ads', 'facebook', 'facebook_ads'] },
+            grain: 'campaign',
+            metricDate: {
+              gte: fromDateStr,
+              lte: toDateStr,
+            },
+            NOT: [
+              { accountPropertyId: { startsWith: 'GA4-' } },
+              { campaignExternalId: { startsWith: 'ga4_' } },
+            ],
+          },
+          include: {
+            campaign: {
+              select: {
+                campaignName: true,
+                campaignCode: true,
+              },
+            },
           },
         }),
-    prisma.user.findMany({
-      where: {
-        isActive: true,
-        role: {
-          roleCode: { in: ['SALES', 'SALES_LEAD'] },
-        },
-      },
-      include: { role: true },
-      orderBy: { id: 'asc' },
-    }),
-    prisma.product.findMany({
-      where: { isActive: true },
-      orderBy: { id: 'asc' },
-    }),
-    prisma.platformSyncLog.findFirst({
-      where: { status: 'success' },
-      orderBy: { completedAt: 'desc' },
-    }),
-    prisma.platformDailyMetric.findMany({
-      where: {
-        platform: { in: ['google_ads', 'facebook', 'facebook_ads'] },
-        grain: 'campaign',
-        metricDate: {
-          gte: fromDateStr,
-          lte: toDateStr,
-        },
-        NOT: [
-          { accountPropertyId: { startsWith: 'GA4-' } },
-          { campaignExternalId: { startsWith: 'ga4_' } },
-        ],
-      },
-      include: {
-        campaign: {
-          select: {
-            campaignName: true,
-            campaignCode: true,
+        prisma.seoArticle.findMany({
+          where: {
+            createdAt: {
+              gte: fromDate,
+              lte: toDate,
+            },
           },
-        },
-      },
-    }),
-    prisma.seoArticle.findMany({
-      where: {
-        createdAt: {
-          gte: fromDate,
-          lte: toDate,
-        },
-      },
-    }),
-    prisma.designRequest.findMany({
-      where: {
-        createdAt: {
-          gte: fromDate,
-          lte: toDate,
-        },
-        ...(user.roleCode === 'SALES'
-          ? { requestedBySalesId: user.id }
-          : user.roleCode === 'DESIGNER'
-            ? { assignedDesignerId: user.id }
-            : {}),
-      },
-    }),
-    prisma.aiUsageLog.findMany({
-      where: {
-        moduleCode: '05-ai-design',
-        createdAt: {
-          gte: fromDate,
-          lte: toDate,
-        },
-      },
-    }),
-    prisma.platformSyncLog.findMany({
-      orderBy: { startedAt: 'desc' },
-      take: 10,
-    }),
-    prisma.leadReconciliation.count({
-      where: { status: 'alert_open' },
-    }),
-    prisma.platformDailyMetric.findMany({
-      where: {
-        platform: { in: ['ga4', 'search_console'] },
-        grain: 'account',
-        metricDate: { gte: fromDateStr, lte: toDateStr },
-        NOT: { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
-      },
-      select: {
-        platform: true,
-        accountPropertyId: true,
-        clicks: true,
-        impressions: true,
-        pageViews: true,
-      },
-    }),
-    getGa4LiveSnapshotsForProperties(allGa4PropIds, fromDateStr, toDateStr, false),
-    getGoogleConnection(),
-  ]);
+          select: {
+            targetWebsite: true,
+            status: true,
+            lastPublishError: true,
+            needsOptimization: true,
+          },
+        }),
+        prisma.designRequest.findMany({
+          where: {
+            createdAt: {
+              gte: fromDate,
+              lte: toDate,
+            },
+            ...(user.roleCode === 'SALES'
+              ? { requestedBySalesId: user.id }
+              : user.roleCode === 'DESIGNER'
+                ? { assignedDesignerId: user.id }
+                : {}),
+          },
+          select: {
+            designStatus: true,
+            requestType: true,
+            processingTimeMs: true,
+          },
+        }),
+        prisma.aiUsageLog.aggregate({
+          where: {
+            moduleCode: '05-ai-design',
+            createdAt: {
+              gte: fromDate,
+              lte: toDate,
+            },
+          },
+          _sum: {
+            totalTokens: true,
+            costMicros: true,
+          },
+        }),
+        prisma.platformSyncLog.findMany({
+          orderBy: { startedAt: 'desc' },
+          take: 15,
+        }),
+        prisma.leadReconciliation.count({
+          where: { status: 'alert_open' },
+        }),
+        prisma.platformDailyMetric.findMany({
+          where: {
+            platform: { in: ['ga4', 'search_console'] },
+            grain: 'account',
+            metricDate: { gte: fromDateStr, lte: toDateStr },
+            NOT: { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
+          },
+          select: {
+            platform: true,
+            accountPropertyId: true,
+            clicks: true,
+            impressions: true,
+            pageViews: true,
+          },
+        }),
+        scope.isAllTime
+          ? Promise.resolve([])
+          : getGa4LiveSnapshotsForProperties(allGa4PropIds, fromDateStr, toDateStr, false),
+        getGoogleConnection(),
+      ]);
+
+      const latestSync = recentSyncLogs.find((s) => s.status === 'success' && s.completedAt) || null;
 
   const ga4SnapByProp = new Map(ga4LiveSnaps.map((s) => [s.propertyId, s]));
 
@@ -648,7 +680,7 @@ export async function getScopedReportsDashboard(
     user.roleCode === 'SALES' ? salesUsers.filter((s) => s.id === user.id) : salesUsers;
   const knownSalesIdSet = new Set<number>(scopedSalesUsers.map((s) => s.id));
 
-  const userCoverMap = await getUserCoverMap();
+  const overdueLeadIdSet = new Set(unansweredQuotes.filter((q) => q.isOverdue7Days).map((q) => q.leadId));
 
   const buildSalesPerfRow = (
     salesUserId: number,
@@ -660,9 +692,7 @@ export async function getScopedReportsDashboard(
   ): SalesPerformanceRowDto => {
     const sWon = sLeads.filter((l) => l.pipelineStatus === 'won').length;
     const sLost = sLeads.filter((l) => l.pipelineStatus === 'lost').length;
-    const sOverdue = unansweredQuotes.filter(
-      (q) => sLeads.some((l) => l.id === q.leadId) && q.isOverdue7Days,
-    ).length;
+    const sOverdue = sLeads.reduce((acc, l) => acc + (overdueLeadIdSet.has(l.id) ? 1 : 0), 0);
 
     return {
       salesUserId,
@@ -893,8 +923,8 @@ export async function getScopedReportsDashboard(
         withDuration.length
       : 0;
 
-  const totalAiTokens = aiLogs.reduce((sum, l) => sum + (l.totalTokens ?? 0), 0);
-  const totalAiCostMicros = aiLogs.reduce((sum, l) => sum + (l.costMicros ?? 0n), 0n);
+  const totalAiTokens = aiLogAgg._sum.totalTokens ?? 0;
+  const totalAiCostMicros = aiLogAgg._sum.costMicros ?? 0n;
 
   const isOAuthConnectedLive = Boolean(googleOAuthConn?.connected && !googleOAuthConn.isSandboxDemo);
   const liveIntegrationMode =
@@ -1019,7 +1049,9 @@ export async function getScopedReportsDashboard(
 
   const actionableTasks = candidateTasks.slice(0, 5);
 
-  const detailedLeads: DetailedReportLeadRowDto[] = leads.map((lead, idx) => {
+  const detailedLeads: DetailedReportLeadRowDto[] = isCompact
+    ? []
+    : leads.map((lead, idx) => {
     const cleanCompany = lead.companyName
       ? lead.companyName.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '')
       : null;
@@ -1147,6 +1179,12 @@ export async function getScopedReportsDashboard(
     },
     detailedLeads,
   };
+    },
+  });
+  return {
+    ...cacheResult.data,
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 import { getM04ResultsReportSpec } from './m04-spec.service';
@@ -1164,12 +1202,16 @@ export async function generateScopedReportExportBuffer(
   rawQuery: unknown,
   format: 'xlsx' | 'csv' = 'xlsx',
 ): Promise<{ buffer: Buffer; fileName: string; mimeType: string }> {
-  const dashboard = await getScopedReportsDashboard(user, rawQuery);
-  const m04Spec = await getM04ResultsReportSpec(user, {
-    websiteId: dashboard.websiteId || 'all',
-    from: dashboard.fromDate,
-    to: dashboard.toDate,
-  });
+  const qObj = (rawQuery && typeof rawQuery === 'object' ? rawQuery : {}) as Record<string, unknown>;
+  const [dashboard, m04Spec] = await Promise.all([
+    getScopedReportsDashboard(user, rawQuery),
+    getM04ResultsReportSpec(user, {
+      websiteId: typeof qObj.websiteId === 'string' ? qObj.websiteId : 'all',
+      preset: typeof qObj.preset === 'string' ? qObj.preset.toUpperCase() : '30D',
+      from: typeof qObj.fromDate === 'string' ? qObj.fromDate : typeof qObj.from === 'string' ? qObj.from : undefined,
+      to: typeof qObj.toDate === 'string' ? qObj.toDate : typeof qObj.to === 'string' ? qObj.to : undefined,
+    }),
+  ]);
   const dateStamp = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Ho_Chi_Minh',
     year: 'numeric',

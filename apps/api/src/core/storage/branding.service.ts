@@ -11,7 +11,27 @@ import type {
 } from '@toantrung/contracts';
 import { APP_CONFIG } from '../config';
 import { recordAuditLog } from '../audit';
+import { bumpDomainRevisions, getOrComputeScopedCache } from '../cache/server-data-cache';
 import { validateAndSanitizeImageBuffer } from './image-validator';
+
+const BRANDING_SETTING_KEYS = [
+  'organizationName',
+  'workspaceName',
+  'loginHeadline',
+  'loginSubheadline',
+  'footerText',
+  'logoAltText',
+  'heroAltText',
+  'heroCoverPosition',
+  'heroCrop',
+  'bannerHeadline',
+  'bannerDescription',
+  'bannerShowButton',
+  'bannerButtonLabel',
+  'bannerButtonHref',
+  'bannerShowImage',
+  'bannerImageAlt',
+];
 
 function getBrandingStorageDir(): string {
   const dir = path.join(APP_CONFIG.getStorageRoot(), 'branding');
@@ -70,19 +90,27 @@ const DEFAULT_BRANDING: PublicBrandingDto = {
   },
 };
 
-export async function getPublicBrandingConfig(): Promise<PublicBrandingDto> {
-  // 1. Fetch system settings
-  const settingsRows = await prisma.systemSetting.findMany();
-  const settings: Record<string, string> = {};
-  for (const s of settingsRows) {
-    settings[s.key] = s.value;
-  }
-
-  // 2. Fetch active branding assets
-  const activeAssets = await prisma.brandingAsset.findMany({
-    where: { isActive: true },
-    include: { uploadedBy: true },
-  });
+export async function getPublicBrandingConfig(bypassCache = false): Promise<PublicBrandingDto> {
+  const cached = await getOrComputeScopedCache<PublicBrandingDto>({
+    key: 'public-branding',
+    domains: ['branding'],
+    ttlMs: 300_000,
+    bypassCache,
+    compute: async () => {
+      // Fetch ONLY branding setting keys in parallel with active assets (avoids scanning multi-MB JSON blobs)
+      const [settingsRows, activeAssets] = await Promise.all([
+        prisma.systemSetting.findMany({
+          where: { key: { in: BRANDING_SETTING_KEYS } },
+        }),
+        prisma.brandingAsset.findMany({
+          where: { isActive: true },
+          include: { uploadedBy: true },
+        }),
+      ]);
+      const settings: Record<string, string> = {};
+      for (const s of settingsRows) {
+        settings[s.key] = s.value;
+      }
 
   const branding: PublicBrandingDto = JSON.parse(JSON.stringify(DEFAULT_BRANDING));
 
@@ -154,7 +182,10 @@ export async function getPublicBrandingConfig(): Promise<PublicBrandingDto> {
     }
   }
 
-  return branding;
+      return branding;
+    },
+  });
+  return cached.data;
 }
 
 export async function updateBrandingMetadata(
@@ -197,7 +228,8 @@ export async function updateBrandingMetadata(
     ipAddress,
   });
 
-  return getPublicBrandingConfig();
+  bumpDomainRevisions(['branding'], 'branding_meta_updated');
+  return getPublicBrandingConfig(true);
 }
 
 export async function uploadBrandingAsset(params: {
@@ -263,7 +295,8 @@ export async function uploadBrandingAsset(params: {
     ipAddress: params.ipAddress,
   });
 
-  return getPublicBrandingConfig();
+  bumpDomainRevisions(['branding'], 'branding_asset_uploaded');
+  return getPublicBrandingConfig(true);
 }
 
 export async function resetBrandingAssetToDefault(
@@ -285,7 +318,8 @@ export async function resetBrandingAssetToDefault(
     ipAddress,
   });
 
-  return getPublicBrandingConfig();
+  bumpDomainRevisions(['branding'], 'branding_asset_reset');
+  return getPublicBrandingConfig(true);
 }
 
 export async function readBrandingAssetBinary(

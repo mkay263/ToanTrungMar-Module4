@@ -16,6 +16,7 @@ import {
   resolveDashboardScope,
   sanitizeLandingPageUrl,
 } from '../../core/website-catalog';
+import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import {
   getGa4LiveSnapshotsForProperties,
   getGa4RealtimeSnapshotNonBlocking,
@@ -85,10 +86,20 @@ export async function getM02TrafficInteractionSpec(params?: {
   pageSize?: number;
   adsPage?: number;
   adsPageSize?: number;
+  bypassCache?: boolean;
 }): Promise<M02TrafficInteractionDto> {
   const scope = await resolveDashboardScope(params);
   const propIds = scope.ga4PropertyIds;
-  const adsCfg = await getGoogleAdsApiConfig();
+  const cacheKey = `m02-spec:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.adsPage || 1}:${params?.adsPageSize || 20}`;
+
+  const cached = await getOrComputeScopedCache<M02TrafficInteractionDto>({
+    key: cacheKey,
+    domains: ['tracking', 'leads', 'websites'],
+    ttlMs: 30_000,
+    bypassCache: params?.bypassCache,
+    compute: async () => {
+      const checkedAt = new Date().toISOString();
+      const adsCfg = await getGoogleAdsApiConfig();
 
   const [
     accountRows,
@@ -961,11 +972,28 @@ export async function getM02TrafficInteractionSpec(params?: {
 
   const ga4Logs = syncLogs.filter((s) => s.platform === 'ga4');
   const lastLog = ga4Logs[0] || null;
-  const lastSuccessLog = ga4Logs.find((s) => s.status === 'success') || null;
+  const lastSuccessLog = ga4Logs.find((s) => s.status === 'success' || s.status === 'partial') || null;
   const isError = lastLog?.status === 'failed' && !hasTrafficData;
+
+  // Determine truthful latest source data date from actual daily rows (never blind endDateStr)
+  let latestGa4LiveDailyDate: string | null = null;
+  let latestGa4FetchedAt: string | null = null;
+  for (const snap of ga4LiveSnaps) {
+    if (snap.fetchedAt && (!latestGa4FetchedAt || snap.fetchedAt > latestGa4FetchedAt)) {
+      latestGa4FetchedAt = snap.fetchedAt;
+    }
+    for (const d of snap.daily) {
+      if ((d.sessions > 0 || d.pageViews > 0 || d.users > 0) && (!latestGa4LiveDailyDate || d.date > latestGa4LiveDailyDate)) {
+        latestGa4LiveDailyDate = d.date;
+      }
+    }
+  }
+  const latestDbDate = accountRows[accountRows.length - 1]?.metricDate || null;
   const latestDataThrough =
-    accountRows[accountRows.length - 1]?.metricDate ||
-    (ga4LiveSnaps.length > 0 ? scope.endDateStr : null);
+    latestGa4LiveDailyDate && latestDbDate
+      ? (latestGa4LiveDailyDate > latestDbDate ? latestGa4LiveDailyDate : latestDbDate)
+      : latestGa4LiveDailyDate || latestDbDate;
+  const realLastSuccessAt = latestGa4FetchedAt || lastSuccessLog?.completedAt?.toISOString() || null;
 
   return {
     scope: {
@@ -981,10 +1009,13 @@ export async function getM02TrafficInteractionSpec(params?: {
       previousEndDate: scope.prevEndDateStr,
     },
     freshness: {
-      lastCheckedAt: ga4LiveSnaps[0]?.fetchedAt || lastLog?.startedAt?.toISOString() || new Date().toISOString(),
-      lastSuccessAt:
-        ga4LiveSnaps[0]?.fetchedAt || lastSuccessLog?.completedAt?.toISOString() || null,
+      lastCheckedAt: checkedAt,
+      checkedAt,
+      lastSuccessAt: realLastSuccessAt,
+      lastSyncedAt: realLastSuccessAt,
       dataThrough: latestDataThrough,
+      latestSourceDataAt: latestDataThrough,
+      fromCache: false,
       state: isError
         ? 'ERROR'
         : !hasTrafficData
@@ -1055,4 +1086,19 @@ export async function getM02TrafficInteractionSpec(params?: {
     },
     ads: adsSection,
   };
+    },
+  });
+
+  if (cached.fromCache) {
+    return {
+      ...cached.data,
+      freshness: {
+        ...cached.data.freshness,
+        lastCheckedAt: new Date().toISOString(),
+        checkedAt: new Date().toISOString(),
+        fromCache: true,
+      },
+    };
+  }
+  return cached.data;
 }
