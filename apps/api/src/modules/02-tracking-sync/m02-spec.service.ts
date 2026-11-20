@@ -3,10 +3,15 @@ import {
   isL2Valid,
   normalizeMarketingChannelDisplay,
   type M02AdsSectionDto,
+  type M02CampaignDailyRowDto,
   type M02CampaignRowDto,
   type M02ChannelRowDto,
+  type M02Ga4EventItemDto,
   type M02InteractionRowDto,
+  type M02LandingPageCategoryKey,
+  type M02LandingPageCategorySummaryDto,
   type M02LandingPageRowDto,
+  type M02SourceMediumRowDto,
   type M02TrafficInteractionDto,
   type M02TrafficSeriesPointDto,
 } from '@toantrung/contracts';
@@ -21,7 +26,12 @@ import {
   getGa4LiveSnapshotsForProperties,
   getGa4RealtimeSnapshotNonBlocking,
 } from './ga4-live-cache.service';
-import { getGoogleAdsApiConfig, getGoogleConnection } from './google-oauth.service';
+import { getGoogleAdsLiveSnapshotNonBlocking } from './gads-live-cache.service';
+import {
+  getCampaignFinalUrlsMapNonBlocking,
+  getGoogleAdsApiConfig,
+  getGoogleConnection,
+} from './google-oauth.service';
 import { getStoredTouchpoints } from './service';
 
 function mapGa4ChannelGroup(rawChannelGroup: string): {
@@ -77,6 +87,89 @@ function conversionsMicrosToNumber(micros: bigint | null | undefined): number {
   return Number((Number(micros) / 1_000_000).toFixed(2));
 }
 
+function cleanLandingPagePath(rawUrl: string): string {
+  const sanitized = sanitizeLandingPageUrl(rawUrl);
+  if (!sanitized || sanitized === '(not set)') return sanitized || '/';
+  try {
+    const isFull = /^https?:\/\//i.test(sanitized);
+    const parsed = new URL(isFull ? sanitized : `https://example.local${sanitized.startsWith('/') ? '' : '/'}${sanitized}`);
+    const noiseKeys = new Set([
+      'gtm_latency',
+      'gtm_debug',
+      'gclid',
+      'fbclid',
+      'wbraid',
+      'gbraid',
+      'gad_source',
+      '_gl',
+      'srsltid',
+    ]);
+    for (const k of Array.from(parsed.searchParams.keys())) {
+      const kl = k.toLowerCase();
+      if (noiseKeys.has(kl) || kl.startsWith('utm_')) {
+        parsed.searchParams.delete(k);
+      }
+    }
+    const qs = parsed.searchParams.toString();
+    const pathPart = parsed.pathname || '/';
+    if (isFull) {
+      return `${parsed.origin}${pathPart}${qs ? `?${qs}` : ''}`;
+    }
+    return `${pathPart}${qs ? `?${qs}` : ''}`;
+  } catch {
+    return sanitized;
+  }
+}
+
+function classifyLandingPageCategory(pathStr: string): {
+  categoryKey: M02LandingPageCategoryKey;
+  categoryLabel: string;
+} {
+  const lower = (pathStr || '').trim().toLowerCase();
+  if (
+    !lower ||
+    lower === '(not set)' ||
+    lower.includes('/wp-admin') ||
+    lower.includes('/wp-login') ||
+    lower.includes('/admin') ||
+    lower.includes('gtm_latency') ||
+    lower.includes('/preview') ||
+    lower.includes('/cart') ||
+    lower.includes('/checkout') ||
+    /[?&]p=\d+/.test(lower)
+  ) {
+    return { categoryKey: 'technical_noise', categoryLabel: 'Trang kỹ thuật / (not set)' };
+  }
+
+  let pathnameOnly = lower;
+  try {
+    if (/^https?:\/\//i.test(lower)) {
+      pathnameOnly = new URL(lower).pathname.toLowerCase();
+    } else {
+      pathnameOnly = lower.split('?')[0];
+    }
+  } catch {
+    // ignore
+  }
+
+  if (pathnameOnly === '/' || pathnameOnly === '' || pathnameOnly === '/trang-chu/' || pathnameOnly === '/home/') {
+    return { categoryKey: 'homepage', categoryLabel: 'Trang chủ' };
+  }
+  if (/bao-gia|bang-gia|lien-he|tu-van|contact|quote/.test(pathnameOnly)) {
+    return { categoryKey: 'quote_contact', categoryLabel: 'Báo giá & Liên hệ' };
+  }
+  if (/du-an|cong-trinh|project|case-study/.test(pathnameOnly)) {
+    return { categoryKey: 'project', categoryLabel: 'Dự án thực tế' };
+  }
+  if (/san-pham|man-hinh-led|bang-led|bang-dien-tu|module-led|led-|cabin|bo-xu-ly|product/.test(pathnameOnly)) {
+    return { categoryKey: 'product', categoryLabel: 'Sản phẩm LED' };
+  }
+  if (/tin-tuc|blog|kien-thuc|huong-dan|kich-thuoc|bai-viet|news|chia-se/.test(pathnameOnly)) {
+    return { categoryKey: 'content_seo', categoryLabel: 'Tin tức & Kiến thức' };
+  }
+  return { categoryKey: 'other', categoryLabel: 'Trang khác' };
+}
+
 export async function getM02TrafficInteractionSpec(params?: {
   websiteId?: string | null;
   preset?: string | null;
@@ -86,11 +179,13 @@ export async function getM02TrafficInteractionSpec(params?: {
   pageSize?: number;
   adsPage?: number;
   adsPageSize?: number;
+  adsScope?: 'all' | 'website';
+  compare?: boolean;
   bypassCache?: boolean;
 }): Promise<M02TrafficInteractionDto> {
   const scope = await resolveDashboardScope(params);
   const propIds = scope.ga4PropertyIds;
-  const cacheKey = `m02-spec:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.adsPage || 1}:${params?.adsPageSize || 20}`;
+  const cacheKey = `m02-spec:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.adsPage || 1}:${params?.adsPageSize || 20}:${params?.adsScope || 'default'}:${params?.compare ? 'cmp' : 'nocmp'}`;
 
   const cached = await getOrComputeScopedCache<M02TrafficInteractionDto>({
     key: cacheKey,
@@ -106,6 +201,7 @@ export async function getM02TrafficInteractionSpec(params?: {
     prevAccountRows,
     pageRows,
     adsMetricRows,
+    prevAdsMetricRows,
     realAdsCatalog,
     googleOAuthConn,
     leads,
@@ -115,6 +211,10 @@ export async function getM02TrafficInteractionSpec(params?: {
     syncLogs,
     realtime,
     ga4LiveSnaps,
+    prevGa4LiveSnaps,
+    gadsLiveSnap,
+    prevGadsLiveSnap,
+    finalUrlsMap,
   ] = await Promise.all([
     propIds.length > 0
       ? prisma.platformDailyMetric.findMany({
@@ -173,6 +273,31 @@ export async function getM02TrafficInteractionSpec(params?: {
       },
       orderBy: { metricDate: 'asc' },
     }),
+    params?.compare
+      ? prisma.platformDailyMetric.findMany({
+          where: {
+            platform: { in: ['google_ads', 'facebook_ads', 'facebook'] },
+            grain: 'campaign',
+            metricDate: { gte: scope.prevStartDateStr, lte: scope.prevEndDateStr },
+            NOT: [
+              { accountPropertyId: { startsWith: 'GA4-' } },
+              { campaignExternalId: { startsWith: 'ga4_' } },
+            ],
+          },
+          include: {
+            campaign: {
+              select: {
+                id: true,
+                campaignCode: true,
+                campaignName: true,
+                utmCampaignSlug: true,
+                isActive: true,
+                platform: true,
+              },
+            },
+          },
+        })
+      : Promise.resolve([]),
     prisma.campaign.findMany({
       where: {
         platform: 'google_ads',
@@ -213,6 +338,14 @@ export async function getM02TrafficInteractionSpec(params?: {
     }),
     getGa4RealtimeSnapshotNonBlocking(propIds),
     getGa4LiveSnapshotsForProperties(propIds, scope.startDateStr, scope.endDateStr, false),
+    params?.compare
+      ? getGa4LiveSnapshotsForProperties(propIds, scope.prevStartDateStr, scope.prevEndDateStr, false)
+      : Promise.resolve([]),
+    getGoogleAdsLiveSnapshotNonBlocking(scope.startDateStr, scope.endDateStr, false),
+    params?.compare
+      ? getGoogleAdsLiveSnapshotNonBlocking(scope.prevStartDateStr, scope.prevEndDateStr, false)
+      : Promise.resolve(null),
+    getCampaignFinalUrlsMapNonBlocking(),
   ]);
 
   const scopedLeads = leads.filter((l) => matchesWebsiteDomain(l.sourceWebsite, scope.selectedWebsite));
@@ -233,7 +366,7 @@ export async function getM02TrafficInteractionSpec(params?: {
   // Chuỗi ngày liên tục (C07): ưu tiên dữ liệu chi tiết GA4 đã cache, fallback sang accountRows trong DB
   const dailyMap = new Map<
     string,
-    { sessions: number; pageViews: number; users: number | null; hasRow: boolean }
+    { sessions: number; pageViews: number; users: number | null; newUsers: number | null; hasRow: boolean }
   >();
   if (ga4LiveSnaps.length > 0) {
     const canShowDailyUsers = propIds.length === 1 && ga4LiveSnaps.length === 1;
@@ -243,10 +376,14 @@ export async function getM02TrafficInteractionSpec(params?: {
           sessions: 0,
           pageViews: 0,
           users: canShowDailyUsers ? 0 : null,
+          newUsers: 0,
           hasRow: false,
         };
         cur.sessions += d.sessions;
         cur.pageViews += d.pageViews;
+        if (typeof d.newUsers === 'number') {
+          cur.newUsers = (cur.newUsers ?? 0) + d.newUsers;
+        }
         if (canShowDailyUsers) {
           cur.users = (cur.users ?? 0) + d.users;
         }
@@ -260,6 +397,7 @@ export async function getM02TrafficInteractionSpec(params?: {
         sessions: 0,
         pageViews: 0,
         users: null,
+        newUsers: null,
         hasRow: false,
       };
       cur.sessions += r.clicks || r.pageViews;
@@ -285,9 +423,97 @@ export async function getM02TrafficInteractionSpec(params?: {
       sessions: hit ? hit.sessions : null,
       pageViews: hit ? hit.pageViews : null,
       users: hit ? hit.users : null,
+      newUsers: hit ? hit.newUsers : null,
       isMissingData: !hit,
     });
   }
+
+  // Chuỗi ngày kỳ trước khi bật So sánh (GA4)
+  let previousTrafficSeries: M02TrafficSeriesPointDto[] | undefined;
+  if (params?.compare) {
+    const prevDailyMap = new Map<
+      string,
+      { sessions: number; pageViews: number; users: number | null; newUsers: number | null }
+    >();
+    if (prevGa4LiveSnaps.length > 0) {
+      for (const snap of prevGa4LiveSnaps) {
+        for (const d of snap.daily) {
+          const cur = prevDailyMap.get(d.date) || {
+            sessions: 0,
+            pageViews: 0,
+            users: null,
+            newUsers: 0,
+          };
+          cur.sessions += d.sessions;
+          cur.pageViews += d.pageViews;
+          if (typeof d.newUsers === 'number') {
+            cur.newUsers = (cur.newUsers ?? 0) + d.newUsers;
+          }
+          prevDailyMap.set(d.date, cur);
+        }
+      }
+    } else {
+      for (const r of prevAccountRows) {
+        const cur = prevDailyMap.get(r.metricDate) || {
+          sessions: 0,
+          pageViews: 0,
+          users: null,
+          newUsers: null,
+        };
+        cur.sessions += r.clicks || r.pageViews;
+        cur.pageViews += r.pageViews;
+        prevDailyMap.set(r.metricDate, cur);
+      }
+    }
+    previousTrafficSeries = [];
+    const prevStartNoon = new Date(`${scope.prevStartDateStr}T12:00:00+07:00`);
+    for (let i = 0; i < scope.totalCalendarDays; i += 1) {
+      const d = new Date(prevStartNoon.getTime() + i * 24 * 60 * 60 * 1000);
+      const dateStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+      const hit = prevDailyMap.get(dateStr);
+      previousTrafficSeries.push({
+        date: dateStr,
+        sessions: hit ? hit.sessions : null,
+        pageViews: hit ? hit.pageViews : null,
+        users: hit ? hit.users : null,
+        newUsers: hit ? hit.newUsers : null,
+        isMissingData: !hit,
+      });
+    }
+  }
+
+  // Nguồn / Phương thức chi tiết (sessionSourceMedium từ GA4)
+  const srcMedMap = new Map<
+    string,
+    { sourceMedium: string; sessions: number; newUsers: number; engagedSessions: number }
+  >();
+  for (const snap of ga4LiveSnaps) {
+    for (const sm of snap.sourceMediums || []) {
+      const cur = srcMedMap.get(sm.sourceMedium) || {
+        sourceMedium: sm.sourceMedium,
+        sessions: 0,
+        newUsers: 0,
+        engagedSessions: 0,
+      };
+      cur.sessions += sm.sessions;
+      cur.newUsers += sm.newUsers;
+      cur.engagedSessions += sm.engagedSessions;
+      srcMedMap.set(sm.sourceMedium, cur);
+    }
+  }
+  const sourceMediumRows: M02SourceMediumRowDto[] = Array.from(srcMedMap.values())
+    .sort((a, b) => b.sessions - a.sessions || b.newUsers - a.newUsers)
+    .slice(0, 40)
+    .map((r) => ({
+      ...r,
+      engagementRatePct:
+        r.sessions > 0 ? Number(((r.engagedSessions / r.sessions) * 100).toFixed(2)) : null,
+    }));
 
   const hasLiveGa4 = ga4LiveSnaps.length > 0;
   const hasTrafficData = hasLiveGa4 || accountRows.length > 0;
@@ -370,16 +596,35 @@ export async function getM02TrafficInteractionSpec(params?: {
 
   const ga4FormEventEntry = Array.from(ga4EventMap.entries()).filter(([k]) => {
     const l = k.toLowerCase();
-    return l === 'form_submit' || l === 'generate_lead' || l === 'contact_form_submit';
+    return (
+      l === 'form_submit' ||
+      l === 'generate_lead' ||
+      l === 'contact_form_submit' ||
+      l === 'ga4_form' ||
+      (l.includes('form') && !l.includes('start') && !l.includes('view'))
+    );
   });
   const ga4PhoneEventEntry = Array.from(ga4EventMap.entries()).filter(([k]) => {
     const l = k.toLowerCase();
-    return l.includes('click_call') || l.includes('phone_click') || l === 'tel_click';
+    return (
+      l.includes('click_call') ||
+      l.includes('phone') ||
+      l.includes('tel_click') ||
+      l.includes('call_click')
+    );
   });
   const ga4ZaloEventEntry = Array.from(ga4EventMap.entries()).filter(([k]) => {
     const l = k.toLowerCase();
-    return l.includes('zalo_click') || l.includes('click_zalo');
+    return l.includes('zalo');
   });
+
+  const allGa4Events: M02Ga4EventItemDto[] = Array.from(ga4EventMap.entries())
+    .map(([eventName, v]) => ({
+      eventName,
+      eventCount: v.count,
+      totalUsers: v.users,
+    }))
+    .sort((a, b) => b.eventCount - a.eventCount);
 
   const hasFormTracking = ga4FormEventEntry.length > 0 || formSubmitTp > 0;
   const formEventTotal = hasFormTracking
@@ -489,7 +734,7 @@ export async function getM02TrafficInteractionSpec(params?: {
       sessions: g.sessions,
     }));
 
-  // Landing pages table
+  // Landing pages table (Cleaned URL + newUsers focus + category classification)
   const lpMap = new Map<
     string,
     {
@@ -498,6 +743,10 @@ export async function getM02TrafficInteractionSpec(params?: {
       engagedSessions: number | null;
       conversions: number | null;
       validLeadCount: number;
+      newUsers: number | null;
+      totalUsers: number | null;
+      categoryKey: M02LandingPageCategoryKey;
+      categoryLabel: string;
     }
   >();
 
@@ -505,31 +754,47 @@ export async function getM02TrafficInteractionSpec(params?: {
   if (hasLiveLandingPages) {
     for (const snap of ga4LiveSnaps) {
       for (const lp of snap.landingPages || []) {
-        const cleanUrl = sanitizeLandingPageUrl(lp.landingPage);
+        const cleanUrl = cleanLandingPagePath(lp.landingPage);
+        const cat = classifyLandingPageCategory(cleanUrl);
         const cur = lpMap.get(cleanUrl) || {
           landingPage: cleanUrl,
           sessions: 0,
           engagedSessions: 0,
           conversions: hasFormTracking ? 0 : null,
           validLeadCount: 0,
+          newUsers: null,
+          totalUsers: null,
+          categoryKey: cat.categoryKey,
+          categoryLabel: cat.categoryLabel,
         };
         cur.sessions += lp.sessions;
         cur.engagedSessions = (cur.engagedSessions ?? 0) + lp.engagedSessions;
         if (cur.conversions !== null) {
           cur.conversions += lp.conversions;
         }
+        if (typeof lp.newUsers === 'number') {
+          cur.newUsers = (cur.newUsers ?? 0) + lp.newUsers;
+        }
+        if (typeof lp.totalUsers === 'number') {
+          cur.totalUsers = (cur.totalUsers ?? 0) + lp.totalUsers;
+        }
         lpMap.set(cleanUrl, cur);
       }
     }
   } else {
     for (const p of pageRows) {
-      const cleanUrl = sanitizeLandingPageUrl(p.pageUrlRaw || p.pagePathNorm || p.campaignExternalId);
+      const cleanUrl = cleanLandingPagePath(p.pageUrlRaw || p.pagePathNorm || p.campaignExternalId);
+      const cat = classifyLandingPageCategory(cleanUrl);
       const cur = lpMap.get(cleanUrl) || {
         landingPage: cleanUrl,
         sessions: 0,
         engagedSessions: null,
         conversions: null,
         validLeadCount: 0,
+        newUsers: null,
+        totalUsers: null,
+        categoryKey: cat.categoryKey,
+        categoryLabel: cat.categoryLabel,
       };
       cur.sessions += p.clicks || p.pageViews;
       lpMap.set(cleanUrl, cur);
@@ -538,13 +803,18 @@ export async function getM02TrafficInteractionSpec(params?: {
 
   for (const l of validLeads) {
     if (l.tracking?.landingPageUrl) {
-      const cleanUrl = sanitizeLandingPageUrl(l.tracking.landingPageUrl);
+      const cleanUrl = cleanLandingPagePath(l.tracking.landingPageUrl);
+      const cat = classifyLandingPageCategory(cleanUrl);
       const cur = lpMap.get(cleanUrl) || {
         landingPage: cleanUrl,
         sessions: 0,
         engagedSessions: hasLiveLandingPages ? 0 : null,
         conversions: null,
         validLeadCount: 0,
+        newUsers: null,
+        totalUsers: null,
+        categoryKey: cat.categoryKey,
+        categoryLabel: cat.categoryLabel,
       };
       cur.validLeadCount += 1;
       lpMap.set(cleanUrl, cur);
@@ -552,7 +822,7 @@ export async function getM02TrafficInteractionSpec(params?: {
   }
 
   const allLandingRows: M02LandingPageRowDto[] = Array.from(lpMap.values())
-    .sort((a, b) => b.sessions - a.sessions || b.validLeadCount - a.validLeadCount)
+    .sort((a, b) => (b.newUsers ?? b.sessions) - (a.newUsers ?? a.sessions) || b.validLeadCount - a.validLeadCount)
     .map((r) => ({
       landingPage: r.landingPage,
       sessions: r.sessions,
@@ -563,7 +833,66 @@ export async function getM02TrafficInteractionSpec(params?: {
           : null,
       successfulFormCount: r.conversions,
       validLeadCount: r.validLeadCount,
+      newUsers: r.newUsers,
+      totalUsers: r.totalUsers,
+      newUserRatePct:
+        r.newUsers !== null && r.totalUsers !== null && r.totalUsers > 0
+          ? Number(((r.newUsers / r.totalUsers) * 100).toFixed(1))
+          : null,
+      categoryKey: r.categoryKey,
+      categoryLabel: r.categoryLabel,
     }));
+
+  // Aggregate landing page categories (e.g. Sản phẩm LED, Dự án thực tế, Báo giá & Liên hệ...)
+  const lpCatMap = new Map<
+    string,
+    {
+      categoryKey: string;
+      categoryLabel: string;
+      pageCount: number;
+      newUsers: number | null;
+      totalUsers: number | null;
+      sessions: number;
+      engagedSessions: number | null;
+      validLeadCount: number;
+    }
+  >();
+  for (const row of allLandingRows) {
+    const key = row.categoryKey || 'other';
+    const label = row.categoryLabel || 'Trang khác';
+    const cur = lpCatMap.get(key) || {
+      categoryKey: key,
+      categoryLabel: label,
+      pageCount: 0,
+      newUsers: null,
+      totalUsers: null,
+      sessions: 0,
+      engagedSessions: null,
+      validLeadCount: 0,
+    };
+    cur.pageCount += 1;
+    cur.sessions += row.sessions;
+    cur.validLeadCount += row.validLeadCount;
+    if (typeof row.newUsers === 'number') {
+      cur.newUsers = (cur.newUsers ?? 0) + row.newUsers;
+    }
+    if (typeof row.totalUsers === 'number') {
+      cur.totalUsers = (cur.totalUsers ?? 0) + row.totalUsers;
+    }
+    if (typeof row.engagedSessions === 'number') {
+      cur.engagedSessions = (cur.engagedSessions ?? 0) + row.engagedSessions;
+    }
+    lpCatMap.set(key, cur);
+  }
+  const landingPageCategories: M02LandingPageCategorySummaryDto[] = Array.from(lpCatMap.values())
+    .map((c) => ({
+      ...c,
+      engagementRatePct:
+        c.engagedSessions !== null && c.sessions > 0
+          ? Number(((c.engagedSessions / c.sessions) * 100).toFixed(1))
+          : null,
+    }))
+    .sort((a, b) => (b.newUsers ?? b.sessions) - (a.newUsers ?? a.sessions));
 
   const interactionRows: M02InteractionRowDto[] = [
     {
@@ -632,7 +961,9 @@ export async function getM02TrafficInteractionSpec(params?: {
     );
   };
 
-  const allScopedAdLeads = scopedLeads.filter(isPaidAdLead);
+  const effectiveAdsAllWebsites = params?.adsScope === 'all' || !scope.selectedWebsite;
+  const adsLeadsBase = effectiveAdsAllWebsites ? leads : scopedLeads;
+  const allScopedAdLeads = adsLeadsBase.filter(isPaidAdLead);
   const validScopedAdLeads = allScopedAdLeads.filter((l) => isL2Valid(l));
   const wonScopedAdLeads = validScopedAdLeads.filter((l) => l.pipelineStatus === 'won');
 
@@ -678,6 +1009,10 @@ export async function getM02TrafficInteractionSpec(params?: {
       clicks: number;
       conversionsMicros: bigint;
       mappedWebsite: string | null;
+      dailyMap: Map<
+        string,
+        { costMicros: bigint; impressions: number; clicks: number; conversionsMicros: bigint }
+      >;
     }
   >();
 
@@ -698,11 +1033,25 @@ export async function getM02TrafficInteractionSpec(params?: {
         m.campaign?.utmCampaignSlug,
         m.pageUrlRaw,
       ),
+      dailyMap: new Map(),
     };
     cur.costMicros += m.spendMicros ?? 0n;
     cur.impressions += m.impressions || 0;
     cur.clicks += m.clicks || 0;
     cur.conversionsMicros += m.conversionsMicros ?? 0n;
+    if (m.metricDate) {
+      const dHit = cur.dailyMap.get(m.metricDate) || {
+        costMicros: 0n,
+        impressions: 0,
+        clicks: 0,
+        conversionsMicros: 0n,
+      };
+      dHit.costMicros += m.spendMicros ?? 0n;
+      dHit.impressions += m.impressions || 0;
+      dHit.clicks += m.clicks || 0;
+      dHit.conversionsMicros += m.conversionsMicros ?? 0n;
+      cur.dailyMap.set(m.metricDate, dHit);
+    }
     if (!cur.mappedWebsite) {
       cur.mappedWebsite = resolveCampaignDomain(
         cname,
@@ -726,7 +1075,61 @@ export async function getM02TrafficInteractionSpec(params?: {
         clicks: 0,
         conversionsMicros: 0n,
         mappedWebsite: resolveCampaignDomain(camp.campaignName, camp.utmCampaignSlug, null),
+        dailyMap: new Map(),
       });
+    }
+  }
+
+  // Hợp nhất dữ liệu live theo ngày từ Google Ads API (lấp đầy cả các kỳ >30 ngày trước và tránh cộng trùng)
+  if (gadsLiveSnap && gadsLiveSnap.campaignDaily.length > 0) {
+    for (const d of gadsLiveSnap.campaignDaily) {
+      const cid = d.campaignId;
+      const catalogMatch = realAdsCatalog.find(
+        (rc) => rc.campaignCode.replace(/^GADS_/, '') === cid,
+      );
+      const cur = campAggMap.get(cid) || {
+        campaignId: cid,
+        campaignName: d.campaignName,
+        status: d.status || 'ENABLED',
+        channelType: 'google_ads',
+        costMicros: 0n,
+        impressions: 0,
+        clicks: 0,
+        conversionsMicros: 0n,
+        mappedWebsite: resolveCampaignDomain(
+          d.campaignName,
+          catalogMatch?.utmCampaignSlug,
+          (finalUrlsMap[cid] || [])[0] || null,
+        ),
+        dailyMap: new Map(),
+      };
+      cur.campaignName = d.campaignName || cur.campaignName;
+      cur.status = d.status || cur.status;
+      cur.dailyMap.set(d.date, {
+        costMicros: BigInt(Math.round(d.cost * 1_000_000)),
+        impressions: d.impressions,
+        clicks: d.clicks,
+        conversionsMicros: BigInt(Math.round(d.conversions * 1_000_000)),
+      });
+      campAggMap.set(cid, cur);
+    }
+
+    for (const cur of campAggMap.values()) {
+      if (cur.dailyMap.size === 0) continue;
+      let sumCost = 0n;
+      let sumImpr = 0;
+      let sumClk = 0;
+      let sumConv = 0n;
+      for (const dm of cur.dailyMap.values()) {
+        sumCost += dm.costMicros;
+        sumImpr += dm.impressions;
+        sumClk += dm.clicks;
+        sumConv += dm.conversionsMicros;
+      }
+      cur.costMicros = sumCost;
+      cur.impressions = sumImpr;
+      cur.clicks = sumClk;
+      cur.conversionsMicros = sumConv;
     }
   }
 
@@ -770,11 +1173,33 @@ export async function getM02TrafficInteractionSpec(params?: {
       c.mappedWebsite ||
       (matchCrm && matchCrm.websites.size === 1 ? Array.from(matchCrm.websites)[0] : null);
 
-    // Nếu đang lọc 1 website cụ thể mà campaign cấp tài khoản chưa xác định thuộc website nào -> không tự chia tỷ lệ chi phí!
-    if (scope.selectedWebsite && (!resolvedWebsite || !matchesWebsiteDomain(resolvedWebsite, scope.selectedWebsite))) {
+    // Nếu đang lọc 1 website cụ thể (và không bật chế độ xem tất cả Ads) thì bỏ qua chiến dịch của website khác / chưa gán website
+    if (
+      !effectiveAdsAllWebsites &&
+      scope.selectedWebsite &&
+      (!resolvedWebsite || !matchesWebsiteDomain(resolvedWebsite, scope.selectedWebsite))
+    ) {
       if (!resolvedWebsite) unattributedAccountCampaignCount += 1;
       continue;
     }
+
+    const finalUrls = finalUrlsMap[c.campaignId] || [];
+    const primaryDestinationUrl =
+      finalUrls[0] || (resolvedWebsite ? `https://${resolvedWebsite}` : null);
+    const dailyRows: M02CampaignDailyRowDto[] = Array.from(c.dailyMap.entries())
+      .map(([date, dm]) => {
+        const dCost = microsToUnitNumber(dm.costMicros);
+        return {
+          date,
+          cost: dCost,
+          impressions: dm.impressions,
+          clicks: dm.clicks,
+          ctrPct: dm.impressions > 0 ? Number(((dm.clicks / dm.impressions) * 100).toFixed(2)) : null,
+          avgCpc: dm.clicks > 0 ? Number((dCost / dm.clicks).toFixed(0)) : null,
+          conversions: conversionsMicrosToNumber(dm.conversionsMicros),
+        };
+      })
+      .sort((a, b) => b.date.localeCompare(a.date));
 
     const cost = microsToUnitNumber(c.costMicros);
     const conversions = conversionsMicrosToNumber(c.conversionsMicros);
@@ -809,6 +1234,10 @@ export async function getM02TrafficInteractionSpec(params?: {
         : attrValid > 0
           ? 'Đã đối soát bằng UTM / GCLID với CRM'
           : 'Chưa phát sinh Lead CRM khớp khóa chiến dịch trong kỳ',
+      targetWebsiteDomain: resolvedWebsite,
+      finalUrls,
+      primaryDestinationUrl,
+      dailyRows,
     });
   }
 
@@ -854,41 +1283,190 @@ export async function getM02TrafficInteractionSpec(params?: {
       ? Number((adsTotalCost / validScopedAdLeads.length).toFixed(0))
       : null;
 
-  // Chuỗi ngày cho Quảng cáo (lọc theo đúng các chiến dịch thuộc phạm vi website đang chọn)
-  const adsDayMap = new Map<string, { cost: number; conversions: number; clicks: number }>();
+  // Chuỗi ngày cho Quảng cáo (lấy từ dailyRows đã hợp nhất live+DB của đúng các chiến dịch thuộc phạm vi đang xem)
+  const adsDayMap = new Map<
+    string,
+    { cost: number; conversions: number; clicks: number; impressions: number }
+  >();
   if (hasConnectedAdsData) {
-    for (const m of campaignRowsFromDb) {
-      const cid = m.campaignExternalId || String(m.campaignId || 'unmapped');
-      if (scope.selectedWebsite && !includedCampaignIds.has(cid)) continue;
-      const cur = adsDayMap.get(m.metricDate) || { cost: 0, conversions: 0, clicks: 0 };
-      cur.cost += microsToUnitNumber(m.spendMicros);
-      cur.conversions += conversionsMicrosToNumber(m.conversionsMicros);
-      cur.clicks += m.clicks || 0;
-      adsDayMap.set(m.metricDate, cur);
+    for (const c of campaignList) {
+      for (const d of c.dailyRows || []) {
+        const cur = adsDayMap.get(d.date) || {
+          cost: 0,
+          conversions: 0,
+          clicks: 0,
+          impressions: 0,
+        };
+        cur.cost += d.cost;
+        cur.conversions += d.conversions;
+        cur.clicks += d.clicks;
+        cur.impressions += d.impressions;
+        adsDayMap.set(d.date, cur);
+      }
     }
   }
 
-  const canBuildZeroSeries = hasConnectedAdsData && (!scope.selectedWebsite || campaignList.length > 0);
+  const canBuildZeroSeries =
+    hasConnectedAdsData && (effectiveAdsAllWebsites || !scope.selectedWebsite || campaignList.length > 0);
   const adsSeries = trafficSeries.map((pt) => {
     const hit = adsDayMap.get(pt.date);
+    if (!hit) {
+      return {
+        date: pt.date,
+        cost: canBuildZeroSeries ? 0 : null,
+        conversions: canBuildZeroSeries ? 0 : null,
+        clicks: canBuildZeroSeries ? 0 : null,
+        impressions: canBuildZeroSeries ? 0 : null,
+        ctrPct: canBuildZeroSeries ? 0 : null,
+        avgCpc: canBuildZeroSeries ? 0 : null,
+      };
+    }
+    const costVal = Number(hit.cost.toFixed(0));
     return {
       date: pt.date,
-      cost: hit ? Number(hit.cost.toFixed(0)) : canBuildZeroSeries ? 0 : null,
-      conversions: hit ? Number(hit.conversions.toFixed(2)) : canBuildZeroSeries ? 0 : null,
-      clicks: hit ? hit.clicks : canBuildZeroSeries ? 0 : null,
+      cost: costVal,
+      conversions: Number(hit.conversions.toFixed(2)),
+      clicks: hit.clicks,
+      impressions: hit.impressions,
+      ctrPct: hit.impressions > 0 ? Number(((hit.clicks / hit.impressions) * 100).toFixed(2)) : 0,
+      avgCpc: hit.clicks > 0 ? Math.round(costVal / hit.clicks) : 0,
     };
   });
+
+  // Chuỗi ngày kỳ trước cho Google Ads khi bật So sánh
+  let adsPreviousSeries: M02AdsSectionDto['previousSeries'];
+  if (params?.compare && hasConnectedAdsData) {
+    const prevAdsDayMap = new Map<
+      string,
+      { cost: number; conversions: number; clicks: number; impressions: number }
+    >();
+    if (prevGadsLiveSnap && prevGadsLiveSnap.campaignDaily.length > 0) {
+      for (const d of prevGadsLiveSnap.campaignDaily) {
+        if (!effectiveAdsAllWebsites && scope.selectedWebsite && !includedCampaignIds.has(d.campaignId)) {
+          continue;
+        }
+        const cur = prevAdsDayMap.get(d.date) || {
+          cost: 0,
+          conversions: 0,
+          clicks: 0,
+          impressions: 0,
+        };
+        cur.cost += d.cost;
+        cur.conversions += d.conversions;
+        cur.clicks += d.clicks;
+        cur.impressions += d.impressions;
+        prevAdsDayMap.set(d.date, cur);
+      }
+    } else {
+      for (const m of prevAdsMetricRows) {
+        const cid = m.campaignExternalId || String(m.campaignId || 'unmapped');
+        if (!effectiveAdsAllWebsites && scope.selectedWebsite && !includedCampaignIds.has(cid)) {
+          continue;
+        }
+        const cur = prevAdsDayMap.get(m.metricDate) || {
+          cost: 0,
+          conversions: 0,
+          clicks: 0,
+          impressions: 0,
+        };
+        cur.cost += microsToUnitNumber(m.spendMicros);
+        cur.conversions += conversionsMicrosToNumber(m.conversionsMicros);
+        cur.clicks += m.clicks || 0;
+        cur.impressions += m.impressions || 0;
+        prevAdsDayMap.set(m.metricDate, cur);
+      }
+    }
+    adsPreviousSeries = [];
+    const prevStartNoon = new Date(`${scope.prevStartDateStr}T12:00:00+07:00`);
+    for (let i = 0; i < scope.totalCalendarDays; i += 1) {
+      const d = new Date(prevStartNoon.getTime() + i * 24 * 60 * 60 * 1000);
+      const dateStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+      const hit = prevAdsDayMap.get(dateStr);
+      if (!hit) {
+        adsPreviousSeries.push({
+          date: dateStr,
+          cost: canBuildZeroSeries ? 0 : null,
+          conversions: canBuildZeroSeries ? 0 : null,
+          clicks: canBuildZeroSeries ? 0 : null,
+          impressions: canBuildZeroSeries ? 0 : null,
+          ctrPct: canBuildZeroSeries ? 0 : null,
+          avgCpc: canBuildZeroSeries ? 0 : null,
+        });
+      } else {
+        const costVal = Number(hit.cost.toFixed(0));
+        adsPreviousSeries.push({
+          date: dateStr,
+          cost: costVal,
+          conversions: Number(hit.conversions.toFixed(2)),
+          clicks: hit.clicks,
+          impressions: hit.impressions,
+          ctrPct: hit.impressions > 0 ? Number(((hit.clicks / hit.impressions) * 100).toFixed(2)) : 0,
+          avgCpc: hit.clicks > 0 ? Math.round(costVal / hit.clicks) : 0,
+        });
+      }
+    }
+  }
+
+  const activeCampaignsCount = campaignList.filter((c) => c.status === 'ENABLED').length;
+
+  const liveOrDbAdGroups =
+    gadsLiveSnap && gadsLiveSnap.adGroups.length > 0
+      ? gadsLiveSnap.adGroups
+      : adGroupRowsFromDb.slice(0, 30).map((r, idx) => {
+          const cost = microsToUnitNumber(r.spendMicros);
+          const conv = conversionsMicrosToNumber(r.conversionsMicros);
+          return {
+            adGroupId: `ag-${r.id}-${idx + 1}`,
+            adGroupName: r.keywordRaw || r.campaignExternalId || 'Nhóm quảng cáo',
+            campaignName: r.campaign?.campaignName || r.campaignExternalId || 'Chiến dịch',
+            cost,
+            impressions: r.impressions || 0,
+            clicks: r.clicks || 0,
+            conversions: conv,
+            cpa: conv > 0 ? Number((cost / conv).toFixed(0)) : null,
+          };
+        });
+
+  const liveOrDbKeywords =
+    gadsLiveSnap && gadsLiveSnap.keywords.length > 0
+      ? gadsLiveSnap.keywords
+      : keywordRowsFromDb.slice(0, 50).map((r) => {
+          const cost = microsToUnitNumber(r.spendMicros);
+          const impr = r.impressions || 0;
+          const clk = r.clicks || 0;
+          return {
+            keywordText: r.keywordRaw || r.keywordTextNorm || 'Từ khóa quảng cáo',
+            matchType: r.keywordMatchType || 'BROAD',
+            adGroupName: r.campaignExternalId || 'Nhóm quảng cáo',
+            campaignName: r.campaign?.campaignName || 'Chiến dịch',
+            impressions: impr,
+            clicks: clk,
+            ctrPct: impr > 0 ? Number(((clk / impr) * 100).toFixed(2)) : null,
+            cost,
+            conversions: conversionsMicrosToNumber(r.conversionsMicros),
+          };
+        });
 
   const adsSection: M02AdsSectionDto = {
     status: hasConnectedAdsData ? 'CONNECTED' : 'UNCONFIGURED',
     statusMessage: hasConnectedAdsData
-      ? unattributedAccountCampaignCount > 0 && scope.selectedWebsite
+      ? !effectiveAdsAllWebsites && unattributedAccountCampaignCount > 0 && scope.selectedWebsite
         ? `Có ${unattributedAccountCampaignCount} chiến dịch cấp tài khoản chưa gắn riêng cho ${scope.selectedWebsite.domain}; chọn "Tất cả website" để xem tổng chi phí cấp tài khoản.`
         : adsTotalCost === 0
           ? `Đã kết nối tài khoản Google Ads v26 (${campaignList.length} chiến dịch trong phạm vi; hiện đang tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn).`
-          : 'Đã đồng bộ chỉ số chiến dịch Google Ads v26 và đối soát Lead CRM.'
+          : effectiveAdsAllWebsites
+            ? `Đang tổng hợp ${activeCampaignsCount} chiến dịch đang chạy (trên tổng ${campaignList.length} chiến dịch) của toàn bộ website kèm link đích.`
+            : 'Đã đồng bộ chỉ số chiến dịch Google Ads v26 và đối soát Lead CRM.'
       : 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads. Vào Cài đặt → Tích hợp Google để kết nối trực tiếp qua OAuth.',
     currencyCode: 'VND',
+    adsScopeMode: effectiveAdsAllWebsites ? 'ALL_WEBSITES' : 'SELECTED_WEBSITE',
+    activeCampaignsCount,
+    totalCampaignsCount: campaignList.length,
     metrics: {
       cost: adsTotalCost,
       impressions: adsTotalImpr,
@@ -908,44 +1486,20 @@ export async function getM02TrafficInteractionSpec(params?: {
           : 'CPL tính trên chi phí quảng cáo thực tế đối soát cùng phạm vi với Lead hợp lệ từ quảng cáo.',
     },
     series: adsSeries,
+    previousSeries: adsPreviousSeries,
     campaigns: paginateArray(campaignList, params?.adsPage || 1, params?.adsPageSize || 20),
     breakdowns: {
-      adGroups: adGroupRowsFromDb.slice(0, 30).map((r, idx) => {
-        const cost = microsToUnitNumber(r.spendMicros);
-        const conv = conversionsMicrosToNumber(r.conversionsMicros);
-        return {
-          adGroupId: `ag-${r.id}-${idx + 1}`,
-          adGroupName: r.keywordRaw || r.campaignExternalId || 'Nhóm quảng cáo',
-          campaignName: r.campaign?.campaignName || r.campaignExternalId || 'Chiến dịch',
-          cost,
-          impressions: r.impressions || 0,
-          clicks: r.clicks || 0,
-          conversions: conv,
-          cpa: conv > 0 ? Number((cost / conv).toFixed(0)) : null,
-        };
-      }),
-      keywords: keywordRowsFromDb.slice(0, 50).map((r) => {
-        const cost = microsToUnitNumber(r.spendMicros);
-        const impr = r.impressions || 0;
-        const clk = r.clicks || 0;
-        return {
-          keywordText: r.keywordRaw || r.keywordTextNorm || 'Từ khóa quảng cáo',
-          matchType: r.keywordMatchType || 'BROAD',
-          adGroupName: r.campaignExternalId || 'Nhóm quảng cáo',
-          campaignName: r.campaign?.campaignName || 'Chiến dịch',
-          impressions: impr,
-          clicks: clk,
-          ctrPct: impr > 0 ? Number(((clk / impr) * 100).toFixed(2)) : null,
-          cost,
-          conversions: conversionsMicrosToNumber(r.conversionsMicros),
-        };
-      }),
+      adGroups: liveOrDbAdGroups,
+      keywords: liveOrDbKeywords,
+      searchTerms: gadsLiveSnap?.searchTerms || [],
+      landingPages: gadsLiveSnap?.landingPages || [],
+      timeSchedule: gadsLiveSnap?.timeSchedule || [],
       keywordAvailabilityNote: hasConnectedAdsData
-        ? keywordRowsFromDb.length === 0
-          ? 'Chưa có dữ liệu cấp từ khóa quảng cáo trong kỳ đang chọn.'
+        ? liveOrDbKeywords.length === 0
+          ? 'Chưa có dữ liệu cấp từ khóa quảng cáo trong kỳ đang chọn (hoặc OAuth Google cần Kết nối lại để kéo dữ liệu mới).'
           : null
-        : 'Chưa kết nối tài khoản Google Ads nên chưa tải được nhóm quảng cáo, từ khóa, thiết bị và khu vực quảng cáo.',
-      devices: [],
+        : 'Chưa kết nối tài khoản Google Ads nên chưa tải được nhóm quảng cáo, từ khóa, cụm từ tìm kiếm và trang đích.',
+      devices: gadsLiveSnap?.devices || [],
       regions: [],
     },
   };
@@ -1065,14 +1619,20 @@ export async function getM02TrafficInteractionSpec(params?: {
       previousFormLeadCount: prevValidFormLeadsCount,
     },
     realtimeMinutesSeries: realtime.minutesSeries,
+    realtimeEvents: realtime.realtimeEvents,
+    realtimeActivePages: realtime.realtimeActivePages,
+    allGa4Events,
     charts: {
       trafficSeries,
+      previousTrafficSeries,
       channelRows,
+      sourceMediumRows,
       deviceRows,
       geoRows,
     },
     tables: {
       landingPageRows: paginateArray(allLandingRows, params?.page || 1, params?.pageSize || 20),
+      landingPageCategories,
       interactionRows,
       formSessionRatePct:
         totalSessions && totalSessions > 0 && formEventTotal !== null

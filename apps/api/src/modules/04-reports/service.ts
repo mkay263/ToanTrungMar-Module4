@@ -296,6 +296,7 @@ export async function getScopedReportsDashboard(
         siteTrafficMetrics,
         ga4LiveSnaps,
         googleOAuthConn,
+        gmailSyncSettings,
       ] = await Promise.all([
         prisma.lead.findMany({
           where: {
@@ -438,6 +439,10 @@ export async function getScopedReportsDashboard(
           ? Promise.resolve([])
           : getGa4LiveSnapshotsForProperties(allGa4PropIds, fromDateStr, toDateStr, false),
         getGoogleConnection(),
+        prisma.systemSetting.findMany({
+          where: { key: { in: ['gmail_lead_sync_config', 'gmail_sync_checkpoint'] } },
+          select: { key: true, value: true },
+        }),
       ]);
 
       const latestSync = recentSyncLogs.find((s) => s.status === 'success' && s.completedAt) || null;
@@ -933,7 +938,31 @@ export async function getScopedReportsDashboard(
   const configuredConnectionsCount = liveIntegrationMode
     ? Math.max(distinctPlatforms.size, isOAuthConnectedLive ? 3 : 0)
     : 0;
-  const failingConnectionsCount = recentSyncLogs.filter((c) => c.consecutiveFailures >= 3).length;
+  let gmailAutoSyncEnabled = false;
+  let gmailConsecutiveFailures = 0;
+  for (const s of gmailSyncSettings) {
+    try {
+      const parsed = JSON.parse(s.value || '{}') as Record<string, unknown>;
+      if (s.key === 'gmail_lead_sync_config') gmailAutoSyncEnabled = Boolean(parsed.enabled);
+      if (s.key === 'gmail_sync_checkpoint') {
+        gmailConsecutiveFailures = Number(parsed.consecutiveFailures || 0);
+      }
+    } catch {
+      // ignore malformed setting JSON
+    }
+  }
+  const hasOAuthFailure = Boolean(
+    googleOAuthConn?.connected &&
+      !googleOAuthConn.isSandboxDemo &&
+      (googleOAuthConn.connectionStatus === 'EXPIRED' ||
+        googleOAuthConn.connectionStatus === 'PERMISSION_ERROR' ||
+        googleOAuthConn.connectionStatus === 'SYNC_ERROR'),
+  );
+  const hasGmailSyncFailure = gmailAutoSyncEnabled && gmailConsecutiveFailures >= 3;
+  const failingConnectionsCount =
+    recentSyncLogs.filter((c) => c.consecutiveFailures >= 3).length +
+    (hasOAuthFailure ? 1 : 0) +
+    (hasGmailSyncFailure ? 1 : 0);
   const gclidPendingRetryCount = leads.filter(
     (l) => Boolean(l.tracking?.gclid && l.tracking?.isUnknownCampaign),
   ).length;
@@ -1249,7 +1278,7 @@ export async function generateScopedReportExportBuffer(
       `Hiệu quả Marketing Toàn Trung - ${dashboard.scopeDescription}`,
       `Kỳ báo cáo,${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate}`,
       `Website nguồn,${m04Spec.scope.websiteLabel}`,
-      `Chi phí quảng cáo,${adCostLabel},Lead tiếp nhận,${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount},Lead hợp lệ (L2),${m04Spec.metrics.validLeadCount},CPL quảng cáo hợp lệ,${cplLabel},Chốt thành công,${m04Spec.metrics.wonLeadCount},Tỷ lệ chốt,${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'}`,
+      `Chi phí quảng cáo,${adCostLabel},Lead tiếp nhận,${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount},Lead hợp lệ,${m04Spec.metrics.validLeadCount},CPL quảng cáo hợp lệ,${cplLabel},Chốt thành công,${m04Spec.metrics.wonLeadCount},Tỷ lệ chốt,${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'}`,
       '',
       [
         'STT',
@@ -1298,6 +1327,12 @@ export async function generateScopedReportExportBuffer(
     };
   }
 
+  const attributionLabels: Record<string, string> = {
+    SINGLE_WEBSITE: 'Riêng 1 website',
+    MULTI_WEBSITE_UNSPLIT: 'Đa website (chưa tách)',
+    UNATTRIBUTED: 'Chưa xác định domain',
+  };
+
   const xlsxBuffer = buildStandardXlsxBuffer([
     {
       name: 'HieuQuaMarketing',
@@ -1306,15 +1341,15 @@ export async function generateScopedReportExportBuffer(
         { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate} (Asia/Ho_Chi_Minh)` },
         { label: 'Phạm vi website', value: m04Spec.scope.websiteLabel },
         { label: 'Chi phí quảng cáo', value: m04Spec.metrics.attributedAdCost !== null && m04Spec.metrics.attributedAdCost !== undefined ? `${m04Spec.metrics.attributedAdCost.toLocaleString('vi-VN')} ₫` : 'Chưa tách riêng' },
-        { label: 'Lead tiếp nhận / Hợp lệ (L2)', value: `${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount} / ${m04Spec.metrics.validLeadCount}` },
-        { label: 'CPL quảng cáo hợp lệ', value: m04Spec.metrics.costPerValidAdLead !== null ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} ₫ (${m04Spec.metrics.validAttributedAdLeadCount ?? 0} Lead Ads L2)` : 'Chưa đủ dữ liệu' },
+        { label: 'Lead tiếp nhận / Hợp lệ', value: `${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount} / ${m04Spec.metrics.validLeadCount}` },
+        { label: 'CPL quảng cáo hợp lệ', value: m04Spec.metrics.costPerValidAdLead !== null ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} ₫ (${m04Spec.metrics.validAttributedAdLeadCount ?? 0} Lead từ quảng cáo)` : 'Chưa đủ dữ liệu' },
         { label: 'Chốt thành công / Tỷ lệ chốt', value: `${m04Spec.metrics.wonLeadCount} (${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'})` },
       ],
       columns: [
         { header: 'Website', key: 'website', width: 26, type: 'string' },
         { header: 'Lead tiếp nhận', key: 'leadCount', width: 15, type: 'number' },
         { header: 'Lead hợp lệ', key: 'validCount', width: 15, type: 'number' },
-        { header: 'Lead Ads L2', key: 'adLeadCount', width: 15, type: 'number' },
+        { header: 'Lead từ Ads', key: 'adLeadCount', width: 15, type: 'number' },
         { header: 'Chi phí Ads (VND)', key: 'adCost', width: 18, type: 'number' },
         { header: 'CPL Ads (VND)', key: 'cpl', width: 16, type: 'number' },
         { header: 'Chốt thành công', key: 'wonCount', width: 15, type: 'number' },
@@ -1324,8 +1359,8 @@ export async function generateScopedReportExportBuffer(
         leadCount: w.leadCount,
         validCount: w.validCount,
         adLeadCount: w.adLeadCount,
-        adCost: w.adCost ?? 0,
-        cpl: w.cpl ? Math.round(w.cpl) : 0,
+        adCost: w.adCost ?? null,
+        cpl: w.cpl ? Math.round(w.cpl) : null,
         wonCount: w.wonCount,
       })),
     },
@@ -1334,25 +1369,25 @@ export async function generateScopedReportExportBuffer(
       title: `ĐỐI CHIẾU HIỆU QUẢ THEO CHIẾN DỊCH — ${m04Spec.scope.websiteLabel}`,
       metadata: [
         { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate}` },
-        { label: 'Ghi chú đối soát Ads', value: m04Spec.metrics.adReconciliationNote || 'Chuẩn L2 CRM' },
+        { label: 'Ghi chú đối soát Ads', value: m04Spec.metrics.adReconciliationNote || 'Chuẩn Lead hợp lệ CRM' },
       ],
       columns: [
         { header: 'Chiến dịch', key: 'campaignName', width: 34, type: 'string' },
         { header: 'Website gắn', key: 'websiteDomain', width: 22, type: 'string' },
-        { header: 'Phân bổ', key: 'attributionStatus', width: 22, type: 'string' },
+        { header: 'Phân bổ', key: 'attributionStatus', width: 24, type: 'string' },
         { header: 'Chi phí (VND)', key: 'adCost', width: 18, type: 'number' },
         { header: 'Clicks', key: 'clicks', width: 12, type: 'number' },
-        { header: 'Lead Ads L2', key: 'validAdLeads', width: 14, type: 'number' },
+        { header: 'Lead từ quảng cáo', key: 'validAdLeads', width: 16, type: 'number' },
         { header: 'CPL (VND)', key: 'cpl', width: 16, type: 'number' },
       ],
       rows: (m04Spec.tables.byCampaign || []).map((c) => ({
         campaignName: c.campaignName,
         websiteDomain: c.websiteDomain || 'Chung/Chưa tách',
-        attributionStatus: c.attributionStatus,
-        adCost: c.adCost ?? 0,
+        attributionStatus: attributionLabels[c.attributionStatus] || c.attributionStatus,
+        adCost: c.adCost ?? null,
         clicks: c.clicks,
         validAdLeads: c.validAttributedAdLeadCount,
-        cpl: c.costPerValidAdLead ? Math.round(c.costPerValidAdLead) : 0,
+        cpl: c.costPerValidAdLead ? Math.round(c.costPerValidAdLead) : null,
       })),
     },
     {
@@ -1360,7 +1395,7 @@ export async function generateScopedReportExportBuffer(
       title: `TỔNG HỢP XỬ LÝ THEO SALES — ${dashboard.scopeDescription}`,
       metadata: [
         { label: 'Kỳ báo cáo', value: `${dashboard.fromDate} đến ${dashboard.toDate}` },
-        { label: 'Lead tiếp nhận (L1) / Hợp lệ (L2)', value: `${dashboard.overview.totalLeadsL1} / ${dashboard.overview.validLeadsL2}` },
+        { label: 'Lead tiếp nhận / Hợp lệ', value: `${dashboard.overview.totalLeadsL1} / ${dashboard.overview.validLeadsL2}` },
       ],
       columns: [
         { header: 'Nhân sự / Nhóm đối soát', key: 'salesName', width: 34, type: 'string' },
@@ -1379,6 +1414,27 @@ export async function generateScopedReportExportBuffer(
         quoteSentLeads: sp.quoteSentLeads,
         overdue7d: sp.unansweredOverdue7d,
         wonLeads: sp.wonLeads,
+      })),
+    },
+    {
+      name: 'NhuCauSanPham',
+      title: `NHU CẦU THEO DÒNG SẢN PHẨM — ${m04Spec.scope.websiteLabel}`,
+      metadata: [
+        { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate}` },
+      ],
+      columns: [
+        { header: 'Sản phẩm', key: 'productName', width: 32, type: 'string' },
+        { header: 'Lead quan tâm', key: 'leadCount', width: 16, type: 'number' },
+        { header: 'Lead hợp lệ', key: 'validCount', width: 14, type: 'number' },
+        { header: 'Đã báo giá', key: 'quotedCount', width: 14, type: 'number' },
+        { header: 'Chốt thành công', key: 'wonCount', width: 16, type: 'number' },
+      ],
+      rows: (m04Spec.tables.byProduct || []).map((p) => ({
+        productName: p.productName,
+        leadCount: p.leadCount,
+        validCount: p.validCount,
+        quotedCount: p.quotedCount,
+        wonCount: p.wonCount,
       })),
     },
     {

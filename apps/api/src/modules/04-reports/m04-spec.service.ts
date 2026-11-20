@@ -1,11 +1,15 @@
 import { prisma } from '@toantrung/database';
 import {
   PIPELINE_STATUS_LABELS,
+  formatContactChannelClean,
   isL2Valid,
   isL3Effective,
   normalizeMarketingChannelDisplay,
+  sanitizeProjectOrSubjectText,
   sanitizeWebsiteSourceDisplay,
+  type ContactChannel,
   type M04ResultsReportDto,
+  type PipelineStatus,
   type SessionUserDto,
 } from '@toantrung/contracts';
 import {
@@ -26,6 +30,11 @@ import {
   getGoogleConnection,
 } from '../02-tracking-sync/google-oauth.service';
 
+function maskPhoneForReportSpec(phone: string | null): string {
+  if (!phone || phone.length < 7) return '***';
+  return `${phone.slice(0, 4)}***${phone.slice(-3)}`;
+}
+
 export async function getM04ResultsReportSpec(
   user: SessionUserDto,
   params?: {
@@ -35,6 +44,8 @@ export async function getM04ResultsReportSpec(
     to?: string | null;
     page?: number;
     pageSize?: number;
+    detailPage?: number;
+    detailPageSize?: number;
     bypassCache?: boolean;
   },
 ): Promise<M04ResultsReportDto> {
@@ -45,7 +56,7 @@ export async function getM04ResultsReportSpec(
     user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
 
   const cacheResult = await getOrComputeScopedCache<M04ResultsReportDto>({
-    key: `m04-spec:${user.roleCode === 'SALES' ? user.id : user.roleCode}:${anonymized ? 'anon' : 'full'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}`,
+    key: `m04-spec:${user.roleCode === 'SALES' ? user.id : user.roleCode}:${anonymized ? 'anon' : 'full'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.detailPage || 1}:${params?.detailPageSize || 25}`,
     domains: ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'seo_reports', 'design', 'websites'],
     ttlMs: 30_000,
     bypassCache: params?.bypassCache,
@@ -106,6 +117,7 @@ export async function getM04ResultsReportSpec(
         pipelineStatus: true,
         sourceWebsite: true,
         contactChannel: true,
+        createdAt: true,
         tracking: {
           select: {
             marketingSource: true,
@@ -221,14 +233,23 @@ export async function getM04ResultsReportSpec(
     listSeoAiReports().catch(() => []),
   ]);
 
+  const isGoogleOAuthError = Boolean(
+    googleConn?.connected &&
+      !googleConn.isSandboxDemo &&
+      (googleConn.connectionStatus === 'EXPIRED' ||
+        googleConn.connectionStatus === 'PERMISSION_ERROR' ||
+        googleConn.connectionStatus === 'SYNC_ERROR'),
+  );
+
   const hasAdsToken =
-    Boolean(adsCfg?.developerToken) ||
-    Boolean(
-      googleConn?.connected &&
-        !googleConn.isSandboxDemo &&
-        googleConn.scopes?.some((s) => s.includes('adwords')),
-    ) ||
-    realAdsCatalogCount > 0;
+    !isGoogleOAuthError &&
+    (Boolean(adsCfg?.developerToken) ||
+      Boolean(
+        googleConn?.connected &&
+          !googleConn.isSandboxDemo &&
+          googleConn.scopes?.some((s) => s.includes('adwords')),
+      ) ||
+      realAdsCatalogCount > 0);
 
   const isPaidAdLeadRecord = (l: {
     contactChannel?: string | null;
@@ -352,6 +373,7 @@ export async function getM04ResultsReportSpec(
   let singleSiteMatchedCount = 0;
   let multiWebsiteExcludedMicros = 0n;
   const multiWebsiteCampIds = new Set<string>();
+  const scopedCampIds = new Set<string>();
   const adCostMicrosByWebsite = new Map<string, bigint>();
 
   for (const camp of campAggMap.values()) {
@@ -364,12 +386,17 @@ export async function getM04ResultsReportSpec(
     camp.websiteDomain = attr.domain;
     totalAllCampaignMicros += camp.spendMicros;
 
+    if (!scope.selectedWebsite) {
+      scopedCampIds.add(camp.campaignId);
+    }
+
     if (attr.status === 'SINGLE_WEBSITE' && attr.domain) {
       const prevDomMicros = adCostMicrosByWebsite.get(attr.domain) ?? 0n;
       adCostMicrosByWebsite.set(attr.domain, prevDomMicros + camp.spendMicros);
       if (scope.selectedWebsite && matchesWebsiteDomain(attr.domain, scope.selectedWebsite)) {
         singleSiteMatchedMicros += camp.spendMicros;
         singleSiteMatchedCount += 1;
+        scopedCampIds.add(camp.campaignId);
       }
     } else if (attr.status === 'MULTI_WEBSITE_UNSPLIT') {
       multiWebsiteExcludedMicros += camp.spendMicros;
@@ -389,26 +416,30 @@ export async function getM04ResultsReportSpec(
       attributedAdCost = Number((Number(totalAllCampaignMicros) / 1_000_000).toFixed(0));
       adReconciliationNote =
         multiWebsiteCampIds.size > 0
-          ? `Đã tổng hợp toàn bộ chi phí tài khoản; gồm ${multiWebsiteCampIds.size} chiến dịch đa website không tự chia chi phí về từng domain riêng lẻ.`
-          : 'Đã đối soát tổng chi phí quảng cáo thực tế với Lead quảng cáo hợp lệ.';
+          ? `Tổng hợp toàn bộ chiến dịch; ${multiWebsiteCampIds.size} chiến dịch đa website không tự chia về từng domain.`
+          : 'Tổng chi phí quảng cáo thực tế đối soát với Lead từ quảng cáo.';
     } else if (singleSiteMatchedCount > 0) {
       attributedAdCost = Number((Number(singleSiteMatchedMicros) / 1_000_000).toFixed(0));
       adReconciliationNote =
         multiWebsiteCampIds.size > 0
-          ? `Chỉ tính chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain} (đã loại trừ ${multiWebsiteCampIds.size} chiến dịch đa website / tài khoản chung trị giá ${Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0)).toLocaleString('vi-VN')} ₫ để tránh cộng lặp).`
+          ? `Chi phí chiến dịch riêng của ${scope.selectedWebsite.domain} (đã tách riêng ${multiWebsiteCampIds.size} chiến dịch đa website trị giá ${Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0)).toLocaleString('vi-VN')} ₫).`
           : `Chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}.`;
     } else {
       attributedAdCost = null;
       adReconciliationNote =
         multiWebsiteCampIds.size > 0
-          ? `Chưa có chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}; có ${multiWebsiteCampIds.size} chiến dịch chạy chung nhiều website (${Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0)).toLocaleString('vi-VN')} ₫) nên giữ CPL = Chưa đủ dữ liệu.`
-          : `Chưa có dữ liệu phân bổ chi phí chiến dịch riêng cho ${scope.selectedWebsite.domain} (không tự chia đều chi phí tài khoản).`;
+          ? `Chưa có chiến dịch riêng cho ${scope.selectedWebsite.domain}; có ${multiWebsiteCampIds.size} chiến dịch chạy chung nhiều web (${Number((Number(multiWebsiteExcludedMicros) / 1_000_000).toFixed(0)).toLocaleString('vi-VN')} ₫).`
+          : `Chưa có chi phí chiến dịch gắn riêng cho ${scope.selectedWebsite.domain}.`;
     }
+  } else if (isGoogleOAuthError) {
+    attributedAdCost = null;
+    adReconciliationNote =
+      'Kết nối Google Ads đang lỗi hoặc hết hạn — vui lòng kết nối lại trong Cài đặt.';
   } else {
     attributedAdCost = hasAdsToken && !scope.selectedWebsite ? 0 : null;
     adReconciliationNote = hasAdsToken
-      ? 'Đã kết nối Google Ads; các chiến dịch hiện tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn.'
-      : `Chưa kết nối tài khoản Google Ads OAuth (ghi nhận ${validAdLeads.length} Lead quảng cáo hợp lệ trong CRM).`;
+      ? 'Chưa phát sinh chi phí quảng cáo trong kỳ đang chọn.'
+      : 'Chưa kết nối tài khoản Google Ads.';
   }
 
   let prevAdCost: number | null = null;
@@ -798,14 +829,26 @@ export async function getM04ResultsReportSpec(
     day: '2-digit',
   });
   const todayStr = dayFmt.format(new Date());
-  const leadDayMap = new Map<string, { received: number; valid: number }>();
+  const leadDayMap = new Map<string, { received: number; valid: number; won: number }>();
   for (const l of leads) {
     const dk = dayFmt.format(l.createdAt);
-    const cur = leadDayMap.get(dk) || { received: 0, valid: 0 };
+    const cur = leadDayMap.get(dk) || { received: 0, valid: 0, won: 0 };
     cur.received += 1;
-    if (isL2Valid(l)) cur.valid += 1;
+    if (isL2Valid(l)) {
+      cur.valid += 1;
+      if (l.pipelineStatus === 'won') cur.won += 1;
+    }
     leadDayMap.set(dk, cur);
   }
+  const adCostDayMap = new Map<string, bigint>();
+  if (attributedAdCost !== null) {
+    for (const r of adsCampaignMetrics) {
+      const cid = (r.campaignExternalId || r.campaign?.campaignCode || r.campaign?.campaignName || 'unknown').trim();
+      if (!scopedCampIds.has(cid) || !r.metricDate) continue;
+      adCostDayMap.set(r.metricDate, (adCostDayMap.get(r.metricDate) ?? 0n) + (r.spendMicros ?? 0n));
+    }
+  }
+
   const timeSeries: NonNullable<M04ResultsReportDto['timeSeries']> = [];
   {
     const cursor = new Date(`${scope.startDateStr}T00:00:00Z`);
@@ -815,14 +858,51 @@ export async function getM04ResultsReportSpec(
       safety += 1;
       const dStr = cursor.toISOString().slice(0, 10);
       const isFuture = dStr > todayStr;
-      const dayCounts = leadDayMap.get(dStr) || { received: 0, valid: 0 };
+      const dayCounts = leadDayMap.get(dStr) || { received: 0, valid: 0, won: 0 };
+      const dayCost = attributedAdCost !== null
+        ? Number((Number(adCostDayMap.get(dStr) ?? 0n) / 1_000_000).toFixed(0))
+        : null;
       timeSeries.push({
         bucketStart: dStr,
         bucketEnd: dStr,
         label: `${dStr.slice(8, 10)}/${dStr.slice(5, 7)}`,
         receivedLeadCount: isFuture ? null : dayCounts.received,
         validLeadCount: isFuture ? null : dayCounts.valid,
+        wonLeadCount: isFuture ? null : dayCounts.won,
+        adCost: isFuture ? null : dayCost,
         isMissingDay: isFuture,
+      });
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  }
+
+  const prevLeadDayMap = new Map<string, { received: number; valid: number; won: number }>();
+  for (const l of prevLeads) {
+    const dk = dayFmt.format(l.createdAt);
+    const cur = prevLeadDayMap.get(dk) || { received: 0, valid: 0, won: 0 };
+    cur.received += 1;
+    if (isL2Valid(l)) {
+      cur.valid += 1;
+      if (l.pipelineStatus === 'won') cur.won += 1;
+    }
+    prevLeadDayMap.set(dk, cur);
+  }
+  const previousTimeSeries: NonNullable<M04ResultsReportDto['previousTimeSeries']> = [];
+  {
+    const cursor = new Date(`${scope.prevStartDateStr}T00:00:00Z`);
+    const endDt = new Date(`${scope.prevEndDateStr}T00:00:00Z`);
+    let safety = 0;
+    while (cursor <= endDt && safety < 400) {
+      safety += 1;
+      const dStr = cursor.toISOString().slice(0, 10);
+      const isFuture = dStr > todayStr;
+      const dayCounts = prevLeadDayMap.get(dStr) || { received: 0, valid: 0, won: 0 };
+      previousTimeSeries.push({
+        bucketStart: dStr,
+        label: `${dStr.slice(8, 10)}/${dStr.slice(5, 7)}`,
+        receivedLeadCount: isFuture ? null : dayCounts.received,
+        validLeadCount: isFuture ? null : dayCounts.valid,
+        wonLeadCount: isFuture ? null : dayCounts.won,
       });
       cursor.setUTCDate(cursor.getUTCDate() + 1);
     }
@@ -858,12 +938,12 @@ export async function getM04ResultsReportSpec(
     summaryFindings.push({
       id: 'ad_efficiency',
       severity: costPerValidAdLead !== null && validAdLeads.length > 0 ? 'info' : 'warning',
-      title: 'Hiệu quả chi phí quảng cáo & Lead đối soát',
+      title: 'Chi phí quảng cáo & CPL',
       evidenceText:
         validAdLeads.length > 0 && costPerValidAdLead !== null
           ? `Chi phí ${attributedAdCost.toLocaleString('vi-VN')} ₫ mang về ${validAdLeads.length} Lead quảng cáo hợp lệ (CPL: ${Math.round(costPerValidAdLead).toLocaleString('vi-VN')} ₫/Lead).`
           : `Ghi nhận ${attributedAdCost.toLocaleString('vi-VN')} ₫ chi tiêu trong kỳ nhưng chưa có Lead quảng cáo hợp lệ gắn GCLID/UTM trùng khớp để tính CPL.`,
-      actionHref: `/tracking?websiteId=${encodeURIComponent(scope.websiteId)}`,
+      actionHref: `/tracking?section=ads_campaigns&websiteId=${encodeURIComponent(scope.websiteId)}`,
       actionLabel: 'Kiểm tra chiến dịch',
     });
   }
@@ -871,17 +951,17 @@ export async function getM04ResultsReportSpec(
     summaryFindings.push({
       id: 'multi_site_excluded',
       severity: 'info',
-      title: `Có ${multiWebsiteCampIds.size} chiến dịch đa website chưa tách chi phí cho ${scope.selectedWebsite.domain}`,
-      evidenceText: `Tổng ${multiWebsiteExcludedAdCost.toLocaleString('vi-VN')} ₫ chi tiêu chạy chung nhiều landing domain đã được tách khỏi bộ lọc website đơn để tránh tính nhầm 100% chi phí.`,
+      title: `Có ${multiWebsiteCampIds.size} chiến dịch chạy chung nhiều website`,
+      evidenceText: `Tổng ${multiWebsiteExcludedAdCost.toLocaleString('vi-VN')} ₫ chi tiêu chạy chung nhiều tên miền được tách khỏi bộ lọc ${scope.selectedWebsite.domain} để tránh cộng nhầm.`,
     });
   }
   if (validLeadCount > 0) {
     summaryFindings.push({
       id: 'lead_conversion_cohort',
       severity: wonLeadCount > 0 ? 'info' : 'warning',
-      title: 'Chất lượng chuyển đổi Cohort trong kỳ',
-      evidenceText: `Trong ${receivedLeadCount} Lead tiếp nhận có ${validLeadCount} Lead hợp lệ (L2), tỷ lệ chốt đạt ${winRatePct !== null ? `${winRatePct}%` : '—'} (${wonLeadCount} chốt${overdueQuotes.length > 0 ? `, ${overdueQuotes.length} báo giá quá hạn >7 ngày` : ''}).`,
-      actionHref: `/leads?from=${encodeURIComponent(scope.startDateStr)}&to=${encodeURIComponent(scope.endDateStr)}${scope.selectedWebsite ? `&website=${encodeURIComponent(scope.selectedWebsite.domain)}` : ''}`,
+      title: 'Hiệu quả chuyển đổi trong kỳ',
+      evidenceText: `Trong ${receivedLeadCount} Lead tiếp nhận có ${validLeadCount} Lead hợp lệ, tỷ lệ chốt đạt ${winRatePct !== null ? `${winRatePct}%` : '—'} (${wonLeadCount} chốt${overdueQuotes.length > 0 ? `, ${overdueQuotes.length} báo giá quá hạn >7 ngày` : ''}).`,
+      actionHref: `/leads?from=${encodeURIComponent(scope.startDateStr)}&to=${encodeURIComponent(scope.endDateStr)}${scope.websiteId !== 'all' ? `&websiteId=${encodeURIComponent(scope.websiteId)}` : ''}`,
       actionLabel: 'Mở danh sách Lead',
     });
   }
@@ -890,8 +970,8 @@ export async function getM04ResultsReportSpec(
       id: 'missing_product_classification',
       severity: 'action',
       title: `${unclassifiedProductLeadCount} Lead chưa gắn sản phẩm quan tâm`,
-      evidenceText: `Cần rà soát và gắn dòng sản phẩm cho ${unclassifiedProductLeadCount} hồ sơ để báo cáo theo sản phẩm phản ánh đúng nhu cầu thị trường.`,
-      actionHref: `/leads?from=${encodeURIComponent(scope.startDateStr)}&to=${encodeURIComponent(scope.endDateStr)}`,
+      evidenceText: `Cần rà soát và gắn dòng sản phẩm cho ${unclassifiedProductLeadCount} hồ sơ để báo cáo theo sản phẩm phản ánh đúng nhu cầu thực tế.`,
+      actionHref: `/leads?from=${encodeURIComponent(scope.startDateStr)}&to=${encodeURIComponent(scope.endDateStr)}${scope.websiteId !== 'all' ? `&websiteId=${encodeURIComponent(scope.websiteId)}` : ''}`,
       actionLabel: 'Gắn sản phẩm Lead',
     });
   }
@@ -986,6 +1066,46 @@ export async function getM04ResultsReportSpec(
     }
   }
 
+  const detailedLeadRows = leads.map((lead, idx) => {
+    const cleanCompany = lead.companyName
+      ? lead.companyName.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '')
+      : null;
+    const rawCompanyOrContact =
+      [cleanCompany, lead.contactName].filter(Boolean).join(' — ') ||
+      `Khách hàng #${lead.leadCode}`;
+    const cleanProject = sanitizeProjectOrSubjectText(lead.projectName);
+    const cleanWeb = sanitizeWebsiteSourceDisplay(lead.sourceWebsite).cleanLabel || 'Chưa xác định';
+    const cleanMkt = normalizeMarketingChannelDisplay({
+      marketingSource: lead.tracking?.marketingSource,
+      utmSource: lead.tracking?.utmSource,
+      utmMedium: lead.tracking?.utmMedium,
+      gclid: lead.tracking?.gclid,
+      contactChannel: lead.contactChannel,
+    });
+    return {
+      stt: idx + 1,
+      leadId: lead.id,
+      leadCode: lead.leadCode,
+      receivedAt: lead.createdAt.toISOString(),
+      assignedSalesName: lead.assignedSales?.fullName || 'Chưa phân bổ',
+      companyOrCustomer: anonymized ? 'Khách hàng ẩn danh' : rawCompanyOrContact,
+      phone: anonymized ? maskPhoneForReportSpec(lead.phone) : lead.phone || 'Chưa xác định',
+      sourceWebsite: cleanWeb,
+      contactChannel: formatContactChannelClean(lead.contactChannel as ContactChannel),
+      marketingSource: cleanMkt,
+      productsText:
+        lead.leadProducts.map((lp) => lp.product.productName).join(', ') || 'Chưa phân loại',
+      pipelineStatus: lead.isSpam ? 'spam' : lead.pipelineStatus,
+      pipelineStatusLabel: lead.isSpam
+        ? 'Spam (đã loại trừ)'
+        : PIPELINE_STATUS_LABELS[lead.pipelineStatus as PipelineStatus] ?? lead.pipelineStatus,
+      noteOrReason: anonymized
+        ? lead.lostReason || (lead.isSpam ? 'Đã loại trừ spam' : '—')
+        : lead.lostReason || lead.spamReason || cleanProject || '—',
+      isAnonymized: anonymized,
+    };
+  });
+
   const latestLeadDate = leads.length > 0 ? getVietnamDateParts(leads[0].createdAt).dateStr : null;
   let latestAdsMetricDate: string | null = null;
   for (const m of adsCampaignMetrics) {
@@ -1010,7 +1130,7 @@ export async function getM04ResultsReportSpec(
       timezone: scope.timezone,
       isTodayIncluded: scope.isTodayIncluded,
       cohortDefinition:
-        'Cơ sở thống kê: Tập Lead được tạo trong kỳ và phạm vi website đang chọn, phản ánh trạng thái xử lý hiện tại.',
+        'Tính trên nhóm Lead tạo trong khoảng ngày và phạm vi website đang chọn.',
       previousStartDate: scope.prevStartDateStr,
       previousEndDate: scope.prevEndDateStr,
     },
@@ -1070,7 +1190,7 @@ export async function getM04ResultsReportSpec(
       winRateNumerator,
       winRateDenominator,
       winRateDefinition:
-        'Tỷ lệ chốt = Chốt thành công / Lead hợp lệ (L2) trong cùng tập Lead tạo trong kỳ và phạm vi website đang chọn.',
+        'Tỷ lệ chốt = Chốt thành công / Lead hợp lệ trong cùng kỳ và phạm vi website.',
       attributedAdCost,
       adCost: attributedAdCost,
       validAdLeadCount: validAdLeads.length,
@@ -1101,6 +1221,7 @@ export async function getM04ResultsReportSpec(
       winRatePct: prevWinRatePct,
     },
     timeSeries,
+    previousTimeSeries,
     dataQuality: {
       missingWebsiteCount,
       missingProductCount: unclassifiedProductLeadCount,
@@ -1128,7 +1249,7 @@ export async function getM04ResultsReportSpec(
       lostInPeriodCount: lostInPeriodLeadMap.size,
       fromPriorCohortCount: priorCohortLeadIds.size,
       definitionNote:
-        'Hoạt động xử lý phát sinh thực tế trong khoảng ngày chọn (bao gồm cả hồ sơ Lead được tạo từ các kỳ trước nhưng mới báo giá hoặc chốt trong kỳ này).',
+        'Tính theo thời điểm phát sinh xử lý trong kỳ, bao gồm cả Lead tạo từ kỳ trước.',
     },
     charts: {
       leadFunnel,
@@ -1156,6 +1277,11 @@ export async function getM04ResultsReportSpec(
         pendingActionRows,
         params?.page || 1,
         params?.pageSize || 20,
+      ),
+      detailedLeads: paginateArray(
+        detailedLeadRows,
+        params?.detailPage || 1,
+        params?.detailPageSize || 25,
       ),
     },
   };

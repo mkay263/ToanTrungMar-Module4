@@ -639,18 +639,16 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      {/* Page Title & Dedicated Sub-Tabs (Enhancement 8 & 9) */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl sm:text-3xl font-bold text-ink tracking-tight">
             Cài đặt
           </h1>
           <p className="text-[13px] text-ink-muted mt-1">
-            Quản lý sức khỏe vận hành, sao lưu dữ liệu 1-chạm và nhận diện thương hiệu công ty.
+            Đồng bộ dữ liệu, nhận diện thương hiệu và sao lưu hệ thống.
           </p>
         </div>
 
-        {/* Sub-Tabs Selector */}
         <div
           role="tablist"
           aria-label="Phân mục cài đặt hệ thống"
@@ -668,7 +666,7 @@ export default function SettingsPage() {
             }`}
           >
             <Building2 className="w-3.5 h-3.5" />
-            <span>Thương hiệu & Thông tin công ty</span>
+            <span>Thương hiệu &amp; Thông tin</span>
           </button>
           <button
             type="button"
@@ -696,7 +694,7 @@ export default function SettingsPage() {
             }`}
           >
             <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Sức khỏe Hệ thống & Sao lưu</span>
+            <span>Lưu trữ &amp; Sao lưu</span>
           </button>
         </div>
       </div>
@@ -719,20 +717,15 @@ export default function SettingsPage() {
           <section className="bg-white rounded-xl border border-slate-200/80 p-6 shadow-xs space-y-6">
             <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-100">
               <div className="flex items-center gap-3.5">
-                <div className="w-12 h-12 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-600 grid place-items-center shrink-0">
-                  <CheckCircle2 className="w-6 h-6" />
+                <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-200 text-[#1E3A8A] grid place-items-center shrink-0">
+                  <HardDrive className="w-6 h-6" />
                 </div>
                 <div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <h2 className="font-display text-lg font-extrabold text-slate-900">
-                      Hệ thống đang vận hành ổn định
-                    </h2>
-                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-bold">
-                      100% Trực tuyến
-                    </span>
-                  </div>
+                  <h2 className="font-display text-lg font-extrabold text-slate-900">
+                    Lưu trữ &amp; Sao lưu dữ liệu
+                  </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Tất cả phân hệ tiếp nhận Lead, Báo giá, AI Studio và Kho tệp riêng tư đều hoạt động bình thường.
+                    Dung lượng cơ sở dữ liệu, tệp đính kèm và bản sao lưu dự phòng.
                   </p>
                 </div>
               </div>
@@ -747,11 +740,11 @@ export default function SettingsPage() {
                 >
                   <DatabaseBackup className="w-4 h-4" />
                   <span>
-                    {backingUp ? 'Đang sao lưu & kiểm tra...' : 'Sao lưu dữ liệu ngay (Backup)'}
+                    {backingUp ? 'Đang tạo bản sao lưu...' : 'Tạo bản sao lưu'}
                   </span>
                 </button>
                 <span className="text-[11px] text-slate-500">
-                  Bản sao lưu gần nhất: <strong className="text-slate-700">{lastBackupTime}</strong>
+                  Bản gần nhất: <strong className="text-slate-700">{lastBackupTime}</strong>
                 </span>
               </div>
             </div>
@@ -774,12 +767,12 @@ export default function SettingsPage() {
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <div className="flex items-center gap-2 font-bold text-slate-900">
                   <HardDrive className="w-4 h-4 text-[#2563EB]" />
-                  <span>Dung lượng lưu trữ thực tế (Cơ sở dữ liệu SQLite & Kho tệp dự án)</span>
+                  <span>Dung lượng đã dùng</span>
                 </div>
                 <strong className="font-mono text-sm font-extrabold text-[#1E3A8A]">
                   {storageMetrics
-                    ? `${(storageMetrics.totalUsedBytes / (1024 * 1024)).toFixed(2)} MB (${storageMetrics.storageFileCount} tệp lưu trữ)`
-                    : 'Đang đo dung lượng thực tế...'}
+                    ? `${(storageMetrics.totalUsedBytes / (1024 * 1024)).toFixed(2)} MB · ${storageMetrics.storageFileCount} tệp`
+                    : 'Đang kiểm tra...'}
                 </strong>
               </div>
 
@@ -794,25 +787,17 @@ export default function SettingsPage() {
                 />
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-                <span>
-                  {storageMetrics
-                    ? `Database SQLite: ${(storageMetrics.dbSizeBytes / 1024).toFixed(1)} KB · Kho tệp & Sao lưu: ${(storageMetrics.storageFilesBytes / 1024).toFixed(1)} KB`
-                    : 'Bao gồm: Cơ sở dữ liệu SQLite, Ảnh khảo sát, Bản thiết kế AI & Bản sao lưu'}
-                </span>
-                <span className="text-emerald-700 font-semibold">
-                  Kiểm tra toàn vẹn SHA-256 & Restore Verification: Đạt
-                </span>
-              </div>
+              {storageMetrics && (
+                <div className="text-[11px] text-slate-500">
+                  Cơ sở dữ liệu: {(storageMetrics.dbSizeBytes / 1024).toFixed(1)} KB · Kho tệp &amp; sao lưu: {(storageMetrics.storageFilesBytes / 1024).toFixed(1)} KB
+                </div>
+              )}
             </div>
 
             {backupHistory.length > 0 && (
               <div className="rounded-xl border border-slate-200/80 overflow-hidden">
-                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200/80 flex items-center justify-between text-xs font-bold text-slate-800">
-                  <span>Danh sách bản sao lưu đã kiểm chứng khôi phục ({backupHistory.length})</span>
-                  <span className="text-[11px] text-emerald-700 font-semibold">
-                    SQLite Header + SHA-256 Verified
-                  </span>
+                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200/80 text-xs font-bold text-slate-800">
+                  Lịch sử sao lưu ({backupHistory.length})
                 </div>
                 <div className="divide-y divide-slate-100 max-h-44 overflow-y-auto">
                   {backupHistory.slice(0, 5).map((b) => (
@@ -823,13 +808,15 @@ export default function SettingsPage() {
                       <div>
                         <span className="font-semibold text-slate-900">{b.fileName}</span>
                         <span className="text-slate-500 ml-2">
-                          ({(b.fileSizeBytes / 1024).toFixed(1)} KB · SHA-256: {b.sha256.slice(0, 12)}…)
+                          ({(b.fileSizeBytes / 1024).toFixed(1)} KB)
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
-                          {b.restoreVerified ? 'Restore Verified' : 'Pending'}
-                        </span>
+                        {b.restoreVerified && (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
+                            Đã kiểm tra
+                          </span>
+                        )}
                         <span className="text-slate-500">
                           {new Date(b.createdAt).toLocaleString('vi-VN')}
                         </span>
@@ -840,22 +827,21 @@ export default function SettingsPage() {
               </div>
             )}
 
-            {/* Friendly Region & Access Rules Summary */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
               <div className="p-4 rounded-xl bg-white border border-slate-200/80 flex items-center justify-between">
                 <div>
-                  <span className="text-slate-400 block">Ngôn ngữ & Múi giờ chuẩn</span>
+                  <span className="text-slate-400 block">Ngôn ngữ &amp; Múi giờ</span>
                   <strong className="font-bold text-slate-900 mt-0.5 block">
-                    Tiếng Việt · Giờ Việt Nam (GMT+7)
+                    Tiếng Việt · GMT+7
                   </strong>
                 </div>
                 <Globe className="w-5 h-5 text-[#2563EB]" />
               </div>
               <div className="p-4 rounded-xl bg-white border border-slate-200/80 flex items-center justify-between">
                 <div>
-                  <span className="text-slate-400 block">Chế độ bảo vệ tệp đính kèm</span>
-                  <strong className="font-bold text-emerald-700 mt-0.5 block">
-                    Lưu trữ riêng tư · Phân quyền theo vai trò
+                  <span className="text-slate-400 block">Quyền truy cập tệp</span>
+                  <strong className="font-bold text-slate-900 mt-0.5 block">
+                    Nội bộ theo vai trò
                   </strong>
                 </div>
                 <ShieldCheck className="w-5 h-5 text-emerald-600" />

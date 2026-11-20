@@ -31,10 +31,18 @@ export interface Ga4PropertyPeriodSnapshot {
     sessions: number;
     pageViews: number;
     users: number;
+    newUsers?: number;
   }>;
   channels: Array<{
     channelGroup: string;
     sessions: number;
+    engagedSessions: number;
+    engagementRatePct: number | null;
+  }>;
+  sourceMediums?: Array<{
+    sourceMedium: string;
+    sessions: number;
+    newUsers: number;
     engagedSessions: number;
     engagementRatePct: number | null;
   }>;
@@ -59,6 +67,8 @@ export interface Ga4PropertyPeriodSnapshot {
     engagedSessions: number;
     engagementRatePct: number | null;
     conversions: number;
+    newUsers?: number;
+    totalUsers?: number;
   }>;
 }
 
@@ -74,6 +84,8 @@ export interface Ga4RealtimePropSnapshot {
   fetchedAt: string;
   activeUsers30m: number | null;
   minutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
+  events?: Array<{ eventName: string; eventCount: number }>;
+  activePages?: Array<{ pageTitle: string; activeUsers: number }>;
 }
 
 interface GlobalGa4LiveCacheStore {
@@ -85,6 +97,7 @@ interface GlobalGa4LiveCacheStore {
   realtimeBackoffUntil: Map<string, { untilMs: number; failures: number }>;
   gscInspectMem: Map<string, { expiresAt: number; rows: M03SiteStatusRowDto[] }>;
   dbCacheHydrated: boolean;
+  dbCacheHydratePromise: Promise<void> | null;
   dbGscHydrated: boolean;
   warmerStarted: boolean;
   warmerRunning: boolean;
@@ -106,6 +119,7 @@ function getGa4Store(): GlobalGa4LiveCacheStore {
       realtimeBackoffUntil: new Map(),
       gscInspectMem: new Map(),
       dbCacheHydrated: false,
+      dbCacheHydratePromise: null,
       dbGscHydrated: false,
       warmerStarted: false,
       warmerRunning: false,
@@ -131,6 +145,7 @@ export function invalidateGa4LiveCaches(): void {
   store.backoffUntil.clear();
   store.realtimeBackoffUntil.clear();
   store.dbCacheHydrated = false;
+  store.dbCacheHydratePromise = null;
   store.dbGscHydrated = false;
 }
 
@@ -145,54 +160,63 @@ function formatGa4Date(raw: string): string {
 async function hydrateFromDbIfNeeded(): Promise<void> {
   const store = getGa4Store();
   if (store.dbCacheHydrated) return;
-  store.dbCacheHydrated = true;
-  try {
-    const [row, rtRow] = await Promise.all([
-      prisma.systemSetting.findUnique({ where: { key: DB_CACHE_KEY } }),
-      prisma.systemSetting.findUnique({ where: { key: DB_REALTIME_CACHE_KEY } }),
-    ]);
-    const now = Date.now();
-    if (row?.value) {
-      const parsed = JSON.parse(row.value) as Record<string, Ga4PropertyPeriodSnapshot>;
-      for (const [k, snap] of Object.entries(parsed)) {
-        if (snap && snap.fetchedAt) {
-          const fetchedMs = new Date(snap.fetchedAt).getTime();
-          const age = now - fetchedMs;
-          // Giữ snapshot tối đa 24h khi server khởi động lại để không bao giờ chặn UI; nếu >5 phút thì đánh dấu hết hạn mềm để làm mới ngầm
-          if (age < 24 * 60 * 60 * 1000) {
-            MEM_CACHE.set(k, {
-              expiresAt: age < CACHE_TTL_MS ? fetchedMs + CACHE_TTL_MS : now - 1,
-              data: snap,
-            });
+  if (store.dbCacheHydratePromise) return store.dbCacheHydratePromise;
+
+  const p = (async () => {
+    try {
+      const [row, rtRow] = await Promise.all([
+        prisma.systemSetting.findUnique({ where: { key: DB_CACHE_KEY } }),
+        prisma.systemSetting.findUnique({ where: { key: DB_REALTIME_CACHE_KEY } }),
+      ]);
+      const now = Date.now();
+      if (row?.value) {
+        const parsed = JSON.parse(row.value) as Record<string, Ga4PropertyPeriodSnapshot>;
+        for (const [k, snap] of Object.entries(parsed)) {
+          if (snap && snap.fetchedAt) {
+            const fetchedMs = new Date(snap.fetchedAt).getTime();
+            const age = now - fetchedMs;
+            // Giữ snapshot tối đa 30 ngày trong DB để không làm mất dữ liệu lịch sử đúng kỳ; nếu >5 phút thì đánh dấu hết hạn mềm để làm mới ngầm khi OAuth hoạt động
+            if (age < 30 * 24 * 60 * 60 * 1000) {
+              MEM_CACHE.set(k, {
+                expiresAt: age < CACHE_TTL_MS ? fetchedMs + CACHE_TTL_MS : now - 1,
+                data: snap,
+              });
+            }
           }
         }
       }
-    }
-    if (rtRow?.value) {
-      const parsedRt = JSON.parse(rtRow.value) as Record<string, Ga4RealtimePropSnapshot>;
-      for (const [propId, snap] of Object.entries(parsedRt)) {
-        if (snap && snap.fetchedAt) {
-          const fetchedMs = new Date(snap.fetchedAt).getTime();
-          const age = now - fetchedMs;
-          if (age < 30 * 60 * 1000) {
-            REALTIME_MEM.set(propId, {
-              expiresAt: age < REALTIME_TTL_MS ? fetchedMs + REALTIME_TTL_MS : now - 1,
-              data: snap,
-            });
+      if (rtRow?.value) {
+        const parsedRt = JSON.parse(rtRow.value) as Record<string, Ga4RealtimePropSnapshot>;
+        for (const [propId, snap] of Object.entries(parsedRt)) {
+          if (snap && snap.fetchedAt) {
+            const fetchedMs = new Date(snap.fetchedAt).getTime();
+            const age = now - fetchedMs;
+            if (age < 30 * 60 * 1000) {
+              REALTIME_MEM.set(propId, {
+                expiresAt: age < REALTIME_TTL_MS ? fetchedMs + REALTIME_TTL_MS : now - 1,
+                data: snap,
+              });
+            }
           }
         }
       }
+    } catch {
+      // ignore corrupt cache
+    } finally {
+      store.dbCacheHydrated = true;
+      store.dbCacheHydratePromise = null;
     }
-  } catch {
-    // ignore corrupt cache
-  }
+  })();
+
+  store.dbCacheHydratePromise = p;
+  return p;
 }
 
 function pruneMemCache(): void {
   const now = Date.now();
   for (const [k, v] of MEM_CACHE.entries()) {
     const fetchedMs = new Date(v.data.fetchedAt).getTime();
-    if (!Number.isFinite(fetchedMs) || now - fetchedMs > 24 * 60 * 60 * 1000) {
+    if (!Number.isFinite(fetchedMs) || now - fetchedMs > 30 * 24 * 60 * 60 * 1000) {
       MEM_CACHE.delete(k);
     }
   }
@@ -314,9 +338,10 @@ async function fetchPropertyPeriodFromGa4(
                 { name: 'sessions' },
                 { name: 'screenPageViews' },
                 { name: 'totalUsers' },
+                { name: 'newUsers' },
               ],
               orderBys: [{ dimension: { dimensionName: 'date' }, desc: false }],
-              limit: 100,
+              limit: 400,
             },
           ],
         }),
@@ -375,13 +400,15 @@ async function fetchPropertyPeriodFromGa4(
       sessions: Number(r.metricValues?.[0]?.value || 0),
       pageViews: Number(r.metricValues?.[1]?.value || 0),
       users: Number(r.metricValues?.[2]?.value || 0),
+      newUsers: Number(r.metricValues?.[3]?.value || 0),
     }));
 
-    // Fetch location report + landingPagePlusQueryString report in parallel
+    // Fetch location, landingPagePlusQueryString, and sessionSourceMedium in parallel
     let locations: Ga4PropertyPeriodSnapshot['locations'] = [];
     let landingPages: Ga4PropertyPeriodSnapshot['landingPages'] = [];
+    let sourceMediums: NonNullable<Ga4PropertyPeriodSnapshot['sourceMediums']> = [];
     try {
-      const [locRes, lpRes] = await Promise.all([
+      const [locRes, lpRes, srcMedRes] = await Promise.all([
         fetch(
           `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
           {
@@ -395,7 +422,7 @@ async function fetchPropertyPeriodFromGa4(
               dimensions: [{ name: 'country' }, { name: 'region' }, { name: 'city' }],
               metrics: [{ name: 'sessions' }],
               orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
-              limit: 15,
+              limit: 20,
             }),
           },
         ),
@@ -415,9 +442,33 @@ async function fetchPropertyPeriodFromGa4(
                 { name: 'engagedSessions' },
                 { name: 'engagementRate' },
                 { name: 'conversions' },
+                { name: 'newUsers' },
+                { name: 'totalUsers' },
+              ],
+              orderBys: [{ metric: { metricName: 'newUsers' }, desc: true }],
+              limit: 100,
+            }),
+          },
+        ),
+        fetch(
+          `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              dateRanges: [{ startDate, endDate }],
+              dimensions: [{ name: 'sessionSourceMedium' }],
+              metrics: [
+                { name: 'sessions' },
+                { name: 'newUsers' },
+                { name: 'engagedSessions' },
+                { name: 'engagementRate' },
               ],
               orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
-              limit: 60,
+              limit: 40,
             }),
           },
         ),
@@ -450,12 +501,38 @@ async function fetchPropertyPeriodFromGa4(
           const es = Number(r.metricValues?.[1]?.value || 0);
           const er = Number(r.metricValues?.[2]?.value || 0);
           const conv = Math.round(Number(r.metricValues?.[3]?.value || 0));
+          const nu = Number(r.metricValues?.[4]?.value || 0);
+          const tu = Number(r.metricValues?.[5]?.value || 0);
           return {
             landingPage: r.dimensionValues?.[0]?.value || '/',
             sessions: s,
             engagedSessions: es,
             engagementRatePct: s > 0 ? Number((er * 100).toFixed(2)) : null,
             conversions: conv,
+            newUsers: nu,
+            totalUsers: tu,
+          };
+        });
+      }
+
+      if (srcMedRes.ok) {
+        const smJson = (await srcMedRes.json()) as {
+          rows?: Array<{
+            dimensionValues?: Array<{ value?: string }>;
+            metricValues?: Array<{ value?: string }>;
+          }>;
+        };
+        sourceMediums = (smJson.rows || []).map((r) => {
+          const s = Number(r.metricValues?.[0]?.value || 0);
+          const nu = Number(r.metricValues?.[1]?.value || 0);
+          const es = Number(r.metricValues?.[2]?.value || 0);
+          const er = Number(r.metricValues?.[3]?.value || 0);
+          return {
+            sourceMedium: r.dimensionValues?.[0]?.value || '(not set)',
+            sessions: s,
+            newUsers: nu,
+            engagedSessions: es,
+            engagementRatePct: s > 0 ? Number((er * 100).toFixed(2)) : null,
           };
         });
       }
@@ -480,6 +557,7 @@ async function fetchPropertyPeriodFromGa4(
       },
       daily,
       channels,
+      sourceMediums,
       events,
       devices,
       locations,
@@ -542,7 +620,21 @@ export async function getGa4LivePropertySnapshot(
   const key = `${propertyId}:${startDate}:${endDate}`;
   const now = Date.now();
   const cached = MEM_CACHE.get(key);
-  if (!forceBlocking && cached && cached.expiresAt > now) {
+  const missingLpNewUsers = Boolean(
+    cached &&
+      cached.data.landingPages.length > 0 &&
+      cached.data.landingPages[0].newUsers === undefined,
+  );
+  const missingSourceMediums = Boolean(
+    cached && cached.data.sourceMediums === undefined,
+  );
+  if (
+    !forceBlocking &&
+    cached &&
+    cached.expiresAt > now &&
+    !missingLpNewUsers &&
+    !missingSourceMediums
+  ) {
     return cached.data;
   }
 
@@ -576,7 +668,7 @@ async function fetchRealtimePropFromGa4(
   token: string,
 ): Promise<Ga4RealtimePropSnapshot | null> {
   try {
-    const [respTotal, respMin] = await Promise.all([
+    const [respTotal, respMin, respEvents, respPages] = await Promise.all([
       fetch(
         `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
         {
@@ -602,10 +694,42 @@ async function fetchRealtimePropFromGa4(
           }),
         },
       ),
+      fetch(
+        `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            dimensions: [{ name: 'eventName' }],
+            metrics: [{ name: 'eventCount' }],
+            limit: 30,
+          }),
+        },
+      ),
+      fetch(
+        `https://analyticsdata.googleapis.com/v1beta/properties/${propId}:runRealtimeReport`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            dimensions: [{ name: 'unifiedScreenName' }],
+            metrics: [{ name: 'activeUsers' }],
+            limit: 15,
+          }),
+        },
+      ),
     ]);
 
     let activeUsers30m: number | null = null;
     const minutesSeries: Array<{ minutesAgo: number; activeUsers: number }> = [];
+    const events: Array<{ eventName: string; eventCount: number }> = [];
+    const activePages: Array<{ pageTitle: string; activeUsers: number }> = [];
 
     if (respTotal.ok) {
       const j = (await respTotal.json()) as {
@@ -631,7 +755,41 @@ async function fetchRealtimePropFromGa4(
       }
     }
 
-    if (activeUsers30m === null && minutesSeries.length === 0) {
+    if (respEvents.ok) {
+      const je = (await respEvents.json()) as {
+        rows?: Array<{
+          dimensionValues?: Array<{ value?: string }>;
+          metricValues?: Array<{ value?: string }>;
+        }>;
+      };
+      for (const r of je.rows || []) {
+        const eventName = r.dimensionValues?.[0]?.value || '';
+        const eventCount = Number(r.metricValues?.[0]?.value || 0);
+        if (eventName && Number.isFinite(eventCount) && eventCount > 0) {
+          events.push({ eventName, eventCount });
+        }
+      }
+      events.sort((a, b) => b.eventCount - a.eventCount);
+    }
+
+    if (respPages.ok) {
+      const jp = (await respPages.json()) as {
+        rows?: Array<{
+          dimensionValues?: Array<{ value?: string }>;
+          metricValues?: Array<{ value?: string }>;
+        }>;
+      };
+      for (const r of jp.rows || []) {
+        const pageTitle = r.dimensionValues?.[0]?.value || '';
+        const activeU = Number(r.metricValues?.[0]?.value || 0);
+        if (pageTitle && Number.isFinite(activeU) && activeU > 0) {
+          activePages.push({ pageTitle, activeUsers: activeU });
+        }
+      }
+      activePages.sort((a, b) => b.activeUsers - a.activeUsers);
+    }
+
+    if (activeUsers30m === null && minutesSeries.length === 0 && events.length === 0) {
       return null;
     }
 
@@ -640,6 +798,8 @@ async function fetchRealtimePropFromGa4(
       fetchedAt: new Date().toISOString(),
       activeUsers30m: activeUsers30m ?? 0,
       minutesSeries,
+      events,
+      activePages,
     };
   } catch {
     return null;
@@ -685,10 +845,18 @@ function triggerRealtimePropRefreshSingleflight(propId: string): Promise<Ga4Real
 export async function getGa4RealtimeSnapshotNonBlocking(propertyIds: string[]): Promise<{
   activeUsers30m: number | null;
   minutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
+  realtimeEvents: Array<{ eventName: string; eventCount: number }>;
+  realtimeActivePages: Array<{ pageTitle: string; activeUsers: number }>;
   checkedAt: string | null;
 }> {
   if (propertyIds.length === 0) {
-    return { activeUsers30m: null, minutesSeries: [], checkedAt: null };
+    return {
+      activeUsers30m: null,
+      minutesSeries: [],
+      realtimeEvents: [],
+      realtimeActivePages: [],
+      checkedAt: null,
+    };
   }
   ensureM02M04BackgroundWarmerStarted();
   await hydrateFromDbIfNeeded();
@@ -698,10 +866,15 @@ export async function getGa4RealtimeSnapshotNonBlocking(propertyIds: string[]): 
   let anyHit = false;
   let latestCheckedAt: string | null = null;
   const minuteMap = new Map<number, number>();
+  const eventMap = new Map<string, number>();
+  const pageMap = new Map<string, number>();
 
   for (const propId of propertyIds.slice(0, 6)) {
     const entry = REALTIME_MEM.get(propId);
-    if (!entry || entry.expiresAt <= now) {
+    const missingEventsOrPages = Boolean(
+      entry && (entry.data.events === undefined || entry.data.activePages === undefined),
+    );
+    if (!entry || entry.expiresAt <= now || missingEventsOrPages) {
       void triggerRealtimePropRefreshSingleflight(propId);
     }
     if (entry?.data) {
@@ -715,8 +888,23 @@ export async function getGa4RealtimeSnapshotNonBlocking(propertyIds: string[]): 
       for (const m of entry.data.minutesSeries) {
         minuteMap.set(m.minutesAgo, (minuteMap.get(m.minutesAgo) || 0) + m.activeUsers);
       }
+      for (const ev of entry.data.events || []) {
+        eventMap.set(ev.eventName, (eventMap.get(ev.eventName) || 0) + ev.eventCount);
+      }
+      for (const pg of entry.data.activePages || []) {
+        pageMap.set(pg.pageTitle, (pageMap.get(pg.pageTitle) || 0) + pg.activeUsers);
+      }
     }
   }
+
+  const realtimeEvents = Array.from(eventMap.entries())
+    .map(([eventName, eventCount]) => ({ eventName, eventCount }))
+    .sort((a, b) => b.eventCount - a.eventCount);
+
+  const realtimeActivePages = Array.from(pageMap.entries())
+    .map(([pageTitle, activeUsers]) => ({ pageTitle, activeUsers }))
+    .sort((a, b) => b.activeUsers - a.activeUsers)
+    .slice(0, 15);
 
   return {
     activeUsers30m: anyHit ? total30m : null,
@@ -726,6 +914,8 @@ export async function getGa4RealtimeSnapshotNonBlocking(propertyIds: string[]): 
           return { minutesAgo, activeUsers: minuteMap.get(minutesAgo) || 0 };
         })
       : [],
+    realtimeEvents,
+    realtimeActivePages,
     checkedAt: latestCheckedAt,
   };
 }

@@ -3,6 +3,7 @@ import { jsonError, jsonSuccess } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import {
+  compareKeywordsViaFreeSuggest,
   fetchGoogleVietnamSuggestions,
   getGoogleTrendsLiveSnapshot,
   importGoogleTrendsTimelineCsv,
@@ -66,10 +67,28 @@ export async function POST(req: Request) {
       return jsonSuccess({ ok: true });
     }
 
+    if (action === 'compare_suggest') {
+      const keywords = Array.isArray(raw.keywords)
+        ? raw.keywords.map((k) => String(k || '').trim()).filter(Boolean)
+        : [];
+      const result = await compareKeywordsViaFreeSuggest(keywords);
+      bumpDomainRevisions(['ads'], 'compare_trends_suggest');
+      return jsonSuccess(result);
+    }
+
     if (action === 'sync_serpapi') {
       const keyword = String(raw.keyword || '').trim();
+      const keywords = Array.isArray(raw.keywords)
+        ? raw.keywords.map((k) => String(k || '').trim()).filter(Boolean)
+        : undefined;
+      const geo = typeof raw.geo === 'string' && raw.geo.trim() ? raw.geo.trim() : 'VN';
       const dateRange = typeof raw.dateRange === 'string' ? raw.dateRange : 'today 1-m';
-      const result = await syncKeywordInterestViaSerpApi({ keyword, geo: 'VN', dateRange });
+      const result = await syncKeywordInterestViaSerpApi({
+        keyword,
+        keywords,
+        geo,
+        dateRange,
+      });
       bumpDomainRevisions(['ads', 'reports'], 'sync_serpapi_trends');
       return jsonSuccess(result);
     }

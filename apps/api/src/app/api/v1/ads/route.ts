@@ -22,6 +22,7 @@ export async function GET(req: Request) {
     if (url.searchParams.get('view') === 'spec') {
       const minImprRaw = url.searchParams.get('minImpr');
       const maxCtrRaw = url.searchParams.get('maxCtr');
+      const compare = url.searchParams.get('compare') === '1';
       const m03 = await getM03AdsSeoDashboardSpec({
         websiteId: url.searchParams.get('websiteId'),
         preset: url.searchParams.get('preset'),
@@ -32,6 +33,7 @@ export async function GET(req: Request) {
         contentPage: Number(url.searchParams.get('contentPage') || 1),
         minImpr: minImprRaw ? Number(minImprRaw) : undefined,
         maxCtr: maxCtrRaw ? Number(maxCtrRaw) : undefined,
+        compare,
         roleCode: auth.user.roleCode,
       });
       return jsonSuccess(m03);

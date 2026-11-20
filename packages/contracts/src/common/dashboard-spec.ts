@@ -68,7 +68,48 @@ export interface M02TrafficSeriesPointDto {
   sessions: number | null;
   pageViews: number | null;
   users: number | null;
+  newUsers?: number | null;
   isMissingData: boolean;
+}
+
+export interface M02SourceMediumRowDto {
+  sourceMedium: string;
+  sessions: number;
+  newUsers: number;
+  engagedSessions: number;
+  engagementRatePct: number | null;
+}
+
+export interface M02AdsSearchTermRowDto {
+  searchTerm: string;
+  campaignName: string;
+  adGroupName: string;
+  status: string;
+  impressions: number;
+  clicks: number;
+  ctrPct: number | null;
+  cost: number;
+  conversions: number;
+}
+
+export interface M02AdsLandingPageRowDto {
+  url: string;
+  campaignName: string;
+  clicks: number;
+  impressions: number;
+  ctrPct: number | null;
+  avgCpc: number | null;
+  cost: number;
+  conversions: number;
+}
+
+export interface M02AdsTimeScheduleRowDto {
+  dayOfWeek: string;
+  hour: number;
+  clicks: number;
+  impressions: number;
+  cost: number;
+  conversions: number;
 }
 
 export interface M02ChannelRowDto {
@@ -83,6 +124,15 @@ export interface M02ChannelRowDto {
   validLeadCount: number;
 }
 
+export type M02LandingPageCategoryKey =
+  | 'homepage'
+  | 'product'
+  | 'quote_contact'
+  | 'project'
+  | 'content_seo'
+  | 'technical_noise'
+  | 'other';
+
 export interface M02LandingPageRowDto {
   landingPage: string;
   sessions: number;
@@ -90,6 +140,29 @@ export interface M02LandingPageRowDto {
   engagementRatePct: number | null;
   successfulFormCount: number | null;
   validLeadCount: number;
+  newUsers?: number | null;
+  totalUsers?: number | null;
+  newUserRatePct?: number | null;
+  categoryKey?: M02LandingPageCategoryKey;
+  categoryLabel?: string;
+}
+
+export interface M02LandingPageCategorySummaryDto {
+  categoryKey: M02LandingPageCategoryKey | string;
+  categoryLabel: string;
+  pageCount: number;
+  newUsers: number | null;
+  totalUsers: number | null;
+  sessions: number;
+  engagedSessions: number | null;
+  engagementRatePct: number | null;
+  validLeadCount: number;
+}
+
+export interface M02Ga4EventItemDto {
+  eventName: string;
+  eventCount: number;
+  totalUsers?: number | null;
 }
 
 export interface M02InteractionRowDto {
@@ -119,6 +192,16 @@ export interface M02JourneyStepDto {
   sessionCount: number | null;
 }
 
+export interface M02CampaignDailyRowDto {
+  date: string;
+  cost: number;
+  impressions: number;
+  clicks: number;
+  ctrPct: number | null;
+  avgCpc: number | null;
+  conversions: number;
+}
+
 export interface M02CampaignRowDto {
   campaignId: string;
   campaignName: string;
@@ -138,12 +221,19 @@ export interface M02CampaignRowDto {
   costPerValidLead: number | null;
   attributionStatus: 'RECONCILED' | 'UNATTRIBUTED_WEBSITE' | 'NO_CRM_MATCH';
   attributionNote: string;
+  targetWebsiteDomain?: string | null;
+  finalUrls?: string[];
+  primaryDestinationUrl?: string | null;
+  dailyRows?: M02CampaignDailyRowDto[];
 }
 
 export interface M02AdsSectionDto {
   status: 'CONNECTED' | 'UNCONFIGURED' | 'ERROR';
   statusMessage: string;
   currencyCode: string;
+  adsScopeMode?: 'ALL_WEBSITES' | 'SELECTED_WEBSITE';
+  activeCampaignsCount?: number;
+  totalCampaignsCount?: number;
   metrics: {
     cost: number | null;
     impressions: number | null;
@@ -163,6 +253,18 @@ export interface M02AdsSectionDto {
     cost: number | null;
     conversions: number | null;
     clicks: number | null;
+    impressions?: number | null;
+    ctrPct?: number | null;
+    avgCpc?: number | null;
+  }>;
+  previousSeries?: Array<{
+    date: string;
+    cost: number | null;
+    conversions: number | null;
+    clicks: number | null;
+    impressions?: number | null;
+    ctrPct?: number | null;
+    avgCpc?: number | null;
   }>;
   campaigns: PaginatedTableDto<M02CampaignRowDto>;
   breakdowns: {
@@ -187,6 +289,9 @@ export interface M02AdsSectionDto {
       cost: number;
       conversions: number;
     }>;
+    searchTerms?: M02AdsSearchTermRowDto[];
+    landingPages?: M02AdsLandingPageRowDto[];
+    timeSchedule?: M02AdsTimeScheduleRowDto[];
     keywordAvailabilityNote: string | null;
     devices: Array<{ device: string; cost: number; clicks: number; impressions: number }>;
     regions: Array<{ region: string; cost: number; clicks: number; impressions: number }>;
@@ -216,14 +321,20 @@ export interface M02TrafficInteractionDto {
     previousFormLeadCount?: number | null;
   };
   realtimeMinutesSeries: Array<{ minutesAgo: number; activeUsers: number }>;
+  realtimeEvents?: M02Ga4EventItemDto[];
+  realtimeActivePages?: Array<{ pageTitle: string; activeUsers: number }>;
+  allGa4Events?: M02Ga4EventItemDto[];
   charts: {
     trafficSeries: M02TrafficSeriesPointDto[];
+    previousTrafficSeries?: M02TrafficSeriesPointDto[];
     channelRows: M02ChannelRowDto[];
+    sourceMediumRows?: M02SourceMediumRowDto[];
     deviceRows: Array<{ deviceCategory: string; sessions: number }>;
     geoRows: Array<{ locationLabel: string; sessions: number }>;
   };
   tables: {
     landingPageRows: PaginatedTableDto<M02LandingPageRowDto>;
+    landingPageCategories?: M02LandingPageCategorySummaryDto[];
     interactionRows: M02InteractionRowDto[];
     formSessionRatePct: number | null;
     productInterestRows: M02ProductInterestRowDto[];
@@ -389,6 +500,7 @@ export interface M03AdsSeoDashboardDto {
     };
     charts: {
       seoDailySeries: M03SeoDailyPointDto[];
+      previousSeoDailySeries?: M03SeoDailyPointDto[];
       opportunityQueries: Array<{ query: string; impressions: number; ctrPct: number | null; averagePosition: number | null }>;
       opportunityThresholdNote: string;
       pagesDeltaSummary?: {
@@ -402,6 +514,14 @@ export interface M03AdsSeoDashboardDto {
       pages: PaginatedTableDto<M03SeoComparisonRowDto>;
       content?: PaginatedTableDto<M03SeoContentRowDto>;
       deviceCountry?: M03SeoDeviceCountryRowDto[];
+      queryPageLinks?: Array<{
+        query: string;
+        page: string;
+        clicks: number;
+        impressions: number;
+        ctrPct: number | null;
+        averagePosition: number | null;
+      }>;
     };
     opportunityConfig?: {
       minImpressionsForLowCtr: number;
@@ -424,6 +544,8 @@ export interface M03AdsSeoDashboardDto {
       suggestions: string[];
       checkedAt: string;
     }>;
+    regionRows?: Array<{ regionName: string; term: string; interestValue: number }>;
+    relatedQueries?: Array<{ term: string; query: string; valueLabel: string; kind: 'rising' | 'top' }>;
     serpApiConfigured?: boolean;
     lastSyncedAt?: string | null;
   };
@@ -491,7 +613,16 @@ export interface M04ResultsReportDto {
     label: string;
     receivedLeadCount: number | null;
     validLeadCount: number | null;
+    wonLeadCount?: number | null;
+    adCost?: number | null;
     isMissingDay?: boolean;
+  }>;
+  previousTimeSeries?: Array<{
+    bucketStart: string;
+    label: string;
+    receivedLeadCount: number | null;
+    validLeadCount: number | null;
+    wonLeadCount?: number | null;
   }>;
   dataQuality?: {
     missingWebsiteCount: number;
@@ -610,6 +741,23 @@ export interface M04ResultsReportDto {
       website: string;
       quoteSentAt: string | null;
       waitingDays: number;
+    }>;
+    detailedLeads?: PaginatedTableDto<{
+      stt: number;
+      leadId: number;
+      leadCode: string;
+      receivedAt: string;
+      assignedSalesName: string;
+      companyOrCustomer: string;
+      phone: string;
+      sourceWebsite: string;
+      contactChannel: string;
+      marketingSource: string;
+      productsText: string;
+      pipelineStatus: string;
+      pipelineStatusLabel: string;
+      noteOrReason: string;
+      isAnonymized: boolean;
     }>;
   };
 }

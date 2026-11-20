@@ -305,12 +305,7 @@ export default function DashboardPage() {
     <div className="space-y-4">
       {/* 1. Thanh điều hành bao quát toàn hệ thống (không bắt bấm chọn từng tab website) */}
       <WebsiteDashboardHeader
-        title="Tổng quan điều hành"
-        subtitle={
-          report
-            ? `Hôm nay có gì cần chú ý? · Bức tranh bao quát toàn hệ thống (${report.fromDate} → ${report.toDate})`
-            : 'Hôm nay có gì cần chú ý? · Bức tranh bao quát toàn hệ thống'
-        }
+        title="Tổng quan"
         scope={{ ...scope, websiteId: 'all' }}
         availableWebsites={report?.availableWebsites || knownWebsites}
         hideWebsiteTabs={true}
@@ -364,38 +359,31 @@ export default function DashboardPage() {
       )}
 
       {/* ===================================================================== */}
-      {/* KHỐI 1 (ĐƯA LÊN ĐẦU TIÊN): BẢNG CÔNG VIỆC ƯU TIÊN CẦN LÀM TRƯỚC        */}
+      {/* KHỐI 1: VIỆC CẦN XỬ LÝ                                                */}
       {/* ===================================================================== */}
       <section
         aria-labelledby="dashboard-priority-tasks-heading"
         className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs space-y-3"
       >
         <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-2">
             <span className="w-8 h-8 rounded-xl bg-amber-50 border border-amber-200/80 text-amber-700 grid place-items-center shrink-0">
               <ClipboardCheck aria-hidden="true" className="w-4 h-4" />
             </span>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 id="dashboard-priority-tasks-heading" className="text-sm sm:text-base font-bold text-slate-900">
-                  Công việc ưu tiên cần xử lý trước
-                </h2>
-                <span
-                  className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
-                    actionableTasks.length > 0
-                      ? 'bg-amber-100 text-amber-900 border border-amber-300/80'
-                      : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                  }`}
-                >
-                  {actionableTasks.length > 0
-                    ? `${actionableTasks.length} hạng mục tồn đọng`
-                    : 'Không có tồn đọng'}
-                </span>
-              </div>
-              <p className="text-xs text-slate-500">
-                Tổng hợp đầu việc phát sinh thật từ Kinh doanh, SEO, Thiết kế AI và Kết nối dữ liệu để xử lý ngay trong ca
-              </p>
-            </div>
+            <h2 id="dashboard-priority-tasks-heading" className="text-sm sm:text-base font-bold text-slate-900">
+              Việc cần xử lý
+            </h2>
+            <span
+              className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                actionableTasks.length > 0
+                  ? 'bg-amber-100 text-amber-900 border border-amber-300/80'
+                  : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+              }`}
+            >
+              {actionableTasks.length > 0
+                ? `${actionableTasks.length} đầu việc`
+                : 'Đã xử lý xong'}
+            </span>
           </div>
 
           {/* Chip kiểm soát chất lượng dữ liệu đặt gọn ngay trên thanh tiêu đề */}
@@ -403,19 +391,19 @@ export default function DashboardPage() {
             <div className="flex flex-wrap items-center gap-1.5 text-xs">
               <span className="text-slate-400 font-medium inline-flex items-center gap-1 mr-0.5">
                 <ShieldAlert aria-hidden="true" className="w-3.5 h-3.5 text-slate-400" />
-                Rà soát nhanh:
+                Kiểm tra nhanh:
               </span>
               <Link
                 href={canViewLeads ? `/leads?missingProduct=1&${scopeQueryForLinks}` : '/reports'}
                 className="px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-medium transition"
               >
-                Chưa gắn sản phẩm: <strong className="tabular-nums">{dq.missingProductCount}</strong>
+                Thiếu sản phẩm: <strong className="tabular-nums">{dq.missingProductCount}</strong>
               </Link>
               <Link
                 href={canViewLeads ? `/leads?missingWebsite=1&${scopeQueryForLinks}` : '/reports'}
                 className="px-2.5 py-1 rounded-lg bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-medium transition"
               >
-                Chưa rõ website: <strong className="tabular-nums">{dq.missingWebsiteCount}</strong>
+                Thiếu website: <strong className="tabular-nums">{dq.missingWebsiteCount}</strong>
               </Link>
               <Link
                 href="/settings?tab=sync"
@@ -442,7 +430,7 @@ export default function DashboardPage() {
         ) : actionableTasks.length === 0 ? (
           <div className="rounded-xl bg-emerald-50/60 border border-emerald-200/80 px-4 py-3.5 flex items-center gap-2.5 text-xs text-emerald-900 font-medium">
             <CheckCircle2 aria-hidden="true" className="w-4 h-4 text-emerald-600 shrink-0" />
-            <span>Toàn bộ đầu việc ưu tiên trong kỳ đang chọn đều đã được xử lý gọn gàng.</span>
+            <span>Không có đầu việc tồn đọng trong kỳ đang chọn.</span>
           </div>
         ) : (
           <div
@@ -476,7 +464,7 @@ export default function DashboardPage() {
                         }`}
                       >
                         <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
-                        <span>{isCrit ? 'Ưu tiên xử lý ngay' : 'Cần kiểm tra'}</span>
+                        <span>{isCrit ? 'Cần xử lý ngay' : 'Cần kiểm tra'}</span>
                       </span>
                       <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-semibold">
                         {task.moduleLabel}
@@ -500,7 +488,7 @@ export default function DashboardPage() {
                   </div>
 
                   <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-[#1E3A8A]">
-                    <span>Đi tới xử lý ngay</span>
+                    <span>Mở xử lý</span>
                     <ArrowRight
                       aria-hidden="true"
                       className="w-3.5 h-3.5 transition-transform group-hover:translate-x-0.5"
@@ -514,9 +502,9 @@ export default function DashboardPage() {
       </section>
 
       {/* ===================================================================== */}
-      {/* KHỐI 2: BỨC TRANH BAO QUÁT 4 MẢNG NGHIỆP VỤ TOÀN CÔNG TY              */}
+      {/* KHỐI 2: 4 MẢNG NGHIỆP VỤ                                              */}
       {/* ===================================================================== */}
-      <section aria-label="Bức tranh bao quát 4 mảng nghiệp vụ" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
+      <section aria-label="Tổng hợp 4 mảng nghiệp vụ" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
         {/* Mảng 1: Kinh doanh & Phễu chốt đơn */}
         <Link
           href={canViewLeads ? `/leads?${scopeQueryForLinks}` : `/reports?${scopeQueryForLinks}`}
@@ -536,19 +524,19 @@ export default function DashboardPage() {
               <AnimatedMetricNumber value={report?.overview.totalLeadsL1 ?? null} />
             </span>
             <span className="text-xs text-slate-500">
-              cơ hội (Hợp lệ: <strong className="text-slate-800">{report?.overview.validLeadsL2 ?? 0}</strong>)
+              Lead (Hợp lệ: <strong className="text-slate-800">{report?.overview.validLeadsL2 ?? 0}</strong>)
             </span>
           </div>
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
             <span>
-              Đang báo giá: <strong className="text-slate-900">{(report?.overview.quotingCount ?? 0) + (report?.overview.quoteSentCount ?? 0)}</strong> · Thành công:{' '}
+              Đang báo giá: <strong className="text-slate-900">{(report?.overview.quotingCount ?? 0) + (report?.overview.quoteSentCount ?? 0)}</strong> · Chốt:{' '}
               <strong className="text-emerald-700">{report?.overview.wonCount ?? 0}</strong>
             </span>
             <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform" />
           </div>
         </Link>
 
-        {/* Mảng 2: Lưu lượng & Tìm kiếm tự nhiên toàn hệ thống */}
+        {/* Mảng 2: Lưu lượng & SEO */}
         <Link
           href={`/ads?${scopeQueryForLinks}`}
           className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
@@ -556,7 +544,7 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
               <Globe aria-hidden="true" className="w-4 h-4 text-emerald-600" />
-              Lưu lượng &amp; SEO Toàn hệ thống
+              Lưu lượng &amp; SEO
             </span>
             <span className="px-2 py-0.5 rounded-full bg-blue-50 text-[#1E3A8A] text-[11px] font-semibold">
               {report?.availableWebsites?.length || 4} website
@@ -567,19 +555,19 @@ export default function DashboardPage() {
               <AnimatedMetricNumber value={totalSystemPageViews} />
             </span>
             <span className="text-xs text-slate-500">
-              lượt xem trang · <strong className="text-emerald-700 tabular-nums">{totalSystemGscClicks?.toLocaleString('vi-VN') ?? '—'}</strong> click Google
+              lượt xem · <strong className="text-emerald-700 tabular-nums">{totalSystemGscClicks?.toLocaleString('vi-VN') ?? '—'}</strong> click SEO
             </span>
           </div>
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
             <span>
-              Bài SEO đã đăng: <strong className="text-slate-900">{report?.marketingSummary.publishedSeoArticles ?? 0}</strong> · Bản nháp:{' '}
+              Bài đã đăng: <strong className="text-slate-900">{report?.marketingSummary.publishedSeoArticles ?? 0}</strong> · Nháp:{' '}
               <strong className="text-amber-700">{report?.marketingSummary.draftSeoArticles ?? 0}</strong>
             </span>
             <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform" />
           </div>
         </Link>
 
-        {/* Mảng 3: Chiến dịch & Hiệu suất Kênh thu hút */}
+        {/* Mảng 3: Chiến dịch & Kênh thu hút */}
         <Link
           href={`/tracking?${scopeQueryForLinks}`}
           className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
@@ -587,10 +575,10 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
               <Megaphone aria-hidden="true" className="w-4 h-4 text-indigo-600" />
-              Chiến dịch &amp; Kênh thu hút
+              Chiến dịch &amp; Kênh
             </span>
             <span className="px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-semibold">
-              {report?.byChannel?.filter((c) => c.count > 0).length || 0} kênh phát sinh
+              {report?.byChannel?.filter((c) => c.count > 0).length || 0} kênh
             </span>
           </div>
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 mt-0.5">
@@ -600,7 +588,7 @@ export default function DashboardPage() {
                 : `${report?.marketingSummary.effectiveLeadsFromAds ?? 0} Lead Ads`}
             </span>
             <span className="text-xs text-slate-500">
-              {report?.marketingSummary.totalAdsSpend ? 'chi tiêu Ads' : 'ghi nhận từ GCLID / UTM'}
+              {report?.marketingSummary.totalAdsSpend ? 'chi phí Ads' : 'từ quảng cáo'}
             </span>
           </div>
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
@@ -609,7 +597,7 @@ export default function DashboardPage() {
                 .filter((c) => c.count > 0)
                 .slice(0, 2)
                 .map((c) => `${c.label}: ${c.count}`)
-                .join(' · ') || 'Xem phân tích đa kênh'}
+                .join(' · ') || 'Xem phân tích kênh'}
             </span>
             <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform shrink-0" />
           </div>
@@ -623,7 +611,7 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between gap-2">
             <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
               <Sparkles aria-hidden="true" className="w-4 h-4 text-violet-600" />
-              Thiết kế AI &amp; Phối cảnh
+              Thiết kế AI
             </span>
             <span className="px-2 py-0.5 rounded-full bg-violet-50 text-violet-700 text-[11px] font-semibold">
               {report?.designSummary.avgProcessingSecText &&
@@ -637,12 +625,12 @@ export default function DashboardPage() {
               <AnimatedMetricNumber value={report?.designSummary.totalRequests ?? 0} />
             </span>
             <span className="text-xs text-slate-500">
-              yêu cầu (Đang chờ: <strong className="text-amber-700">{report?.designSummary.pendingCount ?? 0}</strong>)
+              yêu cầu (Chờ: <strong className="text-amber-700">{report?.designSummary.pendingCount ?? 0}</strong>)
             </span>
           </div>
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
             <span>
-              Hoàn tất: <strong className="text-slate-900">{(report?.designSummary.completed3dCount ?? 0) + (report?.designSummary.completedBannerCount ?? 0)}</strong> bản vẽ 3D / Banner
+              Hoàn tất: <strong className="text-slate-900">{(report?.designSummary.completed3dCount ?? 0) + (report?.designSummary.completedBannerCount ?? 0)}</strong> bản vẽ
             </span>
             <ArrowRight aria-hidden="true" className="w-3.5 h-3.5 text-[#1E3A8A] opacity-70 group-hover:translate-x-0.5 transition-transform" />
           </div>
@@ -650,10 +638,9 @@ export default function DashboardPage() {
       </section>
 
       {/* ===================================================================== */}
-      {/* KHỐI 3: SO SÁNH ĐỒNG THỜI TOÀN BỘ WEBSITE (7/12) + NHỊP ĐỘ & SALES (5/12) */}
+      {/* KHỐI 3: HIỆU SUẤT THEO WEBSITE (7/12) + LEAD & SALES (5/12)            */}
       {/* ===================================================================== */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-stretch">
-        {/* 7/12: Bức tranh song song tất cả Website (nhìn 1 lần thấy toàn bộ, không phải bấm từng tab) */}
         <section
           aria-labelledby="dashboard-websites-matrix-heading"
           className="xl:col-span-7 rounded-2xl bg-white border border-slate-200/90 shadow-2xs overflow-hidden flex flex-col justify-between"
@@ -663,14 +650,14 @@ export default function DashboardPage() {
               <div className="flex items-center gap-2">
                 <Globe aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
                 <h2 id="dashboard-websites-matrix-heading" className="text-sm font-bold text-slate-900">
-                  Hiệu suất đồng thời toàn bộ hệ thống Website
+                  Hiệu suất theo Website
                 </h2>
               </div>
               <Link
                 href={`/reports?${scopeQueryForLinks}`}
                 className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
               >
-                <span>Báo cáo đối soát chi tiết</span>
+                <span>Báo cáo chi tiết</span>
                 <ArrowRight aria-hidden="true" className="w-3.5 h-3.5" />
               </Link>
             </div>
@@ -706,7 +693,7 @@ export default function DashboardPage() {
                           )}
                         </div>
                         <span className="text-[11px] text-slate-500 tabular-nums">
-                          Tỷ trọng nhu cầu: <strong className="text-slate-700">{ws.sharePct}%</strong>
+                          Tỷ trọng: <strong className="text-slate-700">{ws.sharePct}%</strong>
                         </span>
                       </div>
                     </div>
@@ -725,7 +712,7 @@ export default function DashboardPage() {
                         </div>
                       </div>
                       <div className="text-right min-w-[60px]">
-                        <div className="text-[11px] text-slate-400">Cơ hội</div>
+                        <div className="text-[11px] text-slate-400">Lead</div>
                         <div className="font-extrabold text-[#0F275C] tabular-nums">
                           {ws.totalLeadsL1}
                         </div>
@@ -752,7 +739,7 @@ export default function DashboardPage() {
                             href={canViewLeads ? `/leads?missingWebsite=1&${scopeQueryForLinks}` : '/reports'}
                             className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 text-[11px] font-semibold transition"
                           >
-                            Phân bổ web
+                            Gắn web
                           </Link>
                         </div>
                       )}
@@ -766,13 +753,13 @@ export default function DashboardPage() {
           {/* Chân thẻ tổng cộng */}
           <div className="px-4 py-2.5 bg-slate-50/80 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600">
             <span>
-              Tổng lượt xem toàn hệ thống:{' '}
+              Tổng lượt xem:{' '}
               <strong className="text-slate-900 tabular-nums">
                 {totalSystemPageViews !== null ? totalSystemPageViews.toLocaleString('vi-VN') : '—'}
               </strong>
             </span>
             <span>
-              Tổng Click tự nhiên Google:{' '}
+              Tổng Click SEO:{' '}
               <strong className="text-emerald-700 tabular-nums">
                 {totalSystemGscClicks !== null ? totalSystemGscClicks.toLocaleString('vi-VN') : '—'}
               </strong>
@@ -780,9 +767,8 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        {/* 5/12: Nhịp độ xu hướng trong kỳ + Đội ngũ phụ trách */}
+        {/* 5/12: Lead mới theo ngày + Đội ngũ Kinh doanh */}
         <div className="xl:col-span-5 flex flex-col gap-4 justify-between">
-          {/* Biểu đồ xu hướng mượt gọn */}
           <section
             aria-labelledby="dashboard-pulse-heading"
             className="rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs"
@@ -791,7 +777,7 @@ export default function DashboardPage() {
               <div className="flex items-center gap-2">
                 <TrendingUp aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
                 <h2 id="dashboard-pulse-heading" className="text-sm font-bold text-slate-900">
-                  Nhịp độ nhu cầu khách hàng theo ngày
+                  Lead mới theo ngày
                 </h2>
               </div>
               <span className="text-[11px] text-slate-500">
@@ -805,7 +791,7 @@ export default function DashboardPage() {
                   viewBox={`0 0 ${sparklineGeometry.W} ${sparklineGeometry.H}`}
                   className="w-full h-[126px] overflow-visible"
                   role="img"
-                  aria-label="Biểu đồ nhịp độ nhu cầu theo ngày"
+                  aria-label="Biểu đồ Lead mới theo ngày"
                 >
                   <defs>
                     <linearGradient id="dashPulseGrad" x1="0" y1="0" x2="0" y2="1">
@@ -866,7 +852,6 @@ export default function DashboardPage() {
             )}
           </section>
 
-          {/* Tiến độ đội ngũ Kinh doanh (đồng bộ ảnh đại diện & hình nền thành viên) */}
           <section
             aria-labelledby="dashboard-team-heading"
             className="flex-1 rounded-2xl bg-white border border-slate-200/90 p-4 shadow-2xs flex flex-col justify-between"
@@ -876,11 +861,11 @@ export default function DashboardPage() {
                 <div className="flex items-center gap-2">
                   <Users aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
                   <h2 id="dashboard-team-heading" className="text-sm font-bold text-slate-900">
-                    Phân bổ khối lượng đội ngũ phụ trách
+                    Đội ngũ Kinh doanh
                   </h2>
                 </div>
                 <Link href="/profile" className="text-xs font-semibold text-[#1E3A8A] hover:underline">
-                  Đồng nghiệp →
+                  Thành viên →
                 </Link>
               </div>
 

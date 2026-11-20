@@ -6,10 +6,12 @@ import { TrendingUp } from 'lucide-react';
 
 interface MarketingTrafficChartProps {
   points: M02TrafficSeriesPointDto[];
+  previousPoints?: M02TrafficSeriesPointDto[];
+  compareEnabled?: boolean;
   loading?: boolean;
 }
 
-type ChartFocusMode = 'combo' | 'sessions' | 'depth';
+type ChartFocusMode = 'combo' | 'newUsers' | 'sessions' | 'depth';
 
 function buildSmoothSvgSegments(
   coords: Array<{ x: number; y: number; valid: boolean }>,
@@ -55,7 +57,12 @@ function buildSmoothSvgSegments(
   return { linePaths, areaPaths };
 }
 
-export function MarketingTrafficChart({ points, loading }: MarketingTrafficChartProps) {
+export function MarketingTrafficChart({
+  points,
+  previousPoints,
+  compareEnabled = false,
+  loading,
+}: MarketingTrafficChartProps) {
   const [mode, setMode] = useState<ChartFocusMode>('combo');
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const chartUid = useId().replace(/:/g, '');
@@ -95,6 +102,11 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
     };
   }, [points]);
 
+  const hasNewUsersSeries = useMemo(
+    () => points.some((p) => typeof p.newUsers === 'number' && p.newUsers !== null),
+    [points],
+  );
+
   const geom = useMemo(() => {
     const W = 760;
     const H = 248;
@@ -107,15 +119,30 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
     const baselineY = padTop + innerH;
 
     let maxVal = 4;
-    for (const p of points) {
-      if (p.isMissingData) continue;
-      if (mode === 'depth') {
-        const depth = (p.sessions ?? 0) > 0 ? (p.pageViews ?? 0) / (p.sessions || 1) : 0;
-        maxVal = Math.max(maxVal, Math.ceil(depth * 1.2));
-      } else if (mode === 'sessions') {
-        maxVal = Math.max(maxVal, p.sessions ?? 0);
-      } else {
-        maxVal = Math.max(maxVal, p.sessions ?? 0, p.pageViews ?? 0);
+    for (let i = 0; i < points.length; i += 1) {
+      const p = points[i];
+      const prev = compareEnabled ? previousPoints?.[i] : undefined;
+      if (!p.isMissingData) {
+        if (mode === 'depth') {
+          const depth = (p.sessions ?? 0) > 0 ? (p.pageViews ?? 0) / (p.sessions || 1) : 0;
+          maxVal = Math.max(maxVal, Math.ceil(depth * 1.2));
+        } else if (mode === 'newUsers') {
+          maxVal = Math.max(maxVal, p.newUsers ?? p.users ?? 0);
+        } else if (mode === 'sessions') {
+          maxVal = Math.max(maxVal, p.sessions ?? 0);
+        } else {
+          maxVal = Math.max(maxVal, p.sessions ?? 0, p.pageViews ?? 0);
+        }
+      }
+      if (prev && !prev.isMissingData) {
+        if (mode === 'depth') {
+          const depthP = (prev.sessions ?? 0) > 0 ? (prev.pageViews ?? 0) / (prev.sessions || 1) : 0;
+          maxVal = Math.max(maxVal, Math.ceil(depthP * 1.2));
+        } else if (mode === 'newUsers') {
+          maxVal = Math.max(maxVal, prev.newUsers ?? prev.users ?? 0);
+        } else {
+          maxVal = Math.max(maxVal, prev.sessions ?? 0);
+        }
       }
     }
     const niceTop = mode === 'depth' ? Math.max(4, Math.ceil(maxVal)) : Math.max(4, Math.ceil(maxVal / 4) * 4);
@@ -127,11 +154,27 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
           : padLeft + (idx / (points.length - 1)) * innerW;
       const sVal = p.sessions ?? 0;
       const pvVal = p.pageViews ?? 0;
+      const nuVal = p.newUsers ?? p.users ?? 0;
       const depthVal = sVal > 0 ? Number((pvVal / sVal).toFixed(2)) : 0;
+
+      const prev = compareEnabled ? previousPoints?.[idx] : undefined;
+      const prevSVal = prev && !prev.isMissingData ? prev.sessions ?? 0 : null;
+      const prevNuVal =
+        prev && !prev.isMissingData ? (prev.newUsers ?? prev.users ?? null) : null;
+      const prevDepthVal =
+        prev && !prev.isMissingData && (prev.sessions ?? 0) > 0
+          ? Number(((prev.pageViews ?? 0) / (prev.sessions || 1)).toFixed(2))
+          : null;
 
       const ySession = baselineY - (sVal / niceTop) * innerH;
       const yPv = baselineY - (pvVal / niceTop) * innerH;
+      const yNewUsers = baselineY - (nuVal / niceTop) * innerH;
       const yDepth = baselineY - (depthVal / niceTop) * innerH;
+
+      const prevMainNumeric =
+        mode === 'depth' ? prevDepthVal : mode === 'newUsers' ? prevNuVal : prevSVal;
+      const yPrevMain =
+        prevMainNumeric !== null ? baselineY - (prevMainNumeric / niceTop) * innerH : null;
 
       const [, mm, dd] = p.date.split('-');
       return {
@@ -141,10 +184,15 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
         x,
         sVal,
         pvVal,
+        nuVal,
         depthVal,
+        prevDate: prev?.date,
+        prevMainNumeric,
         ySession,
         yPv,
+        yNewUsers,
         yDepth,
+        yPrevMain,
       };
     });
 
@@ -155,11 +203,21 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
     const sessionCurves = buildSmoothSvgSegments(
       nodes.map((n) => ({
         x: n.x,
-        y: mode === 'depth' ? n.yDepth : n.ySession,
+        y: mode === 'depth' ? n.yDepth : mode === 'newUsers' ? n.yNewUsers : n.ySession,
         valid: !n.isMissingData,
       })),
       baselineY,
     );
+    const prevCurves = compareEnabled
+      ? buildSmoothSvgSegments(
+          nodes.map((n) => ({
+            x: n.x,
+            y: n.yPrevMain ?? baselineY,
+            valid: n.yPrevMain !== null,
+          })),
+          baselineY,
+        )
+      : { linePaths: [], areaPaths: [] };
 
     return {
       W,
@@ -174,8 +232,9 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
       nodes,
       pvCurves,
       sessionCurves,
+      prevCurves,
     };
-  }, [points, mode]);
+  }, [points, previousPoints, compareEnabled, mode]);
 
   if (loading && points.length === 0) {
     return (
@@ -264,6 +323,7 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
         <div className="inline-flex items-center rounded-xl bg-slate-100 p-0.5 border border-slate-200/80 text-xs">
           {[
             { id: 'combo' as const, label: 'Phiên & Lượt xem' },
+            ...(hasNewUsersSeries ? [{ id: 'newUsers' as const, label: 'User mới' }] : []),
             { id: 'sessions' as const, label: 'Chỉ Phiên truy cập' },
             { id: 'depth' as const, label: 'Trang / Phiên' },
           ].map((opt) => (
@@ -299,13 +359,26 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
                   : 'auto',
             }}
           >
-            <div className="font-bold text-sky-300 border-b border-white/10 pb-1">
-              Ngày {activeNode.label}/{activeNode.date.slice(0, 4)}
+            <div className="font-bold text-sky-300 border-b border-white/10 pb-1 flex items-center justify-between gap-2">
+              <span>Ngày {activeNode.label}/{activeNode.date.slice(0, 4)}</span>
+              {compareEnabled && activeNode.prevDate && (
+                <span className="text-[10px] font-normal text-slate-400">
+                  vs {activeNode.prevDate.slice(8, 10)}/{activeNode.prevDate.slice(5, 7)}
+                </span>
+              )}
             </div>
             {activeNode.isMissingData ? (
               <div className="text-slate-300">Chưa có dữ liệu đồng bộ ngày này</div>
             ) : (
               <>
+                {mode === 'newUsers' && (
+                  <div className="flex items-center justify-between gap-4">
+                    <span className="text-emerald-200">User mới (GA4):</span>
+                    <strong className="font-bold text-emerald-300 tabular-nums">
+                      {activeNode.nuVal.toLocaleString('vi-VN')} user
+                    </strong>
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-4">
                   <span className="text-slate-300">Phiên truy cập:</span>
                   <strong className="font-bold tabular-nums">
@@ -324,6 +397,14 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
                     {activeNode.depthVal} trang/phiên
                   </strong>
                 </div>
+                {compareEnabled && activeNode.prevMainNumeric !== null && (
+                  <div className="flex items-center justify-between gap-4 pt-0.5 border-t border-white/10 text-[11px] text-slate-300">
+                    <span>Kỳ trước:</span>
+                    <strong className="tabular-nums">
+                      {activeNode.prevMainNumeric.toLocaleString('vi-VN')}
+                    </strong>
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -373,11 +454,26 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
             );
           })}
 
+          {/* Đường so sánh kỳ trước (nét đứt) */}
+          {compareEnabled &&
+            geom.prevCurves.linePaths.map((d, i) => (
+              <path
+                key={`prl-${i}`}
+                d={d}
+                fill="none"
+                stroke="#64748B"
+                strokeOpacity={0.55}
+                strokeDasharray="5 4"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
+            ))}
+
           {/* Lớp phụ: Lượt xem trang (khi ở chế độ combo) */}
           {mode === 'combo' && (
             <>
               {geom.pvCurves.areaPaths.map((d, i) => (
-                <path key={`pva-${i}`} d={d} fill="url(#mktPvGrad)" />
+                <path key={`pva-${i}`} d={d} fill={`url(#${pvGradId})`} />
               ))}
               {geom.pvCurves.linePaths.map((d, i) => (
                 <path
@@ -393,16 +489,16 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
             </>
           )}
 
-          {/* Lớp chính: Phiên truy cập (hoặc Trang/Phiên) */}
+          {/* Lớp chính: Phiên truy cập (hoặc User mới / Trang/Phiên) */}
           {geom.sessionCurves.areaPaths.map((d, i) => (
-            <path key={`sa-${i}`} d={d} fill="url(#mktSessGrad)" />
+            <path key={`sa-${i}`} d={d} fill={`url(#${sessGradId})`} />
           ))}
           {geom.sessionCurves.linePaths.map((d, i) => (
             <path
               key={`sl-${i}`}
               d={d}
               fill="none"
-              stroke="#1E3A8A"
+              stroke={mode === 'newUsers' ? '#059669' : '#1E3A8A'}
               strokeWidth="2.8"
               strokeLinecap="round"
             />
@@ -429,7 +525,13 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
               idx === geom.nodes.length - 1 ||
               idx % Math.ceil(geom.nodes.length / 8) === 0;
             const isHovered = hoverIdx === idx;
-            const mainY = mode === 'depth' ? n.yDepth : n.ySession;
+            const mainY =
+              mode === 'depth'
+                ? n.yDepth
+                : mode === 'newUsers'
+                  ? n.yNewUsers
+                  : n.ySession;
+            const mainColor = mode === 'newUsers' ? '#059669' : '#1E3A8A';
             const hitWidth = Math.max(12, (geom.W - geom.padLeft - geom.padRight) / Math.max(1, geom.nodes.length));
 
             return (
@@ -459,8 +561,8 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
                       cx={n.x}
                       cy={mainY}
                       r={isHovered ? 5.5 : 3.5}
-                      fill={isHovered ? '#1E3A8A' : '#FFFFFF'}
-                      stroke="#1E3A8A"
+                      fill={isHovered ? mainColor : '#FFFFFF'}
+                      stroke={mainColor}
                       strokeWidth="2.4"
                     />
                   </>
@@ -498,8 +600,16 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
       <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 text-[11px] text-slate-500">
         <div className="flex flex-wrap items-center gap-4">
           <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">
-            <span className="w-3 h-1 rounded-full bg-[#1E3A8A]" />
-            {mode === 'depth' ? 'Số trang xem trung bình / phiên' : 'Phiên truy cập thực tế (GA4)'}
+            <span
+              className={`w-3 h-1 rounded-full ${
+                mode === 'newUsers' ? 'bg-emerald-600' : 'bg-[#1E3A8A]'
+              }`}
+            />
+            {mode === 'depth'
+              ? 'Số trang xem trung bình / phiên'
+              : mode === 'newUsers'
+                ? 'Người dùng mới (GA4)'
+                : 'Phiên truy cập thực tế (GA4)'}
           </span>
           {mode === 'combo' && (
             <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">
@@ -507,12 +617,18 @@ export function MarketingTrafficChart({ points, loading }: MarketingTrafficChart
               Lượt xem trang (Pageviews)
             </span>
           )}
+          {compareEnabled && (
+            <span className="inline-flex items-center gap-1.5 font-medium text-slate-600">
+              <span className="w-3 h-0.5 border-t-2 border-dashed border-slate-500" />
+              Kỳ liền trước
+            </span>
+          )}
           <span className="inline-flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full border border-slate-300 bg-slate-50" />
             Ngày chưa phát sinh / chưa đồng bộ
           </span>
         </div>
-        <span>Rê chuột vào từng ngày trên biểu đồ để xem chi tiết tỷ lệ đọc trang</span>
+        <span>Rê chuột vào từng ngày trên biểu đồ để xem chi tiết</span>
       </div>
     </div>
   );

@@ -3,20 +3,15 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   AlertTriangle,
-  ArrowRight,
   CheckCircle2,
   Clock,
   ExternalLink,
-  Globe,
   Key,
-  Layers,
   Link as LinkIcon,
   Loader2,
   Lock,
   RefreshCw,
-  ShieldCheck,
   Unlink,
-  Zap,
 } from 'lucide-react';
 import type { GoogleOAuthStatusDto, GoogleOAuthClientConfigDto } from '@toantrung/contracts';
 import { apiRequest } from '@/core/http/client';
@@ -284,52 +279,84 @@ export function GoogleOAuthManager({
 
   // COMPACT MODE: Top bar banner in Module 02 & Module 03 (Enhanced large legible design)
   if (compact) {
-    if (status?.connected) {
+    const isExpiredOrErr =
+      status?.connectionStatus === 'EXPIRED' ||
+      status?.connectionStatus === 'PERMISSION_ERROR' ||
+      status?.connectionStatus === 'SYNC_ERROR';
+
+    if (status?.connected && !isExpiredOrErr) {
       return (
-        <div className="flex flex-wrap items-center justify-between gap-3 p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50/90 to-emerald-50/80 border border-emerald-300/80 shadow-2xs">
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center font-extrabold text-base shrink-0 shadow-sm ring-2 ring-emerald-500/20">
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200 shadow-2xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-sm shrink-0">
               G
             </div>
             <div>
-              <div className="flex items-center gap-2 font-extrabold text-sm sm:text-base text-emerald-950 flex-wrap">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
-                <span>Google OAuth 2.0 Đã kết nối:</span>
-                <span className="font-mono text-emerald-900 underline font-bold">{status.connectedEmail || 'Tài khoản Công ty'}</span>
+              <div className="flex items-center gap-2 font-bold text-xs sm:text-sm text-emerald-950 flex-wrap">
+                <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                <span>Google đã kết nối:</span>
+                <span className="font-mono text-emerald-900">{status.connectedEmail || 'Tài khoản Công ty'}</span>
                 {status.isSandboxDemo && (
-                  <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-bold border border-amber-300">
+                  <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-semibold border border-amber-300">
                     Demo Sandbox
                   </span>
                 )}
               </div>
-              <div className="text-xs sm:text-sm text-emerald-800 mt-1 flex items-center gap-2.5 flex-wrap font-medium">
-                <span>⚡ Đồng bộ tự động 3 ca: <strong>02:00 · 11:00 · 17:00</strong></span>
-                <span>•</span>
-                <span>Lần cuối: <strong>{status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleTimeString('vi-VN') : 'Vừa xong'}</strong></span>
+              <div className="text-[11px] text-emerald-800 mt-0.5 flex items-center gap-2 flex-wrap">
+                <span>Chốt dữ liệu 02:00 · 11:00 · 17:00</span>
+                <span>·</span>
+                <span>Gần nhất: {status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleTimeString('vi-VN') : 'Vừa xong'}</span>
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex items-center gap-2">
             <button
               type="button"
               disabled={busy}
               onClick={() => void handleSyncAllNow()}
-              className="h-10 px-4 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs sm:text-sm font-bold inline-flex items-center gap-2 shadow-xs transition disabled:opacity-50"
+              className="h-9 px-3.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition disabled:opacity-50"
             >
-              <RefreshCw className={`w-4 h-4 ${busy ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`} />
               <span>{busy ? 'Đang đồng bộ...' : 'Đồng bộ ngay'}</span>
             </button>
             <button
               type="button"
               disabled={busy}
               onClick={() => void handleDisconnect()}
-              className="h-10 px-3 rounded-xl bg-white border border-slate-300 hover:bg-rose-50 hover:text-rose-700 text-slate-700 font-bold inline-flex items-center gap-1.5 transition shadow-2xs"
+              className="h-9 px-2.5 rounded-xl bg-white border border-slate-300 hover:bg-rose-50 hover:text-rose-700 text-slate-700 font-semibold inline-flex items-center transition shadow-2xs"
               title="Ngắt kết nối Google"
             >
-              <Unlink className="w-4 h-4" />
+              <Unlink className="w-3.5 h-3.5" />
             </button>
           </div>
+        </div>
+      );
+    }
+
+    if (status?.connected && isExpiredOrErr) {
+      return (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-2xl bg-rose-50/80 border border-rose-200 text-xs shadow-2xs">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <div>
+              <div className="font-bold text-rose-950">
+                Phiên kết nối Google ({status.connectedEmail}) đã hết hạn
+              </div>
+              <div className="text-[11px] text-rose-800 mt-0.5">
+                Vui lòng kết nối lại để tiếp tục đồng bộ GA4, Google Ads và Search Console.
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void handleStartOAuth()}
+            className="h-8 px-3.5 rounded-xl bg-[#1E3A8A] hover:bg-blue-900 text-white font-semibold inline-flex items-center gap-1.5 shadow-2xs transition"
+          >
+            <LinkIcon className="w-3.5 h-3.5" />
+            <span>Kết nối lại Google</span>
+          </button>
         </div>
       );
     }
@@ -399,10 +426,10 @@ export function GoogleOAuthManager({
 
       {/* Main Connection Status Card */}
       <div className="bg-white rounded-3xl border border-slate-200/90 shadow-2xs overflow-hidden">
-        <div className="p-6 border-b border-slate-100 flex flex-wrap items-center justify-between gap-4 bg-gradient-to-r from-slate-50 via-white to-blue-50/40">
+        <div className="p-5 border-b border-slate-100 flex flex-wrap items-center justify-between gap-4 bg-slate-50/50">
           <div className="flex items-center gap-3.5">
-            <div className="w-12 h-12 rounded-2xl bg-white border border-slate-200 shadow-2xs flex items-center justify-center shrink-0">
-              <svg className="w-7 h-7" viewBox="0 0 24 24">
+            <div className="w-11 h-11 rounded-2xl bg-white border border-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <svg className="w-6 h-6" viewBox="0 0 24 24">
                 <path
                   fill="#4285F4"
                   d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -422,12 +449,22 @@ export function GoogleOAuthManager({
               </svg>
             </div>
             <div>
-              <h2 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                <span>Google OAuth 2.0 Hub Toàn diện</span>
-                {status?.connected ? (
+              <h2 className="text-base font-bold text-slate-900 flex items-center gap-2 flex-wrap">
+                <span>Tài khoản Google kết nối</span>
+                {status?.connectionStatus === 'EXPIRED' ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-rose-100 text-rose-800 text-xs font-bold inline-flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Hết hạn kết nối
+                  </span>
+                ) : status?.connectionStatus === 'PERMISSION_ERROR' || status?.connectionStatus === 'SYNC_ERROR' ? (
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-bold inline-flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    Cần kết nối lại
+                  </span>
+                ) : status?.connected ? (
                   <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold inline-flex items-center gap-1">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    Đang hoạt động
+                    Đã kết nối
                   </span>
                 ) : (
                   <span className="px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-semibold">
@@ -436,7 +473,9 @@ export function GoogleOAuthManager({
                 )}
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Đăng nhập 1 lần cấp quyền đọc Google Analytics 4, Google Ads và Google Search Console cho toàn bộ dự án.
+                {status?.lastErrorMessage && (status?.connectionStatus === 'EXPIRED' || status?.connectionStatus === 'PERMISSION_ERROR' || status?.connectionStatus === 'SYNC_ERROR')
+                  ? status.lastErrorMessage
+                  : 'Dùng chung cho Gmail Lead, Google Analytics 4, Google Ads và Search Console.'}
               </p>
             </div>
           </div>
@@ -447,62 +486,58 @@ export function GoogleOAuthManager({
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => void handleSyncAllNow()}
-                  className="h-10 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition disabled:opacity-50"
+                  onClick={() => void handleStartOAuth()}
+                  className={`h-9 px-3.5 rounded-xl text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition ${
+                    status.connectionStatus === 'EXPIRED' || status.connectionStatus === 'PERMISSION_ERROR'
+                      ? 'bg-[#1E3A8A] hover:bg-blue-900 text-white'
+                      : 'bg-white border border-slate-200 hover:bg-slate-50 text-slate-700'
+                  }`}
                 >
-                  <RefreshCw className={`w-4 h-4 ${busy ? 'animate-spin' : ''}`} />
-                  <span>{busy ? 'Đang đồng bộ...' : 'Đồng bộ toàn bộ ngay'}</span>
+                  <LinkIcon className="w-3.5 h-3.5" />
+                  <span>Kết nối lại Google</span>
                 </button>
                 <button
                   type="button"
                   disabled={busy}
                   onClick={() => void handleDisconnect()}
-                  className="h-10 px-3.5 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition"
+                  className="h-9 px-3 rounded-xl bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs transition"
                 >
-                  <Unlink className="w-4 h-4" />
+                  <Unlink className="w-3.5 h-3.5" />
                   <span>Ngắt kết nối</span>
                 </button>
               </>
             ) : (
-              <>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void handleStartOAuth()}
-                  className="h-10 px-5 rounded-xl bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold inline-flex items-center gap-2 shadow-2xs transition"
-                >
-                  <LinkIcon className="w-4 h-4" />
-                  <span>Đăng nhập bằng Google</span>
-                </button>
-              </>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void handleStartOAuth()}
+                className="h-9 px-4 rounded-xl bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition"
+              >
+                <LinkIcon className="w-3.5 h-3.5" />
+                <span>Đăng nhập Google</span>
+              </button>
             )}
           </div>
         </div>
 
-        <div className="p-6 space-y-6">
-          {/* Detail Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="p-5 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Box 1: Account Info */}
             <div className="p-4 rounded-2xl bg-slate-50/70 border border-slate-200/80">
               <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
-                Tài khoản Google liên kết
+                Email liên kết
               </div>
               {status?.connected ? (
                 <div>
-                  <div className="font-bold text-slate-900 text-sm">{status.connectedName || 'Toàn Trung Marketing'}</div>
+                  <div className="font-bold text-slate-900 text-sm">{status.connectedName || 'Toàn Trung'}</div>
                   <div className="font-mono text-xs text-blue-700 mt-0.5 break-all">{status.connectedEmail}</div>
-                  <div className="text-[11px] text-slate-500 mt-2">
+                  <div className="text-[11px] text-slate-500 mt-1.5">
                     Kết nối lúc: {status.connectedAt ? new Date(status.connectedAt).toLocaleString('vi-VN') : '—'}
                   </div>
-                  {status.isSandboxDemo && (
-                    <div className="mt-2 inline-block px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
-                      Chế độ Kiểm thử Mẫu (Sandbox Demo)
-                    </div>
-                  )}
                 </div>
               ) : (
-                <div className="text-xs text-slate-400 italic">
-                  Chưa có tài khoản nào được kết nối. Bấm nút phía trên để đăng nhập.
+                <div className="text-xs text-slate-400">
+                  Chưa có tài khoản Google nào được liên kết.
                 </div>
               )}
             </div>
@@ -511,74 +546,15 @@ export function GoogleOAuthManager({
             <div className="p-4 rounded-2xl bg-slate-50/70 border border-slate-200/80">
               <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
                 <Clock className="w-3.5 h-3.5 text-blue-600" />
-                <span>Lịch tải dữ liệu tự động</span>
+                <span>Lịch chốt dữ liệu tự động</span>
               </div>
-              <div className="space-y-1.5 text-xs text-slate-700">
-                <div className="flex items-center justify-between">
-                  <span>Ca 1 (Đồng bộ đầy đủ 30 ngày):</span>
-                  <span className="font-mono font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">02:00</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Ca 2 (Cập nhật buổi trưa):</span>
-                  <span className="font-mono font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">11:00</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span>Ca 3 (Chốt ca chiều):</span>
-                  <span className="font-mono font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded">17:00</span>
-                </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span className="font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded">02:00</span>
+                <span className="font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded">11:00</span>
+                <span className="font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-1 rounded">17:00</span>
               </div>
-              <div className="text-[11px] text-slate-500 mt-3 pt-2 border-t border-slate-200/60">
-                Tự động gia hạn Refresh Token mà không cần đăng nhập lại.
-              </div>
-            </div>
-
-            {/* Box 3: Modules Coverage */}
-            <div className="p-4 rounded-2xl bg-slate-50/70 border border-slate-200/80">
-              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
-                <Layers className="w-3.5 h-3.5 text-blue-600" />
-                <span>Phạm vi phủ sóng Dự án</span>
-              </div>
-              <ul className="space-y-1.5 text-xs text-slate-700">
-                <li className="flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span><strong>Module 02 (Tracking):</strong> GCLID &amp; UTM Ads</span>
-                </li>
-                <li className="flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span><strong>Module 03 (Từ khóa):</strong> GA4 &amp; Search Console</span>
-                </li>
-                <li className="flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span><strong>Module 04 (Báo cáo):</strong> Chi phí Ads &amp; ROAS</span>
-                </li>
-              </ul>
-            </div>
-          </div>
-
-          {/* Scopes Section */}
-          <div className="p-4 rounded-2xl bg-blue-50/50 border border-blue-100 space-y-2">
-            <div className="text-xs font-bold text-blue-950 flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-blue-600" />
-              <span>Các quyền hạn (OAuth 2.0 Scopes) được hệ thống sử dụng:</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
-              <div className="p-2.5 rounded-xl bg-white border border-blue-100 shadow-2xs">
-                <div className="font-semibold text-slate-900">Google Analytics 4</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  Quyền Chỉ xem (Viewer) báo cáo phiên, số người truy cập, tỷ lệ thoát trang LED.
-                </div>
-              </div>
-              <div className="p-2.5 rounded-xl bg-white border border-blue-100 shadow-2xs">
-                <div className="font-semibold text-slate-900">Google Ads</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  Đọc ngân sách tiêu hao, lượt nhấp, hiển thị, chi phí CPL từng chiến dịch.
-                </div>
-              </div>
-              <div className="p-2.5 rounded-xl bg-white border border-blue-100 shadow-2xs">
-                <div className="font-semibold text-slate-900">Search Console &amp; Trends</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  Đọc từ khóa tìm kiếm tự nhiên, vị trí trung bình trên Google và độ thịnh hành.
-                </div>
+              <div className="text-[11px] text-slate-500 mt-2">
+                Nếu Google Cloud ở chế độ Testing, token hết hạn sau 7 ngày và cần bấm Kết nối lại.
               </div>
             </div>
           </div>
@@ -587,11 +563,11 @@ export function GoogleOAuthManager({
           <div className="flex items-center justify-between pt-2 border-t border-slate-100 text-xs text-slate-500">
             <div className="flex items-center gap-1.5">
               <Key className="w-3.5 h-3.5 text-slate-400" />
-              <span>Google Cloud Client ID: </span>
+              <span>Google Client ID: </span>
               {clientConfig?.hasClientId ? (
                 <span className="font-mono text-slate-700 font-semibold">{clientConfig.clientIdMasked}</span>
               ) : (
-                <span className="text-amber-700 font-semibold">Chưa cấu hình (đang dùng Demo/Mặc định)</span>
+                <span className="text-amber-700 font-semibold">Chưa cấu hình</span>
               )}
             </div>
 
@@ -602,35 +578,26 @@ export function GoogleOAuthManager({
               }}
               className="text-blue-700 hover:underline font-semibold"
             >
-              Cấu hình Google Client ID riêng →
+              Đổi Client ID / Secret →
             </button>
           </div>
         </div>
       </div>
 
-      {/* Khối Cấu hình trực tiếp Google Ads API (v26 OAuth direct + Customer ID) */}
+      {/* Khối Cấu hình Google Ads API */}
       <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2 flex-wrap">
-              <Zap className="w-4 h-4 text-amber-600" />
-              <span>Kết nối Google Ads API (Chi phí, Click &amp; Chuyển đổi Chiến dịch)</span>
-              {status?.connected && !status.isSandboxDemo ? (
-                <span className="px-2.5 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold inline-flex items-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  Đã kết nối qua Google OAuth v26
-                  {(status.selectedGadsCustomerId || adsConfig?.customerId)
-                    ? ` (ID: ${status.selectedGadsCustomerId || adsConfig?.customerId})`
-                    : ''}
-                </span>
-              ) : (
-                <span className="px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold">
-                  Chưa kết nối tài khoản Google
+            <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 flex-wrap">
+              <span>Cấu hình Google Ads</span>
+              {(status?.selectedGadsCustomerId || adsConfig?.customerId) && (
+                <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-mono font-semibold">
+                  ID: {status?.selectedGadsCustomerId || adsConfig?.customerId}
                 </span>
               )}
             </h3>
-            <p className="text-xs text-slate-600 mt-1">
-              Google Ads API <code>v26</code> cho phép truy vấn trực tiếp qua tài khoản Google OAuth (quyền <code>adwords</code>) mà <strong>không bắt buộc Developer Token</strong>. Bạn chỉ cần nhập <strong>Customer ID 10 số</strong> (hoặc để trống để hệ thống tự phát hiện) rồi bấm đồng bộ.
+            <p className="text-xs text-slate-500 mt-0.5">
+              Nhập Customer ID (10 số) hoặc MCC ID để lấy số liệu chiến dịch và cụm từ tìm kiếm.
             </p>
           </div>
         </div>
@@ -638,7 +605,7 @@ export function GoogleOAuthManager({
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Developer Token (Tùy chọn — không bắt buộc với v26)
+              Developer Token (tùy chọn)
             </label>
             <input
               type="password"
@@ -648,8 +615,8 @@ export function GoogleOAuthManager({
               onChange={(e) => setDevTokenInput(e.target.value)}
               placeholder={
                 adsConfig?.hasDeveloperToken
-                  ? `Đang lưu: ${adsConfig.developerTokenMasked} (không bắt buộc)`
-                  : 'Tùy chọn (bỏ trống nếu dùng OAuth trực tiếp)...'
+                  ? `Đang lưu: ${adsConfig.developerTokenMasked}`
+                  : 'Nhập nếu tài khoản yêu cầu'
               }
               className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
             />
@@ -657,7 +624,7 @@ export function GoogleOAuthManager({
 
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              Customer ID chạy quảng cáo (10 số)
+              Customer ID (10 số)
             </label>
             <input
               type="text"
@@ -665,14 +632,14 @@ export function GoogleOAuthManager({
               spellCheck={false}
               value={adsCustomerIdInput}
               onChange={(e) => setAdsCustomerIdInput(e.target.value)}
-              placeholder="VD: 123-456-7890 (để trống = tự dò)"
+              placeholder="VD: 123-456-7890"
               className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
             />
           </div>
 
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
-              MCC Login Customer ID (nếu dùng MCC)
+              MCC ID (tùy chọn)
             </label>
             <input
               type="text"
@@ -680,16 +647,13 @@ export function GoogleOAuthManager({
               spellCheck={false}
               value={adsMccIdInput}
               onChange={(e) => setAdsMccIdInput(e.target.value)}
-              placeholder="VD: 987-654-3210 (tùy chọn)"
+              placeholder="VD: 987-654-3210"
               className="w-full min-h-9 px-3 rounded-xl border border-slate-300 text-xs font-mono focus:border-[#1E3A8A] outline-none"
             />
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-          <span className="text-xs text-slate-500">
-            Mã được mã hóa AES-256-GCM trong cơ sở dữ liệu nội bộ, áp dụng ngay không cần khởi động lại server.
-          </span>
+        <div className="flex justify-end pt-1">
           <button
             type="button"
             disabled={busy}
@@ -697,7 +661,7 @@ export function GoogleOAuthManager({
             className="min-h-9 px-4 rounded-xl bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition disabled:opacity-50"
           >
             {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
-            <span>Lưu &amp; Đồng bộ Google Ads ngay</span>
+            <span>Lưu &amp; Đồng bộ Ads</span>
           </button>
         </div>
       </div>

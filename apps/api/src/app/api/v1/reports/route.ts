@@ -23,6 +23,8 @@ export async function GET(request: Request) {
         to: url.searchParams.get('to') || url.searchParams.get('toDate'),
         page: Number(url.searchParams.get('page') || url.searchParams.get('pendingPage') || 1),
         pageSize: Number(url.searchParams.get('pageSize') || 20),
+        detailPage: Number(url.searchParams.get('detailPage') || 1),
+        detailPageSize: Number(url.searchParams.get('detailPageSize') || 25),
       });
       return jsonSuccess(m04);
     }

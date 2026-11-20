@@ -65,6 +65,82 @@ export interface GoogleAdsApiConfigDto {
 const SETTING_KEY_CONNECTION = 'google_oauth_connection';
 const SETTING_KEY_CLIENT_CONFIG = 'google_oauth_client_config';
 const SETTING_KEY_ADS_CONFIG = 'google_ads_api_config_v1';
+const SETTING_KEY_GADS_FINAL_URLS = 'google_ads_campaign_final_urls_v1';
+
+interface StoredCampaignFinalUrlsPayload {
+  updatedAt: string;
+  byCampaignId: Record<string, string[]>;
+}
+
+const globalGadsFinalUrls = globalThis as unknown as {
+  __toantrungGadsFinalUrlsCache?: {
+    hydrated: boolean;
+    updatedAtMs: number;
+    byCampaignId: Record<string, string[]>;
+  };
+  __toantrungGadsFinalUrlsInFlight?: Promise<Record<string, string[]>> | null;
+};
+
+function getFinalUrlsMemCache() {
+  if (!globalGadsFinalUrls.__toantrungGadsFinalUrlsCache) {
+    globalGadsFinalUrls.__toantrungGadsFinalUrlsCache = {
+      hydrated: false,
+      updatedAtMs: 0,
+      byCampaignId: {},
+    };
+  }
+  return globalGadsFinalUrls.__toantrungGadsFinalUrlsCache;
+}
+
+async function mergeAndPersistCampaignFinalUrls(
+  freshMap: Map<string, string[]> | Record<string, string[]>,
+): Promise<Record<string, string[]>> {
+  const mem = getFinalUrlsMemCache();
+  let existing: Record<string, string[]> = { ...mem.byCampaignId };
+  try {
+    const row = await prisma.systemSetting.findUnique({
+      where: { key: SETTING_KEY_GADS_FINAL_URLS },
+    });
+    if (row?.value) {
+      const parsed = JSON.parse(row.value) as StoredCampaignFinalUrlsPayload;
+      if (parsed?.byCampaignId && typeof parsed.byCampaignId === 'object') {
+        existing = { ...parsed.byCampaignId, ...existing };
+      }
+    }
+  } catch {
+    // ignore corrupt setting
+  }
+
+  const entries =
+    freshMap instanceof Map ? Array.from(freshMap.entries()) : Object.entries(freshMap);
+  const merged: Record<string, string[]> = { ...existing };
+  for (const [cid, urls] of entries) {
+    if (!cid || !Array.isArray(urls) || urls.length === 0) continue;
+    const clean = urls.map((u) => String(u).trim()).filter(Boolean);
+    if (clean.length > 0) {
+      merged[cid] = Array.from(new Set(clean)).slice(0, 12);
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const payload: StoredCampaignFinalUrlsPayload = {
+    updatedAt: nowIso,
+    byCampaignId: merged,
+  };
+  mem.hydrated = true;
+  mem.updatedAtMs = Date.now();
+  mem.byCampaignId = merged;
+
+  await prisma.systemSetting
+    .upsert({
+      where: { key: SETTING_KEY_GADS_FINAL_URLS },
+      update: { value: JSON.stringify(payload) },
+      create: { key: SETTING_KEY_GADS_FINAL_URLS, value: JSON.stringify(payload) },
+    })
+    .catch(() => null);
+
+  return merged;
+}
 
 function getRealtimeConfigPath(): string {
   const dir = path.join(process.cwd(), 'config');
@@ -1870,7 +1946,7 @@ async function syncRealSearchConsole(
               endDate: todayStr,
               dimensions: ['date', 'query'], // Both date and query dimensions
               dataState: 'all',
-              rowLimit: 250,
+              rowLimit: 1500,
             }),
           },
         );
@@ -1974,7 +2050,7 @@ async function syncRealSearchConsole(
               endDate: todayStr,
               dimensions: ['date', 'page'],
               dataState: 'all',
-              rowLimit: 200,
+              rowLimit: 1000,
             }),
           },
         );
@@ -2267,6 +2343,41 @@ async function syncRealGoogleAds(
     }
   }
 
+  // Fallback for PMax/DemandGen/Video campaigns lacking ad_group_ad.ad.final_urls
+  try {
+    const lpViewGaql = `SELECT campaign.id, landing_page_view.unexpanded_final_url FROM landing_page_view WHERE segments.date DURING LAST_30_DAYS`;
+    const lpViewRes = await fetchGoogleAdsWithFallback(
+      `customers/${targetCustomerId}/googleAds:search`,
+      {
+        method: 'POST',
+        headers: baseHeaders,
+        body: JSON.stringify({ query: lpViewGaql }),
+      },
+    );
+    if (lpViewRes.ok) {
+      const lpJson = (await lpViewRes.json()) as {
+        results?: Array<{
+          campaign?: { id?: string };
+          landingPageView?: { unexpandedFinalUrl?: string };
+        }>;
+      };
+      for (const row of lpJson.results || []) {
+        const cid = String(row.campaign?.id || '').trim();
+        const url = String(row.landingPageView?.unexpandedFinalUrl || '').trim();
+        if (!cid || !url) continue;
+        const existing = finalUrlsByCampaign.get(cid) || [];
+        if (!existing.includes(url)) existing.push(url);
+        finalUrlsByCampaign.set(cid, existing);
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+
+  if (finalUrlsByCampaign.size > 0) {
+    await mergeAndPersistCampaignFinalUrls(finalUrlsByCampaign);
+  }
+
   const catalogGaql =
     `SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros FROM campaign WHERE campaign.status != 'REMOVED'`;
   const catalogRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
@@ -2439,4 +2550,142 @@ async function syncRealGoogleAds(
   }
 
   return { success: true, synced };
+}
+
+function triggerBackgroundFinalUrlsRefresh(): void {
+  if (process.env.NODE_TEST_CONTEXT) return;
+  if (globalGadsFinalUrls.__toantrungGadsFinalUrlsInFlight) return;
+
+  const p = (async () => {
+    try {
+      const [token, conn, adsCfg] = await Promise.all([
+        getValidAccessToken(),
+        getGoogleConnection(),
+        getGoogleAdsApiConfig(),
+      ]);
+      if (!token || token === 'DEMO_SANDBOX_TOKEN') return getFinalUrlsMemCache().byCampaignId;
+      const targetCustomerId =
+        adsCfg?.customerId ||
+        normalizeDigitsId(conn?.selectedGadsCustomerId) ||
+        normalizeDigitsId(conn?.detectedGadsCustomerId);
+      if (!targetCustomerId || !adsCfg?.developerToken) {
+        return getFinalUrlsMemCache().byCampaignId;
+      }
+
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        'developer-token': adsCfg.developerToken,
+      };
+      if (adsCfg.loginCustomerId) {
+        headers['login-customer-id'] = adsCfg.loginCustomerId;
+      }
+
+      const map = new Map<string, string[]>();
+      const urlsRes = await fetchGoogleAdsWithFallback(
+        `customers/${targetCustomerId}/googleAds:search`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            query: `SELECT campaign.id, ad_group_ad.ad.final_urls FROM ad_group_ad WHERE campaign.status != 'REMOVED' AND ad_group_ad.status != 'REMOVED'`,
+          }),
+        },
+      );
+      if (urlsRes.ok) {
+        const urlsJson = (await urlsRes.json()) as {
+          results?: Array<{
+            campaign?: { id?: string };
+            adGroupAd?: { ad?: { finalUrls?: string[] } };
+          }>;
+        };
+        for (const row of urlsJson.results || []) {
+          const cid = String(row.campaign?.id || '').trim();
+          const urls = row.adGroupAd?.ad?.finalUrls || [];
+          if (!cid || urls.length === 0) continue;
+          const existing = map.get(cid) || [];
+          for (const u of urls) {
+            if (!existing.includes(u)) existing.push(u);
+          }
+          map.set(cid, existing);
+        }
+      }
+
+      try {
+        const lpRes = await fetchGoogleAdsWithFallback(
+          `customers/${targetCustomerId}/googleAds:search`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              query: `SELECT campaign.id, landing_page_view.unexpanded_final_url FROM landing_page_view WHERE segments.date DURING LAST_30_DAYS`,
+            }),
+          },
+        );
+        if (lpRes.ok) {
+          const lpJson = (await lpRes.json()) as {
+            results?: Array<{
+              campaign?: { id?: string };
+              landingPageView?: { unexpandedFinalUrl?: string };
+            }>;
+          };
+          for (const row of lpJson.results || []) {
+            const cid = String(row.campaign?.id || '').trim();
+            const url = String(row.landingPageView?.unexpandedFinalUrl || '').trim();
+            if (!cid || !url) continue;
+            const existing = map.get(cid) || [];
+            if (!existing.includes(url)) existing.push(url);
+            map.set(cid, existing);
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+
+      if (map.size > 0) {
+        const merged = await mergeAndPersistCampaignFinalUrls(map);
+        bumpDomainRevisions(['tracking', 'ads'], 'google_ads_final_urls_synced');
+        return merged;
+      }
+      getFinalUrlsMemCache().updatedAtMs = Date.now();
+      return getFinalUrlsMemCache().byCampaignId;
+    } catch {
+      return getFinalUrlsMemCache().byCampaignId;
+    } finally {
+      globalGadsFinalUrls.__toantrungGadsFinalUrlsInFlight = null;
+    }
+  })();
+
+  globalGadsFinalUrls.__toantrungGadsFinalUrlsInFlight = p;
+}
+
+export async function getCampaignFinalUrlsMapNonBlocking(): Promise<Record<string, string[]>> {
+  const mem = getFinalUrlsMemCache();
+  if (!mem.hydrated) {
+    mem.hydrated = true;
+    try {
+      const row = await prisma.systemSetting.findUnique({
+        where: { key: SETTING_KEY_GADS_FINAL_URLS },
+      });
+      if (row?.value) {
+        const parsed = JSON.parse(row.value) as StoredCampaignFinalUrlsPayload;
+        if (parsed?.byCampaignId && typeof parsed.byCampaignId === 'object') {
+          mem.byCampaignId = parsed.byCampaignId;
+          mem.updatedAtMs = parsed.updatedAt ? new Date(parsed.updatedAt).getTime() || 0 : 0;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const sixHoursMs = 6 * 60 * 60 * 1000;
+  if (
+    Object.keys(mem.byCampaignId).length === 0 ||
+    Date.now() - mem.updatedAtMs > sixHoursMs
+  ) {
+    triggerBackgroundFinalUrlsRefresh();
+  }
+
+  return mem.byCampaignId;
 }

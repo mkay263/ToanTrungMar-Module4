@@ -26,7 +26,9 @@ import {
   getCachedGscSiteStatus,
   getGa4LiveSnapshotsForProperties,
 } from '../02-tracking-sync/ga4-live-cache.service';
+import { getGscLiveSnapshotsForSites } from './gsc-live-cache.service';
 import {
+  getGoogleTrendsExploreExtras,
   getGoogleTrendsLiveSnapshot,
   getSerpApiTrendsKey,
 } from './google-trends.service';
@@ -59,11 +61,12 @@ export async function getM03AdsSeoDashboardSpec(params?: {
   contentPage?: number;
   minImpr?: number;
   maxCtr?: number;
+  compare?: boolean;
   roleCode?: RoleCode;
   bypassCache?: boolean;
 }): Promise<M03AdsSeoDashboardDto> {
   const scope = await resolveDashboardScope(params);
-  const cacheKey = `m03-spec:${params?.roleCode || 'ANON'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.contentPage || 1}:${params?.minImpr ?? 30}:${params?.maxCtr ?? 3}`;
+  const cacheKey = `m03-spec:${params?.roleCode || 'ANON'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.contentPage || 1}:${params?.minImpr ?? 30}:${params?.maxCtr ?? 3}:${params?.compare ? 'cmp' : 'nocmp'}`;
 
   const cached = await getOrComputeScopedCache<M03AdsSeoDashboardDto>({
     key: cacheKey,
@@ -104,11 +107,14 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     gscMetaMap,
     syncLogs,
     ga4LiveSnaps,
+    gscLiveSnaps,
+    gscPrevLiveSnaps,
     siteStatusRows,
     trendMetricRows,
     seoArticles,
     liveTrendsSnap,
     serpApiKey,
+    trendsExtras,
   ] = await Promise.all([
     gscSites.length > 0
       ? prisma.platformDailyMetric.findMany({
@@ -184,6 +190,10 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       take: 10,
     }),
     getGa4LiveSnapshotsForProperties(scope.ga4PropertyIds, scope.startDateStr, scope.endDateStr, false),
+    getGscLiveSnapshotsForSites(gscSites, scope.startDateStr, scope.endDateStr, false),
+    params?.compare && gscSites.length > 0
+      ? getGscLiveSnapshotsForSites(gscSites, scope.prevStartDateStr, scope.prevEndDateStr, false)
+      : Promise.resolve([]),
     getCachedGscSiteStatus(gscSites),
     prisma.platformDailyMetric.findMany({
       where: {
@@ -191,7 +201,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
       },
       orderBy: { metricDate: 'asc' },
-      take: 200,
+      take: 500,
     }),
     isAdsReadOnly
       ? Promise.resolve([])
@@ -205,6 +215,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         }),
     getGoogleTrendsLiveSnapshot(false).catch(() => null),
     getSerpApiTrendsKey().catch(() => null),
+    getGoogleTrendsExploreExtras().catch(() => null),
   ]);
 
   let organicSessionsFromGa4: number | null = null;
@@ -270,11 +281,46 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       : 'VERIFIED';
 
   // -------------------------------------------------------------------------
-  // SEO CALCULATIONS (from account grain for totals, keyword/page for tables)
+  // SEO CALCULATIONS (Ưu tiên live GSC snapshot khớp 100% Search Console UI, fallback DB)
   // -------------------------------------------------------------------------
-  const hasGscData = gscAccountCur.length > 0;
-  const totalClicks = hasGscData ? gscAccountCur.reduce((s, r) => s + r.clicks, 0) : null;
-  const totalImpr = hasGscData ? gscAccountCur.reduce((s, r) => s + r.impressions, 0) : null;
+  const hasLiveGsc = gscLiveSnaps.length > 0 && gscLiveSnaps.some((s) => s.daily.length > 0 || s.queries.length > 0);
+  const finalizedLiveDates = new Set<string>();
+  const liveDayMap = new Map<
+    string,
+    { clicks: number; impressions: number; posWeighted: number; posImpr: number }
+  >();
+  if (hasLiveGsc) {
+    for (const snap of gscLiveSnaps) {
+      for (const fd of snap.finalizedDates) finalizedLiveDates.add(fd);
+      for (const d of snap.daily) {
+        const cur = liveDayMap.get(d.date) || {
+          clicks: 0,
+          impressions: 0,
+          posWeighted: 0,
+          posImpr: 0,
+        };
+        cur.clicks += d.clicks;
+        cur.impressions += d.impressions;
+        if (d.averagePosition !== null && d.impressions > 0) {
+          cur.posWeighted += d.averagePosition * d.impressions;
+          cur.posImpr += d.impressions;
+        }
+        liveDayMap.set(d.date, cur);
+      }
+    }
+  }
+
+  const hasGscData = hasLiveGsc || gscAccountCur.length > 0;
+  const totalClicks = hasLiveGsc
+    ? Array.from(liveDayMap.values()).reduce((s, d) => s + d.clicks, 0)
+    : gscAccountCur.length > 0
+      ? gscAccountCur.reduce((s, r) => s + r.clicks, 0)
+      : null;
+  const totalImpr = hasLiveGsc
+    ? Array.from(liveDayMap.values()).reduce((s, d) => s + d.impressions, 0)
+    : gscAccountCur.length > 0
+      ? gscAccountCur.reduce((s, r) => s + r.impressions, 0)
+      : null;
   const overallCtrPct =
     totalClicks !== null && totalImpr !== null && totalImpr > 0
       ? Number(((totalClicks / totalImpr) * 100).toFixed(2))
@@ -282,18 +328,58 @@ export async function getM03AdsSeoDashboardSpec(params?: {
 
   let weightedPosSum = 0;
   let weightedImprSum = 0;
-  for (const r of gscAccountCur) {
-    if (r.avgPosition !== null && r.impressions > 0) {
-      weightedPosSum += r.avgPosition * r.impressions;
-      weightedImprSum += r.impressions;
+  if (hasLiveGsc) {
+    for (const d of liveDayMap.values()) {
+      weightedPosSum += d.posWeighted;
+      weightedImprSum += d.posImpr;
+    }
+  } else {
+    for (const r of gscAccountCur) {
+      if (r.avgPosition !== null && r.impressions > 0) {
+        weightedPosSum += r.avgPosition * r.impressions;
+        weightedImprSum += r.impressions;
+      }
     }
   }
   const avgSearchPosition =
     weightedImprSum > 0 ? Number((weightedPosSum / weightedImprSum).toFixed(2)) : null;
 
-  const hasPrevGsc = gscAccountPrev.length > 0;
-  const prevTotalClicks = hasPrevGsc ? gscAccountPrev.reduce((s, r) => s + r.clicks, 0) : null;
-  const prevTotalImpr = hasPrevGsc ? gscAccountPrev.reduce((s, r) => s + r.impressions, 0) : null;
+  const hasPrevLiveGsc = gscPrevLiveSnaps.length > 0 && gscPrevLiveSnaps.some((s) => s.daily.length > 0);
+  const prevLiveDayMap = new Map<
+    string,
+    { clicks: number; impressions: number; posWeighted: number; posImpr: number }
+  >();
+  if (hasPrevLiveGsc) {
+    for (const snap of gscPrevLiveSnaps) {
+      for (const d of snap.daily) {
+        const cur = prevLiveDayMap.get(d.date) || {
+          clicks: 0,
+          impressions: 0,
+          posWeighted: 0,
+          posImpr: 0,
+        };
+        cur.clicks += d.clicks;
+        cur.impressions += d.impressions;
+        if (d.averagePosition !== null && d.impressions > 0) {
+          cur.posWeighted += d.averagePosition * d.impressions;
+          cur.posImpr += d.impressions;
+        }
+        prevLiveDayMap.set(d.date, cur);
+      }
+    }
+  }
+
+  const hasPrevGsc = hasPrevLiveGsc || gscAccountPrev.length > 0;
+  const prevTotalClicks = hasPrevLiveGsc
+    ? Array.from(prevLiveDayMap.values()).reduce((s, d) => s + d.clicks, 0)
+    : gscAccountPrev.length > 0
+      ? gscAccountPrev.reduce((s, r) => s + r.clicks, 0)
+      : null;
+  const prevTotalImpr = hasPrevLiveGsc
+    ? Array.from(prevLiveDayMap.values()).reduce((s, d) => s + d.impressions, 0)
+    : gscAccountPrev.length > 0
+      ? gscAccountPrev.reduce((s, r) => s + r.impressions, 0)
+      : null;
   const periodClickChangePct =
     totalClicks !== null && prevTotalClicks !== null && prevTotalClicks > 0
       ? Number((((totalClicks - prevTotalClicks) / prevTotalClicks) * 100).toFixed(2))
@@ -309,31 +395,40 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       completeness: M03SeoDailyPointDto['completenessState'];
     }
   >();
-  for (const r of gscAccountCur) {
-    const cur = gscDayMap.get(r.metricDate) || {
-      clicks: 0,
-      impressions: 0,
-      posWeighted: 0,
-      posImpr: 0,
-      completeness: 'UNKNOWN' as M03SeoDailyPointDto['completenessState'],
-    };
-    cur.clicks += r.clicks;
-    cur.impressions += r.impressions;
-    if (r.avgPosition !== null && r.impressions > 0) {
-      cur.posWeighted += r.avgPosition * r.impressions;
-      cur.posImpr += r.impressions;
+  if (hasLiveGsc) {
+    for (const [dt, v] of liveDayMap.entries()) {
+      gscDayMap.set(dt, {
+        ...v,
+        completeness: finalizedLiveDates.has(dt) ? 'FINALIZED' : 'PRELIMINARY',
+      });
     }
-    const siteMeta = gscMetaMap[r.accountPropertyId];
-    const state = classifyGscDateBySourceMetadata(r.metricDate, siteMeta);
-    if (
-      state === 'FINALIZED' ||
-      state === 'PRELIMINARY' ||
-      state === 'UNKNOWN' ||
-      state === 'QUERY_ERROR'
-    ) {
-      cur.completeness = state;
+  } else {
+    for (const r of gscAccountCur) {
+      const cur = gscDayMap.get(r.metricDate) || {
+        clicks: 0,
+        impressions: 0,
+        posWeighted: 0,
+        posImpr: 0,
+        completeness: 'UNKNOWN' as M03SeoDailyPointDto['completenessState'],
+      };
+      cur.clicks += r.clicks;
+      cur.impressions += r.impressions;
+      if (r.avgPosition !== null && r.impressions > 0) {
+        cur.posWeighted += r.avgPosition * r.impressions;
+        cur.posImpr += r.impressions;
+      }
+      const siteMeta = gscMetaMap[r.accountPropertyId];
+      const state = classifyGscDateBySourceMetadata(r.metricDate, siteMeta);
+      if (
+        state === 'FINALIZED' ||
+        state === 'PRELIMINARY' ||
+        state === 'UNKNOWN' ||
+        state === 'QUERY_ERROR'
+      ) {
+        cur.completeness = state;
+      }
+      gscDayMap.set(r.metricDate, cur);
     }
-    gscDayMap.set(r.metricDate, cur);
   }
 
   const seoDailySeries: M03SeoDailyPointDto[] = [];
@@ -360,6 +455,154 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       completenessState: hit ? hit.completeness : 'NO_DATA',
     });
   }
+
+  let previousSeoDailySeries: M03SeoDailyPointDto[] | undefined;
+  if (params?.compare) {
+    const prevMap = new Map<
+      string,
+      { clicks: number; impressions: number; posWeighted: number; posImpr: number }
+    >(prevLiveDayMap);
+    if (!hasPrevLiveGsc) {
+      for (const r of gscAccountPrev) {
+        const cur = prevMap.get(r.metricDate) || {
+          clicks: 0,
+          impressions: 0,
+          posWeighted: 0,
+          posImpr: 0,
+        };
+        cur.clicks += r.clicks;
+        cur.impressions += r.impressions;
+        if (r.avgPosition !== null && r.impressions > 0) {
+          cur.posWeighted += r.avgPosition * r.impressions;
+          cur.posImpr += r.impressions;
+        }
+        prevMap.set(r.metricDate, cur);
+      }
+    }
+    previousSeoDailySeries = [];
+    const prevStartNoon = new Date(`${scope.prevStartDateStr}T12:00:00+07:00`);
+    for (let i = 0; i < scope.totalCalendarDays; i += 1) {
+      const d = new Date(prevStartNoon.getTime() + i * 24 * 60 * 60 * 1000);
+      const dateStr = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Ho_Chi_Minh',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+      const hit = prevMap.get(dateStr);
+      previousSeoDailySeries.push({
+        date: dateStr,
+        clicks: hit ? hit.clicks : null,
+        impressions: hit ? hit.impressions : null,
+        ctrPct:
+          hit && hit.impressions > 0
+            ? Number(((hit.clicks / hit.impressions) * 100).toFixed(2))
+            : null,
+        averagePosition:
+          hit && hit.posImpr > 0 ? Number((hit.posWeighted / hit.posImpr).toFixed(2)) : null,
+        completenessState: hit ? 'FINALIZED' : 'NO_DATA',
+      });
+    }
+  }
+
+  const aggregateLiveBreakdown = (
+    curLiveLists: Array<Array<{ key: string; clicks: number; impressions: number; averagePosition: number | null }>>,
+    prevLiveLists: Array<Array<{ key: string; clicks: number; impressions: number; averagePosition: number | null }>>,
+    prevDbRows: typeof gscQueryPrev,
+    sanitizeUrl: boolean,
+  ): M03SeoComparisonRowDto[] => {
+    const curMap = new Map<string, { clicks: number; impr: number; posW: number; posI: number }>();
+    for (const list of curLiveLists) {
+      for (const item of list) {
+        const k = sanitizeUrl ? sanitizeLandingPageUrl(item.key) : item.key.trim();
+        if (!k) continue;
+        const cur = curMap.get(k) || { clicks: 0, impr: 0, posW: 0, posI: 0 };
+        cur.clicks += item.clicks;
+        cur.impr += item.impressions;
+        if (item.averagePosition !== null && item.impressions > 0) {
+          cur.posW += item.averagePosition * item.impressions;
+          cur.posI += item.impressions;
+        }
+        curMap.set(k, cur);
+      }
+    }
+
+    const prevMap = new Map<string, { clicks: number; impr: number; posW: number; posI: number }>();
+    let hasPrevAny = false;
+    for (const list of prevLiveLists) {
+      for (const item of list) {
+        hasPrevAny = true;
+        const k = sanitizeUrl ? sanitizeLandingPageUrl(item.key) : item.key.trim();
+        if (!k) continue;
+        const prev = prevMap.get(k) || { clicks: 0, impr: 0, posW: 0, posI: 0 };
+        prev.clicks += item.clicks;
+        prev.impr += item.impressions;
+        if (item.averagePosition !== null && item.impressions > 0) {
+          prev.posW += item.averagePosition * item.impressions;
+          prev.posI += item.impressions;
+        }
+        prevMap.set(k, prev);
+      }
+    }
+    if (!hasPrevAny && prevDbRows.length > 0) {
+      hasPrevAny = true;
+      for (const r of prevDbRows) {
+        const k = sanitizeUrl
+          ? sanitizeLandingPageUrl(r.pageUrlRaw || r.pagePathNorm || r.campaignExternalId)
+          : (r.keywordRaw || r.keywordTextNorm || r.campaignExternalId || '').trim();
+        if (!k) continue;
+        const prev = prevMap.get(k) || { clicks: 0, impr: 0, posW: 0, posI: 0 };
+        prev.clicks += r.clicks;
+        prev.impr += r.impressions;
+        if (r.avgPosition !== null && r.impressions > 0) {
+          prev.posW += r.avgPosition * r.impressions;
+          prev.posI += r.impressions;
+        }
+        prevMap.set(k, prev);
+      }
+    }
+
+    const allKeys = new Set<string>([...curMap.keys(), ...prevMap.keys()]);
+    return Array.from(allKeys)
+      .map((key) => {
+        const c = curMap.get(key) || { clicks: 0, impr: 0, posW: 0, posI: 0 };
+        const p = prevMap.get(key);
+        const curCtr = c.impr > 0 ? Number(((c.clicks / c.impr) * 100).toFixed(2)) : null;
+        const avgPos = c.posI > 0 ? Number((c.posW / c.posI).toFixed(2)) : null;
+        const prevClicks = hasPrevAny ? (p ? p.clicks : 0) : null;
+        const prevImpr = hasPrevAny ? (p ? p.impr : 0) : null;
+        const prevCtr =
+          p && p.impr > 0 ? Number(((p.clicks / p.impr) * 100).toFixed(2)) : hasPrevAny ? 0 : null;
+        const prevPos = p && p.posI > 0 ? Number((p.posW / p.posI).toFixed(2)) : null;
+        const clickChange = prevClicks !== null ? c.clicks - prevClicks : null;
+        const clickChangePct =
+          clickChange !== null && prevClicks !== null && prevClicks > 0
+            ? Number(((clickChange / prevClicks) * 100).toFixed(2))
+            : null;
+        const impressionChange = prevImpr !== null ? c.impr - prevImpr : null;
+        const ctrChangePctPt =
+          curCtr !== null && prevCtr !== null ? Number((curCtr - prevCtr).toFixed(2)) : null;
+        const positionImprovement =
+          avgPos !== null && prevPos !== null ? Number((prevPos - avgPos).toFixed(2)) : null;
+        return {
+          key,
+          clicks: c.clicks,
+          impressions: c.impr,
+          ctrPct: curCtr,
+          averagePosition: avgPos,
+          previousClicks: prevClicks,
+          clickChange,
+          clickChangePct,
+          previousImpressions: prevImpr,
+          impressionChange,
+          previousCtrPct: prevCtr,
+          ctrChangePctPt,
+          previousPosition: prevPos,
+          positionImprovement,
+        };
+      })
+      .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions);
+  };
 
   const aggregateBreakdown = (
     curRows: typeof gscQueryCur,
@@ -446,8 +689,62 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions);
   };
 
-  const allQueryRows = aggregateBreakdown(gscQueryCur, gscQueryPrev, false);
-  const allPageRows = aggregateBreakdown(gscPageCur, gscPagePrev, true);
+  const hasLiveQueries = gscLiveSnaps.some((s) => s.queries.length > 0);
+  const hasLivePages = gscLiveSnaps.some((s) => s.pages.length > 0);
+
+  const allQueryRows = hasLiveQueries
+    ? aggregateLiveBreakdown(
+        gscLiveSnaps.map((s) => s.queries),
+        gscPrevLiveSnaps.map((s) => s.queries),
+        gscQueryPrev,
+        false,
+      )
+    : aggregateBreakdown(gscQueryCur, gscQueryPrev, false);
+
+  const allPageRows = hasLivePages
+    ? aggregateLiveBreakdown(
+        gscLiveSnaps.map((s) => s.pages),
+        gscPrevLiveSnaps.map((s) => s.pages),
+        gscPagePrev,
+        true,
+      )
+    : aggregateBreakdown(gscPageCur, gscPagePrev, true);
+
+  // Cặp (query, page) phục vụ lọc chéo chuẩn Search Console
+  const qpMap = new Map<
+    string,
+    { query: string; page: string; clicks: number; impressions: number; posW: number }
+  >();
+  for (const snap of gscLiveSnaps) {
+    for (const ln of snap.queryPages) {
+      const key = `${ln.query.toLowerCase()}|||${ln.page.toLowerCase()}`;
+      const cur = qpMap.get(key) || {
+        query: ln.query,
+        page: ln.page,
+        clicks: 0,
+        impressions: 0,
+        posW: 0,
+      };
+      cur.clicks += ln.clicks;
+      cur.impressions += ln.impressions;
+      if (ln.averagePosition !== null && ln.impressions > 0) {
+        cur.posW += ln.averagePosition * ln.impressions;
+      }
+      qpMap.set(key, cur);
+    }
+  }
+  const queryPageLinks = Array.from(qpMap.values())
+    .map((x) => ({
+      query: x.query,
+      page: x.page,
+      clicks: x.clicks,
+      impressions: x.impressions,
+      ctrPct: x.impressions > 0 ? Number(((x.clicks / x.impressions) * 100).toFixed(2)) : null,
+      averagePosition:
+        x.impressions > 0 && x.posW > 0 ? Number((x.posW / x.impressions).toFixed(2)) : null,
+    }))
+    .sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions)
+    .slice(0, 1500);
 
   // Trang tăng / giảm cho cột 4/12 (C08)
   const risingPages = allPageRows
@@ -502,24 +799,70 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     publishError: a.lastPublishError || null,
   }));
 
-  // Thiết bị & Quốc gia từ GA4/GSC khi có dữ liệu
+  // Thiết bị & Quốc gia: Ưu tiên GSC live thật, chỉ fallback GA4 nếu thiếu GSC
   const deviceCountryRows: M03SeoDeviceCountryRowDto[] = [];
-  for (const snap of ga4LiveSnaps) {
-    for (const d of snap.devices) {
-      const existing = deviceCountryRows.find(
-        (x) => x.dimensionType === 'DEVICE' && x.dimensionKey === d.deviceCategory,
-      );
-      if (existing) {
-        existing.clicks += d.sessions;
-      } else {
-        deviceCountryRows.push({
-          dimensionType: 'DEVICE',
-          dimensionKey: d.deviceCategory,
-          clicks: d.sessions,
+  const hasLiveGscDim = gscLiveSnaps.some(
+    (s) => s.devices.length > 0 || s.countries.length > 0,
+  );
+  if (hasLiveGscDim) {
+    const aggMap = new Map<
+      string,
+      {
+        dimensionType: 'DEVICE' | 'COUNTRY';
+        dimensionKey: string;
+        clicks: number;
+        impressions: number;
+        posW: number;
+      }
+    >();
+    for (const snap of gscLiveSnaps) {
+      for (const row of [...snap.devices, ...snap.countries]) {
+        const k = `${row.dimensionType}::${row.dimensionKey}`;
+        const cur = aggMap.get(k) || {
+          dimensionType: row.dimensionType,
+          dimensionKey: row.dimensionKey,
+          clicks: 0,
           impressions: 0,
-          ctrPct: null,
-          averagePosition: null,
-        });
+          posW: 0,
+        };
+        cur.clicks += row.clicks;
+        cur.impressions += row.impressions;
+        if (row.averagePosition !== null && row.impressions > 0) {
+          cur.posW += row.averagePosition * row.impressions;
+        }
+        aggMap.set(k, cur);
+      }
+    }
+    for (const v of aggMap.values()) {
+      deviceCountryRows.push({
+        dimensionType: v.dimensionType,
+        dimensionKey: v.dimensionKey,
+        clicks: v.clicks,
+        impressions: v.impressions,
+        ctrPct: v.impressions > 0 ? Number(((v.clicks / v.impressions) * 100).toFixed(2)) : null,
+        averagePosition:
+          v.impressions > 0 && v.posW > 0 ? Number((v.posW / v.impressions).toFixed(2)) : null,
+      });
+    }
+    deviceCountryRows.sort((a, b) => b.clicks - a.clicks || b.impressions - a.impressions);
+  } else {
+    for (const snap of ga4LiveSnaps) {
+      for (const d of snap.devices) {
+        const existing = deviceCountryRows.find(
+          (x) => x.dimensionType === 'DEVICE' && x.dimensionKey === d.deviceCategory,
+        );
+        if (existing) {
+          existing.clicks += d.sessions;
+        } else {
+          deviceCountryRows.push({
+            dimensionType: 'DEVICE',
+            dimensionKey: d.deviceCategory,
+            clicks: d.sessions,
+            impressions: 0,
+            ctrPct: null,
+            averagePosition: null,
+          });
+        }
       }
     }
   }
@@ -528,12 +871,22 @@ export async function getM03AdsSeoDashboardSpec(params?: {
   const lastGscLog = gscLogs[0] || null;
   const lastGscSuccess = gscLogs.find((s) => s.status === 'success' || s.status === 'partial') || null;
   const isError = lastGscLog?.status === 'failed' && !hasGscData;
-  const latestDataThrough = gscAccountCur[gscAccountCur.length - 1]?.metricDate || null;
-  const realLastSuccessAt = lastGscSuccess?.completedAt?.toISOString() || null;
+  const liveDatesSorted = Array.from(liveDayMap.keys()).sort();
+  const latestDataThrough = hasLiveGsc
+    ? liveDatesSorted[liveDatesSorted.length - 1] || null
+    : gscAccountCur[gscAccountCur.length - 1]?.metricDate || null;
+  const realLastSuccessAt =
+    (hasLiveGsc
+      ? gscLiveSnaps.map((s) => s.fetchedAt).sort().pop()
+      : null) ||
+    lastGscSuccess?.completedAt?.toISOString() ||
+    null;
 
   // Derive FINALIZED / PRELIMINARY honestly from GSC dataState metadata when available
   let hasPreliminaryGsc = false;
-  if (hasGscData && latestDataThrough) {
+  if (hasLiveGsc && latestDataThrough) {
+    hasPreliminaryGsc = !finalizedLiveDates.has(latestDataThrough);
+  } else if (hasGscData && latestDataThrough) {
     for (const sUrl of gscSites) {
       const meta = gscMetaMap[sUrl] || null;
       const cls = classifyGscDateBySourceMetadata(latestDataThrough, meta);
@@ -651,13 +1004,14 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       },
       charts: {
         seoDailySeries,
+        previousSeoDailySeries,
         opportunityQueries,
         opportunityThresholdNote: `Điều kiện lọc cơ hội: Hiển thị ≥ ${opportunityThresholdMinImpr} và CTR < ${ctrCeiling}% (gợi ý cần kiểm chứng, không khẳng định kết quả chắc chắn)`,
         pagesDeltaSummary: {
           risingPages,
           decliningPages,
           comparisonNote:
-            gscPagePrev.length === 0
+            !hasPrevLiveGsc && gscPagePrev.length === 0
               ? `Kỳ trước (${scope.prevStartDateStr} → ${scope.prevEndDateStr}) chưa có dữ liệu trang chi tiết để đối chiếu tăng/giảm.`
               : `So sánh kỳ hiện tại với kỳ trước (${scope.prevStartDateStr} → ${scope.prevEndDateStr})`,
         },
@@ -667,6 +1021,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         pages: paginateArray(allPageRows, params?.page || 1, params?.pageSize || 20),
         content: paginateArray(contentRows, params?.contentPage || 1, params?.pageSize || 20),
         deviceCountry: deviceCountryRows,
+        queryPageLinks,
       },
       opportunityConfig: {
         minImpressionsForLowCtr: opportunityThresholdMinImpr,
@@ -695,14 +1050,19 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       }));
       const rssRows = liveTrendsSnap?.dailyRssTrends || [];
       const industrySuggestions = liveTrendsSnap?.industrySuggestions || [];
+      const regionRows = trendsExtras?.regionRows || [];
+      const relatedQueries = trendsExtras?.relatedQueries || [];
       const hasAnyLiveTrends =
-        dbTrendRows.length > 0 || rssRows.length > 0 || industrySuggestions.length > 0;
+        dbTrendRows.length > 0 ||
+        rssRows.length > 0 ||
+        industrySuggestions.length > 0 ||
+        regionRows.length > 0;
 
       return {
         status: hasAnyLiveTrends ? 'CONNECTED' : 'UNCONFIGURED',
         statusMessage: hasAnyLiveTrends
-          ? `Đã kết nối Google Trends Việt Nam (RSS xu hướng ngày & Google Suggest VN${
-              serpApiKey ? ' + SerpApi 0–100' : ''
+          ? `Đã kết nối Google Trends Việt Nam (Suggest miễn phí & CSV${
+              serpApiKey ? ' + SerpApi' : ''
             }). Cập nhật lúc ${
               liveTrendsSnap?.fetchedAt
                 ? new Date(liveTrendsSnap.fetchedAt).toLocaleTimeString('vi-VN', {
@@ -716,6 +1076,8 @@ export async function getM03AdsSeoDashboardSpec(params?: {
         rows: dbTrendRows.length > 0 ? dbTrendRows : rssRows,
         dailyRssTrends: rssRows,
         industrySuggestions,
+        regionRows,
+        relatedQueries,
         serpApiConfigured: Boolean(serpApiKey),
         lastSyncedAt: liveTrendsSnap?.fetchedAt || null,
       };

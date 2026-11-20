@@ -6,10 +6,22 @@ import Link from 'next/link';
 import {
   Activity,
   AlertCircle,
+  ArrowRight,
+  CalendarDays,
+  ChevronDown,
   Download,
   ExternalLink,
+  FileText,
   Layers,
+  LayoutDashboard,
+  Link2,
+  Megaphone,
+  MonitorSmartphone,
+  MousePointerClick,
   RefreshCw,
+  Search,
+  Share2,
+  SlidersHorizontal,
   X,
 } from 'lucide-react';
 import {
@@ -27,6 +39,9 @@ import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
+import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
+import { GooglePlatformSwitcher } from '@/components/common/GooglePlatformSwitcher';
+import { AdsExcelTableSection } from './AdsExcelTableSection';
 
 const MarketingTrafficChart = dynamic(
   () => import('./MarketingTrafficChart').then((m) => m.MarketingTrafficChart),
@@ -48,23 +63,125 @@ const MarketingChannelMixCard = dynamic(
   },
 );
 
+const GoogleAdsDualMetricChart = dynamic(
+  () => import('./GoogleAdsDualMetricChart').then((m) => m.GoogleAdsDualMetricChart),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-[280px] rounded-xl bg-slate-50 border border-slate-100 animate-pulse" />
+    ),
+  },
+);
+
+const Ga4RealtimeBarCard = dynamic(
+  () => import('./Ga4RealtimeBarCard').then((m) => m.Ga4RealtimeBarCard),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-[180px] rounded-xl bg-slate-50 border border-slate-100 animate-pulse" />
+    ),
+  },
+);
+
 type MainBusinessTab = 'traffic' | 'ads';
 type TrafficTableSubTab = 'channels' | 'landing_pages' | 'actions';
+type TrackingSectionId =
+  | 'overview'
+  | 'landing_pages'
+  | 'channels'
+  | 'actions'
+  | 'devices_geo'
+  | 'ads_campaigns'
+  | 'ads_daily'
+  | 'ads_landing_pages'
+  | 'ads_search_terms'
+  | 'ads_breakdowns';
+
+const VALID_TRACKING_SECTIONS: ReadonlySet<string> = new Set([
+  'overview',
+  'landing_pages',
+  'channels',
+  'actions',
+  'devices_geo',
+  'ads_campaigns',
+  'ads_daily',
+  'ads_landing_pages',
+  'ads_search_terms',
+  'ads_breakdowns',
+]);
+
+const SECTION_META: Record<TrackingSectionId, { title: string; subtitle: string }> = {
+  overview: {
+    title: 'Lưu lượng truy cập (GA4)',
+    subtitle: 'Người dùng mới, phiên truy cập và kênh thu hút',
+  },
+  landing_pages: {
+    title: 'Trang đích',
+    subtitle: 'Lưu lượng khách mới theo từng nhóm trang',
+  },
+  channels: {
+    title: 'Hiệu suất kênh',
+    subtitle: 'Kênh tiếp thị, nguồn truy cập và Lead đối soát',
+  },
+  actions: {
+    title: 'Sự kiện & Realtime 30 phút',
+    subtitle: 'Hoạt động trong 30 phút qua và lượt tương tác trong kỳ',
+  },
+  devices_geo: {
+    title: 'Thiết bị & Khu vực',
+    subtitle: 'Phân bổ theo thiết bị và tỉnh thành truy cập',
+  },
+  ads_campaigns: {
+    title: 'Chiến dịch Google Ads',
+    subtitle: 'Hiệu suất chiến dịch, link đích và chi phí trên mỗi Lead',
+  },
+  ads_daily: {
+    title: 'Chi phí theo ngày',
+    subtitle: 'Theo dõi chi phí, CTR, CPC theo từng ngày',
+  },
+  ads_landing_pages: {
+    title: 'Trang đích quảng cáo',
+    subtitle: 'Hiệu suất từng URL đích từ Google Ads',
+  },
+  ads_search_terms: {
+    title: 'Cụm từ tìm kiếm',
+    subtitle: 'Truy vấn thực tế khách tìm trước khi nhấp quảng cáo',
+  },
+  ads_breakdowns: {
+    title: 'Nhóm QC & Từ khóa',
+    subtitle: 'Nhóm quảng cáo, từ khóa, thiết bị và khung giờ',
+  },
+};
+
+const SELECTED_EVENTS_STORAGE_KEY = 'tt_m02_selected_events_v1';
+const DEFAULT_TRACKED_EVENTS = [
+  'GA4_Form',
+  'GA4_Phone_713',
+  'GA4_Zalo_713',
+  'GA4_Zalo_800',
+  'click',
+  'form_submit',
+  'generate_lead',
+];
 
 function buildM02ApiPath(
   scope: { websiteId: string; preset: string; from: string; to: string },
   page: number,
   adsPage: number,
+  adsScope: 'all' | 'website',
+  compare: boolean,
 ): string {
   const qs = new URLSearchParams({
     view: 'spec',
     websiteId: scope.websiteId || 'all',
     preset: scope.preset || '7D',
     page: String(page),
-    pageSize: '20',
+    pageSize: '60',
     adsPage: String(adsPage),
-    adsPageSize: '20',
+    adsPageSize: '100',
+    adsScope,
   });
+  if (compare) qs.set('compare', '1');
   if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
     qs.set('from', scope.from);
     qs.set('to', scope.to);
@@ -76,19 +193,60 @@ export function TrackingWorkspace() {
   const { user } = useSession();
   const canDirectDesign = Boolean(user && hasBaPermission(user.roleCode, 'AI_DESIGN'));
   const { scope, hydrated, updateScope } = useDashboardScope();
-  const [businessTab, setBusinessTab] = useState<MainBusinessTab>(() => {
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [activeSection, setActiveSection] = useState<TrackingSectionId>(() => {
     if (typeof window !== 'undefined') {
-      const t = new URLSearchParams(window.location.search).get('tab');
-      if (t === 'ads' || t === 'traffic') return t;
-      const saved = loadRouteState<{ businessTab?: MainBusinessTab }>('tracking');
-      if (saved?.businessTab) return saved.businessTab;
+      const qs = new URLSearchParams(window.location.search);
+      const sec = qs.get('section');
+      if (sec && VALID_TRACKING_SECTIONS.has(sec)) return sec as TrackingSectionId;
+      const t = qs.get('tab');
+      if (t === 'ads') return 'ads_campaigns';
+      if (t === 'traffic') return 'overview';
+      const saved = loadRouteState<{
+        activeSection?: string;
+        businessTab?: MainBusinessTab;
+        trafficSubTab?: TrafficTableSubTab;
+      }>('tracking');
+      if (saved?.activeSection && VALID_TRACKING_SECTIONS.has(saved.activeSection)) {
+        return saved.activeSection as TrackingSectionId;
+      }
+      if (saved?.businessTab === 'ads') return 'ads_campaigns';
+      if (saved?.trafficSubTab && VALID_TRACKING_SECTIONS.has(saved.trafficSubTab)) {
+        return saved.trafficSubTab;
+      }
     }
-    return 'traffic';
+    return 'overview';
   });
-  const [trafficSubTab, setTrafficSubTab] = useState<TrafficTableSubTab>(() => {
-    const saved = loadRouteState<{ trafficSubTab?: TrafficTableSubTab }>('tracking');
-    return saved?.trafficSubTab || 'channels';
+  const [adsScopeMode, setAdsScopeMode] = useState<'all' | 'website'>(() => {
+    const saved = loadRouteState<{ adsScopeMode?: 'all' | 'website' }>('tracking');
+    return saved?.adsScopeMode || 'all';
   });
+  const [lpCategoryFilter, setLpCategoryFilter] = useState<string>('all');
+  const [hideNoiseLp, setHideNoiseLp] = useState<boolean>(true);
+  const [showRealtimePicker, setShowRealtimePicker] = useState<boolean>(false);
+  const [showOnlySelectedEvents, setShowOnlySelectedEvents] = useState<boolean>(false);
+  const [selectedEvents, setSelectedEvents] = useState<string[]>(() => {
+    if (typeof window === 'undefined') return DEFAULT_TRACKED_EVENTS;
+    try {
+      const saved = window.localStorage.getItem(SELECTED_EVENTS_STORAGE_KEY);
+      if (saved) {
+        const arr = JSON.parse(saved) as string[];
+        if (Array.isArray(arr) && arr.length > 0) return arr;
+      }
+    } catch {
+      // ignore
+    }
+    return DEFAULT_TRACKED_EVENTS;
+  });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SELECTED_EVENTS_STORAGE_KEY, JSON.stringify(selectedEvents));
+    } catch {
+      // ignore
+    }
+  }, [selectedEvents]);
+
   const [page, setPage] = useState(() => loadRouteState<{ page?: number }>('tracking')?.page || 1);
   const [adsPage, setAdsPage] = useState(() => loadRouteState<{ adsPage?: number }>('tracking')?.adsPage || 1);
   const [searchTerm, setSearchTerm] = useState('');
@@ -161,9 +319,20 @@ export function TrackingWorkspace() {
   };
 
   const apiPath = useMemo(
-    () => buildM02ApiPath(scope, page, adsPage),
-    [scope, page, adsPage],
+    () => buildM02ApiPath(scope, page, adsPage, adsScopeMode, compareEnabled),
+    [scope, page, adsPage, adsScopeMode, compareEnabled],
   );
+
+  useEffect(() => {
+    const onPlatformSwitch = (e: Event) => {
+      const key = (e as CustomEvent<string>).detail;
+      if (key === 'ga4') setActiveSection('overview');
+      if (key === 'ads') setActiveSection('ads_campaigns');
+    };
+    window.addEventListener('tt-google-platform-click', onPlatformSwitch as EventListener);
+    return () =>
+      window.removeEventListener('tt-google-platform-click', onPlatformSwitch as EventListener);
+  }, []);
   const activePathRef = useRef<string>(apiPath);
   activePathRef.current = apiPath;
 
@@ -281,8 +450,27 @@ export function TrackingWorkspace() {
   }, [hydrated, apiPath, scope.preset, scope.from, scope.to, loadData]);
 
   useEffect(() => {
-    saveRouteState('tracking', { businessTab, trafficSubTab, page, adsPage });
-  }, [businessTab, trafficSubTab, page, adsPage]);
+    const isAds =
+      activeSection === 'ads_campaigns' ||
+      activeSection === 'ads_daily' ||
+      activeSection === 'ads_landing_pages' ||
+      activeSection === 'ads_search_terms' ||
+      activeSection === 'ads_breakdowns';
+    saveRouteState('tracking', {
+      activeSection,
+      businessTab: isAds ? 'ads' : 'traffic',
+      trafficSubTab:
+        activeSection === 'landing_pages' ||
+        activeSection === 'channels' ||
+        activeSection === 'actions' ||
+        activeSection === 'devices_geo'
+          ? activeSection
+          : 'landing_pages',
+      adsScopeMode,
+      page,
+      adsPage,
+    });
+  }, [activeSection, adsScopeMode, page, adsPage]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -324,50 +512,45 @@ export function TrackingWorkspace() {
   }, [m]);
 
   const trafficPoints = data?.charts.trafficSeries || [];
-  const maxTrafficPlotVal = useMemo(() => {
-    let maxVal = 4;
-    for (const pt of trafficPoints) {
-      maxVal = Math.max(maxVal, pt.sessions ?? 0, pt.pageViews ?? 0);
-    }
-    return Math.ceil(maxVal / 2) * 2;
-  }, [trafficPoints]);
-
   const channelRows = data?.charts.channelRows || [];
-  const maxChannelSessions = useMemo(
-    () => Math.max(1, ...channelRows.map((c) => c.sessions)),
-    [channelRows],
-  );
-
   const lpTable = data?.tables.landingPageRows;
   const lpTotalPages = lpTable ? Math.max(1, Math.ceil(lpTable.totalRows / lpTable.pageSize)) : 1;
 
   const adsSeries = ads?.series || [];
-  const maxAdCost = useMemo(
-    () => Math.max(1, ...adsSeries.map((s) => s.cost ?? 0)),
-    [adsSeries],
-  );
-  const maxAdConv = useMemo(
-    () => Math.max(1, ...adsSeries.map((s) => s.conversions ?? 0)),
-    [adsSeries],
-  );
 
   const campTable = ads?.campaigns;
-  const campTotalPages = campTable
-    ? Math.max(1, Math.ceil(campTable.totalRows / campTable.pageSize))
-    : 1;
+
+  const visibleLandingPageCount = useMemo(
+    () =>
+      (lpTable?.rows || []).filter(
+        (r) => !hideNoiseLp || r.categoryKey !== 'technical_noise',
+      ).length,
+    [lpTable?.rows, hideNoiseLp],
+  );
+
+  const adsBreakdownCount =
+    (ads?.breakdowns.adGroups.length || 0) + (ads?.breakdowns.keywords.length || 0);
+
+  const currentSectionMeta = SECTION_META[activeSection];
+  const isAdsSection =
+    activeSection === 'ads_campaigns' ||
+    activeSection === 'ads_daily' ||
+    activeSection === 'ads_landing_pages' ||
+    activeSection === 'ads_search_terms' ||
+    activeSection === 'ads_breakdowns';
 
   return (
     <div className="space-y-4 text-sm">
-      {/* Thanh ngữ cảnh dùng chung */}
+      <GooglePlatformSwitcher active={isAdsSection ? 'ads' : 'ga4'} platforms={['ga4', 'ads']} />
+
       <WebsiteDashboardHeader
         title={UI_VOCABULARY.menu.campaigns}
-        subtitle={
-          data
-            ? `Traffic và quảng cáo nào đang có hiệu quả? · ${data.scope.startDate} → ${data.scope.endDate}`
-            : 'Traffic và quảng cáo nào đang có hiệu quả?'
-        }
         scope={scope}
         availableWebsites={data?.coverage.availableWebsites || knownWebsites}
+        websiteSelectorStyle="dropdown"
+        showCompareToggle={true}
+        compareEnabled={compareEnabled}
+        onToggleCompare={setCompareEnabled}
         comparisonLabel={sessionComp && sessionComp.pctChange !== null ? sessionComp.label : null}
         freshnessMessage={
           loading && !data
@@ -404,7 +587,7 @@ export function TrackingWorkspace() {
                 ? `&from=${encodeURIComponent(scope.from)}&to=${encodeURIComponent(scope.to)}`
                 : ''
                 }`}
-              className="min-h-9 px-3 rounded-[10px] bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+              className="min-h-8 px-3 rounded-[10px] bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
             >
               <Download aria-hidden="true" className="w-3.5 h-3.5" />
               <span>{UI_VOCABULARY.actions.exportExcel}</span>
@@ -413,7 +596,7 @@ export function TrackingWorkspace() {
               type="button"
               onClick={() => void loadData({ manual: true })}
               disabled={refreshing}
-              className="min-h-9 px-3.5 rounded-[10px] bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+              className="min-h-8 px-3.5 rounded-[10px] bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
             >
               <RefreshCw aria-hidden="true" className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               <span>{UI_VOCABULARY.actions.refresh}</span>
@@ -451,835 +634,1699 @@ export function TrackingWorkspace() {
         </div>
       )}
 
-      {/* 2 Tab nghiệp vụ chính: "Truy cập" và "Quảng cáo" (không dùng tên API kỹ thuật) */}
-      <div className="bg-white border border-slate-200/90 rounded-[12px] px-4 pt-1 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
-        <div
-          role="tablist"
-          aria-label="Phân mục Chiến dịch"
-          className="flex items-center gap-1 overflow-x-auto"
-        >
-          <button
-            type="button"
-            role="tab"
-            id="m02-tab-traffic"
-            aria-selected={businessTab === 'traffic'}
-            onClick={() => setBusinessTab('traffic')}
-            className="relative flex-none inline-flex items-center gap-2 min-h-11 px-4 py-2.5 text-sm font-semibold text-slate-600 aria-selected:text-[#0F275C] aria-selected:after:content-[''] aria-selected:after:absolute aria-selected:after:inset-x-0 aria-selected:after:bottom-0 aria-selected:after:border-b-[3px] aria-selected:after:border-[#0F275C] focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
-          >
-            <span>Truy cập</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            id="m02-tab-ads"
-            aria-selected={businessTab === 'ads'}
-            onClick={() => setBusinessTab('ads')}
-            className="relative flex-none inline-flex items-center gap-2 min-h-11 px-4 py-2.5 text-sm font-semibold text-slate-600 aria-selected:text-[#0F275C] aria-selected:after:content-[''] aria-selected:after:absolute aria-selected:after:inset-x-0 aria-selected:after:bottom-0 aria-selected:after:border-b-[3px] aria-selected:after:border-[#0F275C] focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
-          >
-            <span>Quảng cáo</span>
-            {!adsConnected && (
-              <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-medium">
-                {UI_VOCABULARY.fallbacks.unconnected}
-              </span>
-            )}
-          </button>
-        </div>
+      {/* Bố cục menu dọc bên trái chuẩn Google Ads + vùng nội dung rộng bên phải */}
+      <div className="flex flex-col lg:flex-row items-start gap-4">
+        <VerticalSectionNav
+          ariaLabel="Điều hướng phân mục Chiến dịch & Truy cập"
+          activeId={activeSection}
+          onSelect={(id) => {
+            if (VALID_TRACKING_SECTIONS.has(id)) {
+              setActiveSection(id as TrackingSectionId);
+            }
+          }}
+          topItems={[]}
+          groups={[
+            {
+              id: 'ga4_traffic',
+              label: 'Thông tin truy cập (GA4)',
+              defaultOpen: true,
+              items: [
+                {
+                  id: 'overview',
+                  label: 'Lưu lượng GA4',
+                  icon: LayoutDashboard,
+                },
+                {
+                  id: 'landing_pages',
+                  label: 'Trang đích',
+                  icon: FileText,
+                  badge: lpTable ? (lpTable.totalRows > 0 ? lpTable.totalRows : visibleLandingPageCount) : null,
+                },
+                {
+                  id: 'channels',
+                  label: 'Hiệu suất kênh',
+                  icon: Share2,
+                  badge: channelRows.length > 0 ? channelRows.length : null,
+                },
+                {
+                  id: 'actions',
+                  label: 'Sự kiện & Click',
+                  icon: MousePointerClick,
+                  badge: data?.allGa4Events?.length ? data.allGa4Events.length : null,
+                },
+                {
+                  id: 'devices_geo',
+                  label: 'Thiết bị & Khu vực',
+                  icon: MonitorSmartphone,
+                  badge: data?.charts.deviceRows?.length ? data.charts.deviceRows.length : null,
+                },
+              ],
+            },
+            {
+              id: 'google_ads',
+              label: 'Quảng cáo (Google Ads)',
+              defaultOpen: true,
+              items: [
+                {
+                  id: 'ads_campaigns',
+                  label: 'Tất cả chiến dịch',
+                  icon: Megaphone,
+                  badge: adsConnected
+                    ? campTable?.rows?.length ?? 0
+                    : UI_VOCABULARY.fallbacks.unconnected,
+                  badgeTone: adsConnected ? 'default' : 'warning',
+                },
+                {
+                  id: 'ads_daily',
+                  label: 'Chi phí theo ngày',
+                  icon: CalendarDays,
+                },
+                {
+                  id: 'ads_landing_pages',
+                  label: 'Trang đích Ads',
+                  icon: Link2,
+                  badge: ads?.breakdowns.landingPages?.length
+                    ? ads.breakdowns.landingPages.length
+                    : null,
+                },
+                {
+                  id: 'ads_search_terms',
+                  label: 'Cụm từ tìm kiếm',
+                  icon: Search,
+                  badge: ads?.breakdowns.searchTerms?.length
+                    ? ads.breakdowns.searchTerms.length
+                    : null,
+                },
+                {
+                  id: 'ads_breakdowns',
+                  label: 'Nhóm QC & Từ khóa',
+                  icon: Layers,
+                  badge: adsBreakdownCount > 0 ? adsBreakdownCount : null,
+                },
+              ],
+            },
+          ]}
+        />
 
-        {/* Ô phụ bộ đếm 30 phút có nhãn cửa sổ rõ ràng, tách biệt khỏi bộ lọc lịch sử (C07 & C10) */}
-        <div className="py-2 flex items-center gap-2 text-xs text-slate-600">
-          <Activity aria-hidden="true" className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-          <span>Đang hoạt động (cửa sổ 30 phút hiện tại):</span>
-          <strong className="text-slate-900 font-bold tabular-nums">
-            <AnimatedMetricNumber
-              value={m?.activeUsers30m}
-              emptyText={UI_VOCABULARY.fallbacks.insufficientData}
-            />
-          </strong>
-          <span className="text-[11px] text-slate-400 hidden sm:inline">
-            (Tách khỏi bộ lọc lịch sử)
-          </span>
-        </div>
-      </div>
+        <div className="flex-1 min-w-0 w-full space-y-4">
+          {/* Thanh tiêu đề phân mục hiện tại + Realtime 30 phút & Tuỳ chọn Event/Click */}
+          <div className="bg-white border border-slate-200/90 rounded-2xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-slate-900 leading-tight">
+                {currentSectionMeta.title}
+              </h2>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                {currentSectionMeta.subtitle}
+              </p>
+            </div>
 
-      {/* ===================================================================== */}
-      {/* TAB 1: TRUY CẬP                                                       */}
-      {/* ===================================================================== */}
-      <div
-        role="tabpanel"
-        aria-labelledby="m02-tab-traffic"
-        hidden={businessTab !== 'traffic'}
-        className="space-y-4"
-      >
-        {data?.coverage.note && (
-          <div className="rounded-[10px] bg-blue-50/70 border border-blue-200/80 px-3.5 py-2 text-xs text-slate-700">
-            {data.coverage.note}
-          </div>
-        )}
+            {/* Ô phụ bộ đếm 30 phút + Tuỳ chọn Event & Click Realtime/Kỳ (C07 & C10) */}
+            <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600 relative">
+              <div className="inline-flex items-center gap-1.5">
+                <Activity aria-hidden="true" className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span>30 phút qua:</span>
+                <strong className="text-slate-900 font-bold tabular-nums">
+                  <AnimatedMetricNumber
+                    value={m?.activeUsers30m}
+                    emptyText={UI_VOCABULARY.fallbacks.insufficientData}
+                  />
+                </strong>
+                <span>user</span>
+              </div>
 
-        {/* 6 KPI Truy cập (~108px) */}
-        {loading && !data ? (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {[1, 2, 3, 4, 5, 6].map((k) => (
-              <div
-                key={k}
-                className="min-h-[108px] rounded-[12px] bg-white border border-slate-200/90 p-4 shadow-2xs space-y-2.5 animate-pulse"
+              {(data?.realtimeEvents || [])
+                .filter((ev) => selectedEvents.includes(ev.eventName))
+                .slice(0, 3)
+                .map((ev) => (
+                  <span
+                    key={`rt-${ev.eventName}`}
+                    className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-semibold tabular-nums"
+                  >
+                    {ev.eventName}: {ev.eventCount}
+                  </span>
+                ))}
+
+              <button
+                type="button"
+                onClick={() => setShowRealtimePicker((p) => !p)}
+                className="h-7 px-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[11px] font-semibold text-[#1E3A8A] inline-flex items-center gap-1"
               >
-                <div className="h-3 w-28 rounded bg-slate-200" />
-                <div className="h-7 w-24 rounded bg-slate-200" />
-                <div className="h-3 w-44 rounded bg-slate-100" />
-              </div>
-            ))}
-          </div>
-        ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Người dùng</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={m?.users}
-                emptyText={
-                  scope.websiteId === 'all'
-                    ? 'Chọn 1 website'
-                    : UI_VOCABULARY.fallbacks.insufficientData
-                }
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              {scope.websiteId === 'all'
-                ? 'Không cộng gộp người dùng duy nhất giữa nhiều GA4 property'
-                : `Người dùng mới: ${m?.newUsers !== null && m?.newUsers !== undefined
-                  ? m.newUsers.toLocaleString('vi-VN')
-                  : UI_VOCABULARY.fallbacks.insufficientData
-                }`}
-            </span>
-          </div>
+                <SlidersHorizontal className="w-3 h-3" />
+                <span>Tuỳ chọn Event &amp; Click</span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
+              </button>
 
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Phiên truy cập</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber value={m?.sessions} />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              Phiên có tương tác:{' '}
-              <strong className="text-slate-700 tabular-nums">
-                {m?.engagedSessions !== null && m?.engagedSessions !== undefined
-                  ? m.engagedSessions.toLocaleString('vi-VN')
-                  : UI_VOCABULARY.fallbacks.insufficientData}
-              </strong>
-            </span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Lượt xem trang</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber value={m?.pageViews} />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">Tổng lượt xem màn hình/trang trong kỳ</span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Tỷ lệ tương tác</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={m?.engagementRatePct}
-                format={(v) => `${v.toFixed(1)}%`}
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">Phiên có tương tác / tổng phiên</span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">
-              Thời gian tương tác/người dùng hoạt động
-            </span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={m?.averageEngagementSeconds}
-                format={(v) => `${v.toFixed(0)} giây`}
-                emptyText={
-                  scope.websiteId === 'all'
-                    ? 'Chọn 1 website'
-                    : UI_VOCABULARY.fallbacks.insufficientData
-                }
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              Tổng thời lượng tương tác / người dùng hoạt động
-            </span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Yêu cầu biểu mẫu ghi nhận</span>
-            <div className="text-2xl font-bold text-[#0F275C] mt-1">
-              <AnimatedMetricNumber
-                value={
-                  m?.formEventCount !== null && m?.formEventCount !== undefined
-                    ? m.formEventCount
-                    : m?.validFormLeadCount
-                }
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              {m?.formEventCount !== null && m?.formEventCount !== undefined
-                ? `Sự kiện form tracking · Đối soát CRM: ${m.validFormLeadCount} Lead hợp lệ`
-                : `Chưa cài event form GA4 · CRM ghi nhận ${m?.validFormLeadCount ?? 0} Lead form hợp lệ`}
-            </span>
-          </div>
-        </div>
-        )}
-
-        {/* Biểu đồ Marketing Spline 8/12 + Cơ cấu Kênh thu hút 4/12 */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-          {/* 8/12: Biểu đồ xu hướng Phiên truy cập, Lượt xem & Chiều sâu tương tác */}
-          <section
-            aria-labelledby="m02-traffic-chart-heading"
-            className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
-          >
-            <div className="mb-3">
-              <h2 id="m02-traffic-chart-heading" className="text-sm sm:text-base font-bold text-slate-900">
-                Xu hướng thu hút Lưu lượng &amp; Tương tác chiến dịch theo ngày
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Đối chiếu nhịp độ Phiên truy cập, Lượt xem trang và Chiều sâu đọc nội dung (Trang/Phiên) phục vụ tối ưu Marketing
-              </p>
-            </div>
-
-            <MarketingTrafficChart points={trafficPoints} loading={loading && !data} />
-          </section>
-
-          {/* 4/12: Cơ cấu kênh Marketing & Tỷ lệ chuyển đổi Lead */}
-          <section
-            aria-labelledby="m02-top-channels-heading"
-            className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
-          >
-            <div>
-              <h2 id="m02-top-channels-heading" className="text-sm sm:text-base font-bold text-slate-900">
-                Cơ cấu Kênh Marketing &amp; Thu hút Lead
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5 mb-3">
-                Tỷ trọng đóng góp phiên, tỷ lệ tương tác và số Lead hợp lệ theo từng nguồn
-              </p>
-              <MarketingChannelMixCard channels={channelRows} />
-            </div>
-          </section>
-        </div>
-
-        {/* Bảng dưới: Tab Kênh / Trang vào / Hành động */}
-        <section
-          className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden"
-          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 360px' }}
-        >
-          <div className="px-4 pt-2 border-b border-slate-200 flex items-center justify-between gap-2">
-            <div
-              role="tablist"
-              aria-label="Chi tiết truy cập theo chiều phân tích"
-              className="flex items-center gap-1 overflow-x-auto"
-            >
-              {[
-                { id: 'channels' as const, label: 'Kênh' },
-                { id: 'landing_pages' as const, label: 'Trang vào' },
-                { id: 'actions' as const, label: 'Hành động' },
-              ].map((st) => (
-                <button
-                  key={st.id}
-                  type="button"
-                  role="tab"
-                  id={`m02-subtab-${st.id}`}
-                  aria-selected={trafficSubTab === st.id}
-                  onClick={() => setTrafficSubTab(st.id)}
-                  className="relative flex-none min-h-10 px-3.5 py-2 text-xs font-semibold text-slate-600 aria-selected:text-[#0F275C] aria-selected:after:content-[''] aria-selected:after:absolute aria-selected:after:inset-x-0 aria-selected:after:bottom-0 aria-selected:after:border-b-[3px] aria-selected:after:border-[#0F275C]"
-                >
-                  {st.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Sub-panel 1: Kênh */}
-          <div
-            role="tabpanel"
-            aria-labelledby="m02-subtab-channels"
-            hidden={trafficSubTab !== 'channels'}
-          >
-            <div tabIndex={0} role="region" aria-label="Bảng theo kênh" className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
-                  <tr>
-                    <th scope="col" className="py-2.5 px-4 font-semibold">Kênh marketing</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold">Nguồn / phương thức</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên truy cập</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên có tương tác</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Tỷ lệ tương tác</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Sự kiện biểu mẫu</th>
-                    <th scope="col" className="py-2.5 px-4 font-semibold text-right">Lead CRM hợp lệ</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {channelRows.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} className="py-8 text-center text-slate-500">
-                        Chưa có dữ liệu kênh trong kỳ đang chọn.
-                      </td>
-                    </tr>
-                  ) : (
-                    channelRows
-                      .filter(
-                        (r) => !searchTerm || r.channelLabel.toLowerCase().includes(searchTerm),
-                      )
-                      .map((r) => (
-                        <tr key={r.channelKey} className="hover:bg-slate-50/70">
-                          <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
-                            {r.channelLabel}
-                          </th>
-                          <td className="py-3 px-3 text-slate-600">
-                            {r.source || '—'} / {r.medium || '—'}
-                          </td>
-                          <td className="py-3 px-3 text-right font-semibold tabular-nums">
-                            {r.sessions.toLocaleString('vi-VN')}
-                          </td>
-                          <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
-                            {r.engagedSessions !== null
-                              ? r.engagedSessions.toLocaleString('vi-VN')
-                              : '—'}
-                          </td>
-                          <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
-                            {r.engagementRatePct !== null ? `${r.engagementRatePct}%` : '—'}
-                          </td>
-                          <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
-                            {r.formEvents !== null && r.formEvents !== undefined
-                              ? r.formEvents.toLocaleString('vi-VN')
-                              : '—'}
-                          </td>
-                          <td className="py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums">
-                            {r.validLeadCount}
-                          </td>
-                        </tr>
-                      ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Sub-panel 2: Trang vào */}
-          <div
-            role="tabpanel"
-            aria-labelledby="m02-subtab-landing_pages"
-            hidden={trafficSubTab !== 'landing_pages'}
-          >
-            <div tabIndex={0} role="region" aria-label="Bảng trang vào" className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
-                  <tr>
-                    <th scope="col" className="py-2.5 px-4 font-semibold">Trang vào đầu tiên</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên truy cập</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Tỷ lệ tương tác</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Sự kiện biểu mẫu</th>
-                    <th scope="col" className="py-2.5 px-4 font-semibold text-right">Lead CRM hợp lệ</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {(lpTable?.rows || []).length === 0 ? (
-                    <tr>
-                      <td colSpan={5} className="py-8 text-center text-slate-500">
-                        Chưa có dữ liệu trang vào trong kỳ đang chọn.
-                      </td>
-                    </tr>
-                  ) : (
-                    (lpTable?.rows || [])
-                      .filter(
-                        (row) => !searchTerm || row.landingPage.toLowerCase().includes(searchTerm),
-                      )
-                      .map((row) => (
-                        <tr key={row.landingPage} className="hover:bg-slate-50/70">
-                          <th
-                            scope="row"
-                            className="py-3 px-4 font-mono font-medium text-slate-800 max-w-[420px] break-words"
+              {showRealtimePicker && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setShowRealtimePicker(false)} />
+                  <div className="absolute right-0 top-full mt-1.5 z-40 w-80 rounded-xl border border-slate-200 bg-white shadow-xl p-3 space-y-2 text-xs">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
+                      <span className="font-bold text-slate-800">Chọn Event &amp; Click hiển thị (30p &amp; Kỳ)</span>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedEvents(DEFAULT_TRACKED_EVENTS)}
+                        className="text-[11px] text-[#1E3A8A] hover:underline"
+                      >
+                        Mặc định
+                      </button>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto space-y-1">
+                      {Array.from(
+                        new Map(
+                          [
+                            ...(data?.realtimeEvents || []).map((e) => [
+                              e.eventName,
+                              { eventName: e.eventName, rt: e.eventCount, period: 0 },
+                            ]),
+                            ...(data?.allGa4Events || []).map((e) => [
+                              e.eventName,
+                              { eventName: e.eventName, rt: 0, period: e.eventCount },
+                            ]),
+                          ].map(([name, item]) => {
+                            const prevRt =
+                              (data?.realtimeEvents || []).find((x) => x.eventName === name)?.eventCount || 0;
+                            const prevPer =
+                              (data?.allGa4Events || []).find((x) => x.eventName === name)?.eventCount || 0;
+                            return [
+                              String(name),
+                              {
+                                eventName: String(name),
+                                rt: prevRt || (item as { rt: number }).rt,
+                                period: prevPer || (item as { period: number }).period,
+                              },
+                            ];
+                          }),
+                        ).values(),
+                      ).map((ev) => {
+                        const checked = selectedEvents.includes(ev.eventName);
+                        return (
+                          <label
+                            key={ev.eventName}
+                            className="flex items-center justify-between gap-2 py-1 px-2 rounded-md hover:bg-slate-50 cursor-pointer"
                           >
-                            {row.landingPage}
-                          </th>
-                          <td className="py-3 px-3 text-right font-semibold tabular-nums">
-                            {row.sessions.toLocaleString('vi-VN')}
-                          </td>
-                          <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
-                            {row.engagementRatePct !== null ? `${row.engagementRatePct}%` : '—'}
-                          </td>
-                          <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
-                            {row.successfulFormCount !== null
-                              ? row.successfulFormCount.toLocaleString('vi-VN')
-                              : '—'}
-                          </td>
-                          <td className="py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums">
-                            {row.validLeadCount}
-                          </td>
-                        </tr>
-                      ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            {lpTotalPages > 1 && (
-              <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
-                <span>
-                  Trang <strong className="tabular-nums">{page}</strong> /{' '}
-                  <strong className="tabular-nums">{lpTotalPages}</strong> ({lpTable?.totalRows || 0}{' '}
-                  trang)
-                </span>
-                <div className="flex gap-1.5">
-                  <button
-                    type="button"
-                    disabled={page <= 1}
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white disabled:opacity-40 font-semibold"
-                  >
-                    Trang trước
-                  </button>
-                  <button
-                    type="button"
-                    disabled={page >= lpTotalPages}
-                    onClick={() => setPage((p) => Math.min(lpTotalPages, p + 1))}
-                    className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white disabled:opacity-40 font-semibold"
-                  >
-                    Trang sau
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Sub-panel 3: Hành động (ghi đúng ý nghĩa từng event, chưa cài thì ghi rõ thiếu tracking) */}
-          <div
-            role="tabpanel"
-            aria-labelledby="m02-subtab-actions"
-            hidden={trafficSubTab !== 'actions'}
-          >
-            <div tabIndex={0} role="region" aria-label="Bảng hành động tương tác" className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
-                  <tr>
-                    <th scope="col" className="py-2.5 px-4 font-semibold">Hành động</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold">Tên sự kiện kỹ thuật</th>
-                    <th scope="col" className="py-2.5 px-3 font-semibold text-right">Số lượt ghi nhận</th>
-                    <th scope="col" className="py-2.5 px-4 font-semibold">Ý nghĩa &amp; phạm vi đo lường</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {(data?.tables.interactionRows || []).map((row) => (
-                    <tr key={row.actionKey} className="hover:bg-slate-50/70">
-                      <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
-                        {row.actionLabel}
-                      </th>
-                      <td className="py-3 px-3 font-mono text-slate-600">
-                        {row.mappedEventName || 'Chưa cài đặt event'}
-                      </td>
-                      <td className="py-3 px-3 text-right font-semibold tabular-nums">
-                        {row.count !== null ? (
-                          row.count.toLocaleString('vi-VN')
-                        ) : (
-                          <span className="text-amber-700 font-medium">Thiếu tracking</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-slate-600">{row.meaning}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-      </div>
-
-      {/* ===================================================================== */}
-      {/* TAB 2: QUẢNG CÁO                                                      */}
-      {/* ===================================================================== */}
-      <div
-        role="tabpanel"
-        aria-labelledby="m02-tab-ads"
-        hidden={businessTab !== 'ads'}
-        className="space-y-4"
-      >
-        {ads && (
-          <div
-            className={`rounded-[12px] border px-4 py-3 text-xs flex flex-wrap items-center justify-between gap-2 ${ads.status === 'CONNECTED'
-              ? 'bg-blue-50/70 border-blue-200 text-slate-800'
-              : 'bg-amber-50/80 border-amber-200 text-amber-900'
-              }`}
-          >
-            <div className="flex items-start gap-2">
-              <AlertCircle aria-hidden="true" className="w-4 h-4 shrink-0 mt-0.5" />
-              <div>
-                <p className="font-semibold">{ads.statusMessage}</p>
-                <p className="mt-0.5 text-slate-600">{ads.metrics.reconciliationNote}</p>
-              </div>
-            </div>
-            <Link
-              href="/settings"
-              className="inline-flex items-center gap-1 font-semibold text-[#1E3A8A] hover:underline shrink-0"
-            >
-              <span>Kiểm tra kết nối</span>
-              <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
-            </Link>
-          </div>
-        )}
-
-        {/* 6 KPI Quảng cáo (~108px) + dải đối soát CPL CRM */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Chi phí quảng cáo</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={ads?.metrics.cost}
-                format={(v) => `${Math.round(v).toLocaleString('vi-VN')} ₫`}
-                emptyText={adsFallbackText}
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              Chi tiêu thực tế chuẩn hóa từ spend_micros ({ads?.currencyCode || 'VND'})
-            </span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Hiển thị</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={ads?.metrics.impressions}
-                emptyText={adsFallbackText}
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">Tổng lượt hiển thị chiến dịch</span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Click</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber value={ads?.metrics.clicks} emptyText={adsFallbackText} />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              CPC trung bình:{' '}
-              <strong className="text-slate-700 tabular-nums">
-                {ads?.metrics.avgCpc !== null && ads?.metrics.avgCpc !== undefined
-                  ? `${ads.metrics.avgCpc.toLocaleString('vi-VN')} ₫`
-                  : adsFallbackText}
-              </strong>
-            </span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">CTR</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={ads?.metrics.ctrPct}
-                format={(v) => `${v.toFixed(2)}%`}
-                emptyText={adsFallbackText}
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">Tổng click / tổng hiển thị</span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Chuyển đổi quảng cáo</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={ads?.metrics.conversions}
-                format={(v) =>
-                  Number.isInteger(v) ? v.toLocaleString('vi-VN') : v.toFixed(2)
-                }
-                emptyText={adsFallbackText}
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              Theo nền tảng báo cáo (giữ phần thập phân nếu Data-Driven)
-            </span>
-          </div>
-
-          <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-            <span className="text-xs font-medium text-slate-600">Chi phí / chuyển đổi</span>
-            <div className="text-2xl font-bold text-slate-900 mt-1">
-              <AnimatedMetricNumber
-                value={ads?.metrics.costPerConversion}
-                format={(v) => `${Math.round(v).toLocaleString('vi-VN')} ₫`}
-                emptyText={adsFallbackText}
-              />
-            </div>
-            <span className="text-xs text-slate-500 mt-1">
-              CPL Lead CRM hợp lệ:{' '}
-              <strong className="text-[#0F275C] tabular-nums">
-                {ads?.metrics.costPerValidLead !== null &&
-                  ads?.metrics.costPerValidLead !== undefined
-                  ? `${ads.metrics.costPerValidLead.toLocaleString('vi-VN')} ₫`
-                  : UI_VOCABULARY.fallbacks.insufficientData}
-              </strong>
-            </span>
-          </div>
-        </div>
-
-        {/* Ô bổ sung đối soát CRM (C07: tách biệt chuyển đổi quảng cáo với Lead CRM thực tế) */}
-        <div className="rounded-[12px] bg-white border border-slate-200/90 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex flex-wrap items-center gap-4">
-            <span>
-              Lead có bằng chứng quảng cáo (GCLID/UTM):{' '}
-              <strong className="text-slate-900 tabular-nums">
-                {ads?.metrics.attributedLeadCount ?? 0}
-              </strong>
-            </span>
-            <span>
-              Lead quảng cáo hợp lệ (L2):{' '}
-              <strong className="text-[#0F275C] tabular-nums">
-                {ads?.metrics.validAttributedLeadCount ?? 0}
-              </strong>
-            </span>
-            <span>
-              Chốt thành công từ quảng cáo:{' '}
-              <strong className="text-emerald-700 tabular-nums">
-                {ads?.metrics.wonAttributedLeadCount ?? 0}
-              </strong>
-            </span>
-          </div>
-          <Link
-            href={`/leads?websiteId=${encodeURIComponent(scope.websiteId)}`}
-            className="text-[#1E3A8A] font-semibold hover:underline"
-          >
-            Đối chiếu danh sách Lead →
-          </Link>
-        </div>
-
-        {/* Biểu đồ tách 2 plot chung trục thời gian có đơn vị rõ ràng (C07): Chi phí (VNĐ) & Chuyển đổi quảng cáo */}
-        <section
-          aria-labelledby="m02-ads-chart-heading"
-          className="bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <div>
-              <h2 id="m02-ads-chart-heading" className="text-sm font-bold text-slate-900">
-                Diễn biến chi phí và chuyển đổi quảng cáo theo ngày
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Hai biểu đồ tách riêng thang đo cùng trục ngày: Chi phí (đơn vị: VNĐ) và Chuyển đổi quảng cáo (đơn vị: Lượt)
-              </p>
+                            <span className="inline-flex items-center gap-2 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() =>
+                                  setSelectedEvents((prev) =>
+                                    prev.includes(ev.eventName)
+                                      ? prev.filter((x) => x !== ev.eventName)
+                                      : [...prev, ev.eventName],
+                                  )
+                                }
+                                className="rounded border-slate-300 text-[#1E3A8A]"
+                              />
+                              <span className="font-mono text-[11px] text-slate-800 truncate">
+                                {ev.eventName}
+                              </span>
+                            </span>
+                            <span className="text-[10px] text-slate-500 tabular-nums shrink-0">
+                              {ev.rt > 0 ? `30p: ${ev.rt} · ` : ''}Kỳ: {ev.period.toLocaleString('vi-VN')}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
 
-          {!adsConnected ? (
-            <div className="h-[240px] rounded-[10px] bg-slate-50 border border-dashed border-slate-200 grid place-items-center text-xs text-slate-500 px-4 text-center">
-              Chưa kết nối tài khoản Google Ads API nên không vẽ biểu đồ chi phí/chuyển đổi giả.
-            </div>
-          ) : (
+          {/* =============================================================== */}
+          {/* SECTION 1: TỔNG QUAN TRUY CẬP                                   */}
+          {/* =============================================================== */}
+          {activeSection === 'overview' && (
             <div className="space-y-4">
-              {/* Plot 1: Chi phí (VNĐ) */}
-              <div>
-                <div className="text-xs font-semibold text-slate-600 mb-1">
-                  Chi phí thực tế (Đơn vị: VNĐ · Đỉnh kỳ: {maxAdCost.toLocaleString('vi-VN')} ₫)
+              {data?.coverage.note && (
+                <div className="rounded-[10px] bg-blue-50/70 border border-blue-200/80 px-3.5 py-2 text-xs text-slate-700">
+                  {data.coverage.note}
                 </div>
-                <div className="h-[110px] border-l border-b border-slate-200 flex items-end justify-between gap-1 px-1.5">
-                  {adsSeries.map((pt) => {
-                    const c = pt.cost ?? 0;
-                    const hPct = c > 0 ? Math.max(4, (c / maxAdCost) * 100) : 0;
-                    return (
-                      <div key={pt.date} className="flex-1 h-full flex items-end justify-center">
-                        {hPct > 0 && (
-                          <div
-                            title={`${pt.date}: ${c.toLocaleString('vi-VN')} ₫`}
-                            style={{ height: `${Math.min(100, hPct)}%` }}
-                            className="w-full max-w-[22px] rounded-t-[3px] bg-[#1E3A8A]"
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
+              )}
+
+              {/* 6 KPI Truy cập (~108px) */}
+              {loading && !data ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {[1, 2, 3, 4, 5, 6].map((k) => (
+                    <div
+                      key={k}
+                      className="min-h-[108px] rounded-[12px] bg-white border border-slate-200/90 p-4 shadow-2xs space-y-2.5 animate-pulse"
+                    >
+                      <div className="h-3 w-28 rounded bg-slate-200" />
+                      <div className="h-7 w-24 rounded bg-slate-200" />
+                      <div className="h-3 w-44 rounded bg-slate-100" />
+                    </div>
+                  ))}
                 </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {/* Card 1: Ưu tiên User mới từ GA4 để tránh lẫn nhân viên vào đi vào lại */}
+                  <div className="min-h-[108px] bg-white border border-emerald-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                    <span className="text-xs font-semibold text-emerald-800">
+                      Người dùng mới (Khách mới)
+                    </span>
+                    <div className="text-2xl font-bold text-slate-900 mt-1">
+                      <AnimatedMetricNumber
+                        value={m?.newUsers}
+                        emptyText={UI_VOCABULARY.fallbacks.insufficientData}
+                      />
+                    </div>
+                    <span className="text-xs text-slate-500 mt-1">
+                      {m?.users !== null && m?.users !== undefined && m?.newUsers !== null && m?.newUsers !== undefined && m.users > 0
+                        ? `Tổng user: ${m.users.toLocaleString('vi-VN')} · Tỷ lệ khách mới: ${((m.newUsers / m.users) * 100).toFixed(1)}%`
+                        : 'Tách biệt khách truy cập mới khỏi lượt vào lặp của nhân viên'}
+                    </span>
+                  </div>
+
+                  <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                    <span className="text-xs font-medium text-slate-600">Phiên truy cập</span>
+                    <div className="text-2xl font-bold text-slate-900 mt-1">
+                      <AnimatedMetricNumber value={m?.sessions} />
+                    </div>
+                    <span className="text-xs text-slate-500 mt-1">
+                      Phiên có tương tác:{' '}
+                      <strong className="text-slate-700 tabular-nums">
+                        {m?.engagedSessions !== null && m?.engagedSessions !== undefined
+                          ? m.engagedSessions.toLocaleString('vi-VN')
+                          : UI_VOCABULARY.fallbacks.insufficientData}
+                      </strong>
+                    </span>
+                  </div>
+
+                  <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                    <span className="text-xs font-medium text-slate-600">Tỷ lệ tương tác trang đích</span>
+                    <div className="text-2xl font-bold text-slate-900 mt-1">
+                      <AnimatedMetricNumber
+                        value={m?.engagementRatePct}
+                        format={(v) => `${v.toFixed(1)}%`}
+                      />
+                    </div>
+                    <span className="text-xs text-slate-500 mt-1">Phiên có tương tác / tổng phiên</span>
+                  </div>
+
+                  <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                    <span className="text-xs font-medium text-slate-600">
+                      Thời gian tương tác trung bình
+                    </span>
+                    <div className="text-2xl font-bold text-slate-900 mt-1">
+                      <AnimatedMetricNumber
+                        value={m?.averageEngagementSeconds}
+                        format={(v) => `${v.toFixed(0)} giây`}
+                        emptyText={
+                          scope.websiteId === 'all'
+                            ? 'Chọn 1 website'
+                            : UI_VOCABULARY.fallbacks.insufficientData
+                        }
+                      />
+                    </div>
+                    <span className="text-xs text-slate-500 mt-1">
+                      Thời lượng tương tác trung bình trên mỗi người dùng
+                    </span>
+                  </div>
+
+                  <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                    <span className="text-xs font-medium text-slate-600">Yêu cầu biểu mẫu &amp; Lead Web</span>
+                    <div className="text-2xl font-bold text-[#0F275C] mt-1">
+                      <AnimatedMetricNumber
+                        value={
+                          m?.formEventCount !== null && m?.formEventCount !== undefined
+                            ? m.formEventCount
+                            : m?.validFormLeadCount
+                        }
+                      />
+                    </div>
+                    <span className="text-xs text-slate-500 mt-1">
+                      {m?.formEventCount !== null && m?.formEventCount !== undefined
+                        ? `Sự kiện form GA4 · Đối soát CRM: ${m.validFormLeadCount} Lead hợp lệ`
+                        : `CRM ghi nhận ${m?.validFormLeadCount ?? 0} Lead form hợp lệ`}
+                    </span>
+                  </div>
+
+                  <div className="min-h-[108px] bg-slate-50/70 border border-slate-200/80 rounded-[12px] p-4 flex flex-col justify-between">
+                    <span className="text-xs font-medium text-slate-500">
+                      Lượt xem trang
+                    </span>
+                    <div className="text-xl font-bold text-slate-700 mt-1">
+                      <AnimatedMetricNumber value={m?.pageViews} />
+                    </div>
+                    <span className="text-[11px] text-slate-500 mt-1">
+                      Chỉ số tham khảo phụ
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Biểu đồ Marketing Spline 8/12 + Cơ cấu Kênh thu hút 4/12 */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+                <section
+                  aria-labelledby="m02-traffic-chart-heading"
+                  className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
+                >
+                  <div className="mb-3">
+                    <h3 id="m02-traffic-chart-heading" className="text-sm sm:text-base font-bold text-slate-900">
+                      Lưu lượng truy cập theo ngày
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Phiên truy cập, lượt xem và người dùng mới theo ngày
+                    </p>
+                  </div>
+
+                  <MarketingTrafficChart
+                    points={trafficPoints}
+                    previousPoints={data?.charts.previousTrafficSeries}
+                    compareEnabled={compareEnabled}
+                    loading={loading && !data}
+                  />
+                </section>
+
+                <section
+                  aria-labelledby="m02-top-channels-heading"
+                  className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
+                >
+                  <div>
+                    <h3 id="m02-top-channels-heading" className="text-sm sm:text-base font-bold text-slate-900">
+                      Cơ cấu Kênh Marketing &amp; Thu hút Lead
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5 mb-3">
+                      Tỷ trọng đóng góp phiên, tỷ lệ tương tác và số Lead hợp lệ theo từng nguồn
+                    </p>
+                    <MarketingChannelMixCard channels={channelRows} />
+                  </div>
+                </section>
               </div>
 
-              {/* Plot 2: Chuyển đổi quảng cáo */}
-              <div>
-                <div className="text-xs font-semibold text-slate-600 mb-1">
-                  Chuyển đổi quảng cáo (Đơn vị: Lượt · Đỉnh kỳ: {maxAdConv})
-                </div>
-                <div className="h-[100px] border-l border-b border-slate-200 flex items-end justify-between gap-1 px-1.5">
-                  {adsSeries.map((pt) => {
-                    const cv = pt.conversions ?? 0;
-                    const hPct = cv > 0 ? Math.max(4, (cv / maxAdConv) * 100) : 0;
-                    return (
-                      <div key={pt.date} className="flex-1 h-full flex items-end justify-center">
-                        {hPct > 0 && (
-                          <div
-                            title={`${pt.date}: ${cv} chuyển đổi`}
-                            style={{ height: `${Math.min(100, hPct)}%` }}
-                            className="w-full max-w-[22px] rounded-t-[3px] bg-emerald-500"
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="h-6 flex items-center justify-between gap-1 px-1.5 pt-1">
-                  {adsSeries.map((pt, idx) => {
-                    const [, mm, dd] = pt.date.split('-');
-                    const show =
-                      adsSeries.length <= 12 ||
-                      idx === 0 ||
-                      idx === adsSeries.length - 1 ||
-                      idx % Math.ceil(adsSeries.length / 8) === 0;
-                    return (
-                      <div key={pt.date} className="flex-1 text-center min-w-0">
-                        {show && (
-                          <span className="text-[11px] text-slate-500 tabular-nums">
-                            {dd}/{mm}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
+              {/* 2 Thẻ chuyển nhanh sang Trang đích & Tất cả chiến dịch Ads */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('landing_pages')}
+                  className="text-left rounded-2xl bg-white border border-slate-200/90 hover:border-[#1A73E8]/50 p-4 shadow-2xs transition flex items-center justify-between gap-3 group"
+                >
+                  <div>
+                    <div className="text-xs font-bold text-slate-900 group-hover:text-[#1A73E8]">
+                      Xem bảng Trang đích theo User mới
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Phân loại nhóm trang sản phẩm, dự án, tin tức và lọc bỏ trang nội bộ
+                    </p>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-[#1A73E8] shrink-0" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('ads_campaigns')}
+                  className="text-left rounded-2xl bg-white border border-slate-200/90 hover:border-[#1A73E8]/50 p-4 shadow-2xs transition flex items-center justify-between gap-3 group"
+                >
+                  <div>
+                    <div className="text-xs font-bold text-slate-900 group-hover:text-[#1A73E8]">
+                      Mở Tất cả chiến dịch Google Ads &amp; Chia ô Excel
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Gom toàn bộ chiến dịch đang chạy kèm Link đích, chi phí ngày và đối soát CRM
+                    </p>
+                  </div>
+                  <ArrowRight className="w-4 h-4 text-slate-400 group-hover:text-[#1A73E8] shrink-0" />
+                </button>
               </div>
             </div>
           )}
-        </section>
 
-        {/* Bảng chiến dịch phân trang + mở Drawer chi tiết nhóm quảng cáo / từ khóa / thiết bị / khu vực */}
-        <section
-          className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden"
-          style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 380px' }}
-        >
-          <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
-            <h2 className="text-sm font-bold text-slate-900">Danh sách chiến dịch quảng cáo</h2>
-            <span className="text-xs text-slate-500 tabular-nums">
-              {campTable?.totalRows || 0} chiến dịch
-            </span>
-          </div>
+          {/* =============================================================== */}
+          {/* SECTION 2: TRANG ĐÍCH (USER MỚI & PHÂN LOẠI)                    */}
+          {/* =============================================================== */}
+          {activeSection === 'landing_pages' && (
+            <div className="space-y-4">
+              {data?.coverage.note && (
+                <div className="rounded-[10px] bg-blue-50/70 border border-blue-200/80 px-3.5 py-2 text-xs text-slate-700">
+                  {data.coverage.note}
+                </div>
+              )}
 
-          <div tabIndex={0} role="region" aria-label="Bảng chiến dịch quảng cáo" className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left border-collapse text-xs">
-              <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
-                <tr>
-                  <th scope="col" className="py-2.5 px-4 font-semibold">Chiến dịch</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold">Trạng thái</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chi phí</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">Hiển thị</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">Click</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">CTR</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">CPC</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chuyển đổi QC</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">Lead CRM hợp lệ</th>
-                  <th scope="col" className="py-2.5 px-3 font-semibold text-right">CPL thực tế</th>
-                  <th scope="col" className="py-2.5 px-4 font-semibold text-right">Thao tác</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {(campTable?.rows || []).length === 0 ? (
-                  <tr>
-                    <td colSpan={11} className="py-10 px-4 text-center text-slate-500">
-                      {adsConnected
-                        ? 'Chưa có chiến dịch phát sinh số liệu trong phạm vi đang chọn.'
-                        : 'Chưa kết nối tài khoản Google Ads API — hệ thống không tạo chiến dịch hoặc chi phí mẫu.'}
-                    </td>
-                  </tr>
-                ) : (
-                  (campTable?.rows || []).map((c) => (
-                    <tr key={c.campaignId} className="hover:bg-slate-50/70">
-                      <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
-                        <div>{c.campaignName}</div>
-                        <div className="text-[11px] font-normal text-slate-500 mt-0.5">
-                          {c.attributionNote}
-                        </div>
-                      </th>
-                      <td className="py-3 px-3">
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium">
-                          {c.status === 'ENABLED' ? 'Đang chạy' : 'Tạm dừng'}
-                        </span>
-                      </td>
-                      <td className="py-3 px-3 text-right font-semibold tabular-nums">
-                        {c.cost.toLocaleString('vi-VN')} ₫
-                      </td>
-                      <td className="py-3 px-3 text-right tabular-nums">
-                        {c.impressions.toLocaleString('vi-VN')}
-                      </td>
-                      <td className="py-3 px-3 text-right tabular-nums">
-                        {c.clicks.toLocaleString('vi-VN')}
-                      </td>
-                      <td className="py-3 px-3 text-right tabular-nums">
-                        {c.ctrPct !== null ? `${c.ctrPct}%` : '—'}
-                      </td>
-                      <td className="py-3 px-3 text-right tabular-nums">
-                        {c.avgCpc !== null ? `${c.avgCpc.toLocaleString('vi-VN')} ₫` : '—'}
-                      </td>
-                      <td className="py-3 px-3 text-right tabular-nums">
-                        {Number.isInteger(c.conversions)
-                          ? c.conversions.toLocaleString('vi-VN')
-                          : c.conversions.toFixed(2)}
-                      </td>
-                      <td className="py-3 px-3 text-right font-bold text-[#0F275C] tabular-nums">
-                        {c.validAttributedLeadCount}
-                      </td>
-                      <td className="py-3 px-3 text-right font-semibold tabular-nums">
-                        {c.costPerValidLead !== null
-                          ? `${c.costPerValidLead.toLocaleString('vi-VN')} ₫`
-                          : 'Chưa đủ đối soát'}
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <div className="inline-flex items-center justify-end gap-1.5">
-                          {canDirectDesign ? (
-                            <Link
-                              href={`/design?fromBrief=1&taskCode=banner_generate&sourceModule=tracking&websiteId=${encodeURIComponent(scope.websiteId || 'all')}&campaignId=${encodeURIComponent(c.campaignId)}&campaignName=${encodeURIComponent(c.campaignName)}${data ? `&dateFrom=${encodeURIComponent(data.scope.startDate)}&dateTo=${encodeURIComponent(data.scope.endDate)}` : ''}`}
-                              className="min-h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] font-semibold inline-flex items-center"
-                              title="Mở Brief thiết kế gắn chiến dịch & phạm vi ngày đang xem"
-                            >
-                              Tạo brief
-                            </Link>
-                          ) : (
-                            <button
-                              type="button"
-                              disabled={briefSubmittingId === c.campaignId}
-                              onClick={() => void handleCreateCampaignBrief(c)}
-                              className="min-h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] font-semibold inline-flex items-center disabled:opacity-50"
-                              title="Gửi Brief thiết kế gắn chiến dịch sang Studio cho Designer xử lý"
-                            >
-                              {briefSubmittingId === c.campaignId ? 'Đang gửi...' : 'Tạo brief'}
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => setDrawerCampaign(c)}
-                            className="min-h-8 px-2.5 rounded-lg border border-slate-200 hover:bg-slate-50 text-[#1E3A8A] font-semibold"
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                {/* Bộ lọc phân loại trang đích + Ẩn trang kỹ thuật/nhân viên */}
+                <div className="px-4 py-2.5 bg-slate-50/70 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setLpCategoryFilter('all')}
+                      className={`px-2.5 py-1 rounded-lg font-semibold transition ${
+                        lpCategoryFilter === 'all'
+                          ? 'bg-[#1A73E8] text-white'
+                          : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                      }`}
+                    >
+                      Tất cả ({visibleLandingPageCount})
+                    </button>
+                    {(data?.tables.landingPageCategories || [])
+                      .filter((cat) => !hideNoiseLp || cat.categoryKey !== 'technical_noise')
+                      .map((cat) => (
+                        <button
+                          key={cat.categoryKey}
+                          type="button"
+                          onClick={() => setLpCategoryFilter(cat.categoryKey)}
+                          className={`px-2.5 py-1 rounded-lg font-semibold transition inline-flex items-center gap-1.5 ${
+                            lpCategoryFilter === cat.categoryKey
+                              ? 'bg-[#1A73E8] text-white'
+                              : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <span>{cat.categoryLabel}</span>
+                          <span
+                            className={`tabular-nums text-[10px] px-1 rounded ${
+                              lpCategoryFilter === cat.categoryKey ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'
+                            }`}
                           >
-                            {UI_VOCABULARY.actions.viewDetails}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                            {cat.newUsers !== null ? `${cat.newUsers} mới` : `${cat.sessions} phiên`}
+                          </span>
+                        </button>
+                      ))}
+                  </div>
 
-          {campTotalPages > 1 && (
-            <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
-              <span>
-                Trang <strong className="tabular-nums">{adsPage}</strong> /{' '}
-                <strong className="tabular-nums">{campTotalPages}</strong>
-              </span>
-              <div className="flex gap-1.5">
-                <button
-                  type="button"
-                  disabled={adsPage <= 1}
-                  onClick={() => setAdsPage((p) => Math.max(1, p - 1))}
-                  className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white disabled:opacity-40 font-semibold"
-                >
-                  Trang trước
-                </button>
-                <button
-                  type="button"
-                  disabled={adsPage >= campTotalPages}
-                  onClick={() => setAdsPage((p) => Math.min(campTotalPages, p + 1))}
-                  className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white disabled:opacity-40 font-semibold"
-                >
-                  Trang sau
-                </button>
-              </div>
+                  <label className="inline-flex items-center gap-1.5 text-slate-600 font-medium cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={hideNoiseLp}
+                      onChange={(e) => setHideNoiseLp(e.target.checked)}
+                      className="rounded border-slate-300 text-[#1E3A8A]"
+                    />
+                    <span>Ẩn trang kỹ thuật / (not set)</span>
+                  </label>
+                </div>
+
+                <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Trang đích (Landing Page)</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Phân loại</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">User mới</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Tỷ lệ khách mới</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên truy cập</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Tỷ lệ tương tác</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Sự kiện biểu mẫu</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">Lead CRM hợp lệ</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(() => {
+                        const filteredLp = (lpTable?.rows || []).filter((row) => {
+                          if (hideNoiseLp && row.categoryKey === 'technical_noise') return false;
+                          if (lpCategoryFilter !== 'all' && row.categoryKey !== lpCategoryFilter) return false;
+                          if (searchTerm && !row.landingPage.toLowerCase().includes(searchTerm)) return false;
+                          return true;
+                        });
+                        if (filteredLp.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={8} className="py-8 text-center text-slate-500">
+                                Chưa có dữ liệu trang đích phù hợp trong kỳ đang chọn.
+                              </td>
+                            </tr>
+                          );
+                        }
+                        return filteredLp.map((row) => (
+                          <tr key={row.landingPage} className="hover:bg-slate-50/70">
+                            <th
+                              scope="row"
+                              className="py-2.5 px-4 font-mono font-medium text-slate-800 max-w-[380px] break-words"
+                            >
+                              {row.landingPage}
+                            </th>
+                            <td className="py-2.5 px-3 whitespace-nowrap">
+                              <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 text-[11px] font-medium">
+                                {row.categoryLabel || 'Trang khác'}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-bold text-emerald-700 tabular-nums">
+                              {row.newUsers !== null && row.newUsers !== undefined
+                                ? row.newUsers.toLocaleString('vi-VN')
+                                : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                              {row.newUserRatePct !== null && row.newUserRatePct !== undefined
+                                ? `${row.newUserRatePct}%`
+                                : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                              {row.sessions.toLocaleString('vi-VN')}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                              {row.engagementRatePct !== null ? `${row.engagementRatePct}%` : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                              {row.successfulFormCount !== null
+                                ? row.successfulFormCount.toLocaleString('vi-VN')
+                                : '—'}
+                            </td>
+                            <td className="py-2.5 px-4 text-right font-bold text-[#0F275C] tabular-nums">
+                              {row.validLeadCount}
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+
+                {lpTotalPages > 1 && (
+                  <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-600">
+                    <span>
+                      Trang <strong className="tabular-nums">{page}</strong> /{' '}
+                      <strong className="tabular-nums">{lpTotalPages}</strong> ({lpTable?.totalRows || 0}{' '}
+                      trang)
+                    </span>
+                    <div className="flex gap-1.5">
+                      <button
+                        type="button"
+                        disabled={page <= 1}
+                        onClick={() => setPage((p) => Math.max(1, p - 1))}
+                        className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white disabled:opacity-40 font-semibold"
+                      >
+                        Trang trước
+                      </button>
+                      <button
+                        type="button"
+                        disabled={page >= lpTotalPages}
+                        onClick={() => setPage((p) => Math.min(lpTotalPages, p + 1))}
+                        className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white disabled:opacity-40 font-semibold"
+                      >
+                        Trang sau
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </section>
             </div>
           )}
-        </section>
+
+          {/* =============================================================== */}
+          {/* SECTION 3: HIỆU SUẤT KÊNH                                       */}
+          {/* =============================================================== */}
+          {activeSection === 'channels' && (
+            <div className="space-y-4">
+              {channelRows.length > 0 && (
+                <section className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs">
+                  <MarketingChannelMixCard channels={channelRows} />
+                </section>
+              )}
+
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <div tabIndex={0} role="region" aria-label="Bảng theo kênh" className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Kênh marketing</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Nguồn / phương thức</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên truy cập</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên có tương tác</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Tỷ lệ tương tác</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Sự kiện biểu mẫu</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">Lead CRM hợp lệ</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {channelRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-8 text-center text-slate-500">
+                            Chưa có dữ liệu kênh trong kỳ đang chọn.
+                          </td>
+                        </tr>
+                      ) : (
+                        channelRows
+                          .filter(
+                            (r) => !searchTerm || r.channelLabel.toLowerCase().includes(searchTerm),
+                          )
+                          .map((r) => (
+                            <tr key={r.channelKey} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
+                                {r.channelLabel}
+                              </th>
+                              <td className="py-3 px-3 text-slate-600">
+                                {r.source || '—'} / {r.medium || '—'}
+                              </td>
+                              <td className="py-3 px-3 text-right font-semibold tabular-nums">
+                                {r.sessions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                                {r.engagedSessions !== null
+                                  ? r.engagedSessions.toLocaleString('vi-VN')
+                                  : '—'}
+                              </td>
+                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                                {r.engagementRatePct !== null ? `${r.engagementRatePct}%` : '—'}
+                              </td>
+                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                                {r.formEvents !== null && r.formEvents !== undefined
+                                  ? r.formEvents.toLocaleString('vi-VN')
+                                  : '—'}
+                              </td>
+                              <td className="py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums">
+                                {r.validLeadCount}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {(data?.charts.sourceMediumRows?.length || 0) > 0 && (
+                <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                  <div className="px-4 py-3 border-b border-slate-200">
+                    <h3 className="text-sm font-bold text-slate-900">
+                      Chi tiết nguồn truy cập
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      Phân tích theo cặp nguồn và phương thức truy cập
+                    </p>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                        <tr>
+                          <th scope="col" className="py-2.5 px-4 font-semibold">Nguồn / Phương thức</th>
+                          <th scope="col" className="py-2.5 px-3 font-semibold text-right">User mới</th>
+                          <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên</th>
+                          <th scope="col" className="py-2.5 px-3 font-semibold text-right">Phiên tương tác</th>
+                          <th scope="col" className="py-2.5 px-4 font-semibold text-right">Tỷ lệ tương tác</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {(data?.charts.sourceMediumRows || [])
+                          .filter(
+                            (sm) => !searchTerm || sm.sourceMedium.toLowerCase().includes(searchTerm),
+                          )
+                          .map((sm) => (
+                            <tr key={sm.sourceMedium} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-2.5 px-4 font-mono font-semibold text-slate-900">
+                                {sm.sourceMedium}
+                              </th>
+                              <td className="py-2.5 px-3 text-right font-semibold text-emerald-700 tabular-nums">
+                                {sm.newUsers.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                {sm.sessions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {sm.engagedSessions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-4 text-right text-slate-600 tabular-nums">
+                                {sm.engagementRatePct !== null ? `${sm.engagementRatePct}%` : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 4: SỰ KIỆN & CLICK (REALTIME 30P & TRONG KỲ)            */}
+          {/* =============================================================== */}
+          {activeSection === 'actions' && (
+            <div className="space-y-4">
+              <Ga4RealtimeBarCard
+                activeUsers30m={m?.activeUsers30m ?? null}
+                minutesSeries={data?.realtimeMinutesSeries || []}
+                activePages={data?.realtimeActivePages || []}
+                realtimeEvents={data?.realtimeEvents || []}
+                checkedAt={m?.activeWindowCheckedAt || checkedAtIso}
+              />
+
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden space-y-4">
+                <div tabIndex={0} role="region" aria-label="Bảng hành động tương tác" className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Hành động</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Tên sự kiện</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Số lượt</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Mô tả</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(data?.tables.interactionRows || []).map((row) => (
+                        <tr key={row.actionKey} className="hover:bg-slate-50/70">
+                          <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
+                            {row.actionLabel}
+                          </th>
+                          <td className="py-3 px-3 font-mono text-slate-600">
+                            {row.mappedEventName || 'Chưa cài đặt'}
+                          </td>
+                          <td className="py-3 px-3 text-right font-semibold tabular-nums">
+                            {row.count !== null ? (
+                              row.count.toLocaleString('vi-VN')
+                            ) : (
+                              <span className="text-amber-700 font-medium">Chưa đo</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 text-slate-600">{row.meaning}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="border-t border-slate-200 pt-3 px-4 pb-4 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div>
+                      <strong className="text-slate-900">
+                        Sự kiện &amp; Lượt nhấp
+                      </strong>
+                      <p className="text-[11px] text-slate-500">
+                        Chọn sự kiện cần ghim theo dõi nhanh 30 phút qua
+                      </p>
+                    </div>
+                    <label className="inline-flex items-center gap-1.5 text-slate-700 font-medium cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={showOnlySelectedEvents}
+                        onChange={(e) => setShowOnlySelectedEvents(e.target.checked)}
+                        className="rounded border-slate-300 text-[#1E3A8A]"
+                      />
+                      <span>Chỉ xem đã chọn ({selectedEvents.length})</span>
+                    </label>
+                  </div>
+
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                        <tr>
+                          <th className="py-2 px-3 w-10">Ghim</th>
+                          <th className="py-2 px-3 font-semibold">Tên sự kiện</th>
+                          <th className="py-2 px-3 font-semibold text-right">30 phút qua</th>
+                          <th className="py-2 px-3 font-semibold text-right">Trong kỳ</th>
+                          <th className="py-2 px-3 font-semibold text-right">Người dùng</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {(data?.allGa4Events || [])
+                          .filter((ev) => !showOnlySelectedEvents || selectedEvents.includes(ev.eventName))
+                          .filter((ev) => !searchTerm || ev.eventName.toLowerCase().includes(searchTerm))
+                          .map((ev) => {
+                            const rtCount =
+                              (data?.realtimeEvents || []).find((r) => r.eventName === ev.eventName)?.eventCount || 0;
+                            const checked = selectedEvents.includes(ev.eventName);
+                            return (
+                              <tr key={ev.eventName} className="hover:bg-slate-50/70">
+                                <td className="py-2 px-3 text-center">
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() =>
+                                      setSelectedEvents((prev) =>
+                                        prev.includes(ev.eventName)
+                                          ? prev.filter((x) => x !== ev.eventName)
+                                          : [...prev, ev.eventName],
+                                      )
+                                    }
+                                    className="rounded border-slate-300 text-[#1E3A8A]"
+                                  />
+                                </td>
+                                <td className="py-2 px-3 font-mono font-semibold text-slate-800">
+                                  {ev.eventName}
+                                </td>
+                                <td className="py-2 px-3 text-right tabular-nums">
+                                  {rtCount > 0 ? (
+                                    <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-bold">
+                                      {rtCount}
+                                    </span>
+                                  ) : (
+                                    <span className="text-slate-400">0</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-right font-semibold tabular-nums">
+                                  {ev.eventCount.toLocaleString('vi-VN')}
+                                </td>
+                                <td className="py-2 px-3 text-right text-slate-600 tabular-nums">
+                                  {ev.totalUsers !== null && ev.totalUsers !== undefined
+                                    ? ev.totalUsers.toLocaleString('vi-VN')
+                                    : '—'}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 4B: THIẾT BỊ & KHU VỰC                                  */}
+          {/* =============================================================== */}
+          {activeSection === 'devices_geo' && (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <section className="bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs space-y-3">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Thiết bị truy cập
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Phân bổ phiên theo thiết bị
+                  </p>
+                </div>
+                {(() => {
+                  const devRows = data?.charts.deviceRows || [];
+                  const totalDev = devRows.reduce((acc, r) => acc + r.sessions, 0) || 1;
+                  if (devRows.length === 0) {
+                    return (
+                      <div className="py-8 text-center text-xs text-slate-400">
+                        Chưa có dữ liệu thiết bị trong kỳ đang chọn.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-2.5">
+                      {devRows.map((d) => {
+                        const pct = Math.round((d.sessions / totalDev) * 100);
+                        return (
+                          <div key={d.deviceCategory} className="space-y-1 text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold text-slate-800 capitalize">
+                                {d.deviceCategory || 'Không xác định'}
+                              </span>
+                              <span className="tabular-nums text-slate-600">
+                                <strong className="text-slate-900">{d.sessions.toLocaleString('vi-VN')}</strong>{' '}
+                                phiên ({pct}%)
+                              </span>
+                            </div>
+                            <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                              <div
+                                className="h-full rounded-full bg-[#1A73E8]"
+                                style={{ width: `${Math.max(4, pct)}%` }}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </section>
+
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Khu vực địa lý
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Tỉnh, thành phố có lượng truy cập cao nhất
+                  </p>
+                </div>
+                <div className="overflow-x-auto max-h-[360px]">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Tỉnh / Thành phố</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">Phiên truy cập</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(data?.charts.geoRows || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={2} className="py-8 text-center text-slate-400">
+                            Chưa có dữ liệu địa lý trong kỳ đang chọn.
+                          </td>
+                        </tr>
+                      ) : (
+                        (data?.charts.geoRows || [])
+                          .filter(
+                            (g) => !searchTerm || g.locationLabel.toLowerCase().includes(searchTerm),
+                          )
+                          .map((g) => (
+                            <tr key={g.locationLabel} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-2.5 px-4 font-medium text-slate-900">
+                                {g.locationLabel}
+                              </th>
+                              <td className="py-2.5 px-4 text-right font-semibold tabular-nums">
+                                {g.sessions.toLocaleString('vi-VN')}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 5: TẤT CẢ CHIẾN DỊCH GOOGLE ADS (SUMMARY MODE)          */}
+          {/* =============================================================== */}
+          {activeSection === 'ads_campaigns' && (
+            <div className="space-y-4">
+              {ads && (
+                <div
+                  className={`rounded-[12px] border px-4 py-3 text-xs flex flex-wrap items-center justify-between gap-2 ${ads.status === 'CONNECTED'
+                    ? 'bg-blue-50/70 border-blue-200 text-slate-800'
+                    : 'bg-amber-50/80 border-amber-200 text-amber-900'
+                    }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <AlertCircle aria-hidden="true" className="w-4 h-4 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="font-semibold">{ads.statusMessage}</p>
+                      <p className="mt-0.5 text-slate-600">{ads.metrics.reconciliationNote}</p>
+                    </div>
+                  </div>
+                  <Link
+                    href="/settings"
+                    className="inline-flex items-center gap-1 font-semibold text-[#1E3A8A] hover:underline shrink-0"
+                  >
+                    <span>Kiểm tra kết nối</span>
+                    <ExternalLink aria-hidden="true" className="w-3.5 h-3.5" />
+                  </Link>
+                </div>
+              )}
+
+              {/* 6 KPI Quảng cáo (~108px) */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <span className="text-xs font-medium text-slate-600">Chi phí quảng cáo</span>
+                  <div className="text-2xl font-bold text-slate-900 mt-1">
+                    <AnimatedMetricNumber
+                      value={ads?.metrics.cost}
+                      format={(v) => `${Math.round(v).toLocaleString('vi-VN')} ₫`}
+                      emptyText={adsFallbackText}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">
+                    Đơn vị {ads?.currencyCode || 'VND'}
+                  </span>
+                </div>
+
+                <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <span className="text-xs font-medium text-slate-600">Hiển thị</span>
+                  <div className="text-2xl font-bold text-slate-900 mt-1">
+                    <AnimatedMetricNumber
+                      value={ads?.metrics.impressions}
+                      emptyText={adsFallbackText}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">Lượt hiển thị</span>
+                </div>
+
+                <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <span className="text-xs font-medium text-slate-600">Click</span>
+                  <div className="text-2xl font-bold text-slate-900 mt-1">
+                    <AnimatedMetricNumber value={ads?.metrics.clicks} emptyText={adsFallbackText} />
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">
+                    CPC trung bình:{' '}
+                    <strong className="text-slate-700 tabular-nums">
+                      {ads?.metrics.avgCpc !== null && ads?.metrics.avgCpc !== undefined
+                        ? `${ads.metrics.avgCpc.toLocaleString('vi-VN')} ₫`
+                        : adsFallbackText}
+                    </strong>
+                  </span>
+                </div>
+
+                <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <span className="text-xs font-medium text-slate-600">CTR</span>
+                  <div className="text-2xl font-bold text-slate-900 mt-1">
+                    <AnimatedMetricNumber
+                      value={ads?.metrics.ctrPct}
+                      format={(v) => `${v.toFixed(2)}%`}
+                      emptyText={adsFallbackText}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">Lượt nhấp / Hiển thị</span>
+                </div>
+
+                <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <span className="text-xs font-medium text-slate-600">Chuyển đổi quảng cáo</span>
+                  <div className="text-2xl font-bold text-slate-900 mt-1">
+                    <AnimatedMetricNumber
+                      value={ads?.metrics.conversions}
+                      format={(v) =>
+                        Number.isInteger(v) ? v.toLocaleString('vi-VN') : v.toFixed(2)
+                      }
+                      emptyText={adsFallbackText}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">
+                    Ghi nhận từ Google Ads
+                  </span>
+                </div>
+
+                <div className="min-h-[108px] bg-white border border-slate-200/90 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <span className="text-xs font-medium text-slate-600">Chi phí / chuyển đổi</span>
+                  <div className="text-2xl font-bold text-slate-900 mt-1">
+                    <AnimatedMetricNumber
+                      value={ads?.metrics.costPerConversion}
+                      format={(v) => `${Math.round(v).toLocaleString('vi-VN')} ₫`}
+                      emptyText={adsFallbackText}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">
+                    CPL hợp lệ:{' '}
+                    <strong className="text-[#0F275C] tabular-nums">
+                      {ads?.metrics.costPerValidLead !== null &&
+                        ads?.metrics.costPerValidLead !== undefined
+                        ? `${ads.metrics.costPerValidLead.toLocaleString('vi-VN')} ₫`
+                        : UI_VOCABULARY.fallbacks.insufficientData}
+                    </strong>
+                  </span>
+                </div>
+              </div>
+
+              {/* Đối soát CRM */}
+              <div className="rounded-[12px] bg-white border border-slate-200/90 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex flex-wrap items-center gap-4">
+                  <span>
+                    Lead từ quảng cáo:{' '}
+                    <strong className="text-slate-900 tabular-nums">
+                      {ads?.metrics.attributedLeadCount ?? 0}
+                    </strong>
+                  </span>
+                  <span>
+                    Lead quảng cáo hợp lệ:{' '}
+                    <strong className="text-[#0F275C] tabular-nums">
+                      {ads?.metrics.validAttributedLeadCount ?? 0}
+                    </strong>
+                  </span>
+                  <span>
+                    Chốt từ quảng cáo:{' '}
+                    <strong className="text-emerald-700 tabular-nums">
+                      {ads?.metrics.wonAttributedLeadCount ?? 0}
+                    </strong>
+                  </span>
+                </div>
+                <Link
+                  href={`/leads?websiteId=${encodeURIComponent(scope.websiteId)}`}
+                  className="text-[#1E3A8A] font-semibold hover:underline"
+                >
+                  Xem danh sách Lead →
+                </Link>
+              </div>
+
+              {/* Biểu đồ 2 chỉ số chuẩn Google Ads */}
+              <GoogleAdsDualMetricChart
+                series={adsSeries}
+                previousSeries={ads?.previousSeries}
+                compareEnabled={compareEnabled}
+                adsConnected={adsConnected}
+                loading={loading && !data}
+              />
+
+              <AdsExcelTableSection
+                campaigns={campTable?.rows || []}
+                adsConnected={adsConnected}
+                scopeWebsiteId={scope.websiteId || 'all'}
+                scopeDateLabel={data ? `${data.scope.startDate} → ${data.scope.endDate}` : scope.preset}
+                adsScopeMode={adsScopeMode}
+                onChangeAdsScopeMode={(mode) => {
+                  setAdsScopeMode(mode);
+                  setAdsPage(1);
+                }}
+                searchTerm={searchTerm}
+                canDirectDesign={canDirectDesign}
+                briefSubmittingId={briefSubmittingId}
+                onCreateBrief={(c) => void handleCreateCampaignBrief(c)}
+                onOpenDrawer={(c) => setDrawerCampaign(c)}
+                dateFrom={data?.scope.startDate}
+                dateTo={data?.scope.endDate}
+                controlledViewMode="summary"
+                onChangeViewMode={(mode) =>
+                  setActiveSection(mode === 'daily' ? 'ads_daily' : 'ads_campaigns')
+                }
+              />
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 6: CHI PHÍ THEO NGÀY (DAILY MODE TRỰC TIẾP)             */}
+          {/* =============================================================== */}
+          {activeSection === 'ads_daily' && (
+            <div className="space-y-4">
+              {ads && ads.status !== 'CONNECTED' && (
+                <div className="rounded-[12px] border bg-amber-50/80 border-amber-200 px-4 py-3 text-xs text-amber-900 flex items-center justify-between gap-2">
+                  <span>{ads.statusMessage}</span>
+                  <Link href="/settings" className="font-semibold text-[#1E3A8A] hover:underline shrink-0">
+                    Kiểm tra kết nối →
+                  </Link>
+                </div>
+              )}
+
+              <div className="rounded-[12px] bg-white border border-slate-200/90 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div className="flex flex-wrap items-center gap-4">
+                  <span>
+                    Tổng chi phí kỳ:{' '}
+                    <strong className="text-slate-900 tabular-nums">
+                      {ads?.metrics.cost !== null && ads?.metrics.cost !== undefined
+                        ? `${Math.round(ads.metrics.cost).toLocaleString('vi-VN')} ₫`
+                        : adsFallbackText}
+                    </strong>
+                  </span>
+                  <span>
+                    Click:{' '}
+                    <strong className="text-slate-900 tabular-nums">
+                      {ads?.metrics.clicks !== null && ads?.metrics.clicks !== undefined
+                        ? ads.metrics.clicks.toLocaleString('vi-VN')
+                        : adsFallbackText}
+                    </strong>
+                  </span>
+                  <span>
+                    Lead quảng cáo hợp lệ:{' '}
+                    <strong className="text-[#0F275C] tabular-nums">
+                      {ads?.metrics.validAttributedLeadCount ?? 0}
+                    </strong>
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSection('ads_campaigns')}
+                  className="text-[#1E3A8A] font-semibold hover:underline"
+                >
+                  Xem chi phí &amp; hiệu suất Ads →
+                </button>
+              </div>
+
+              <AdsExcelTableSection
+                campaigns={campTable?.rows || []}
+                adsConnected={adsConnected}
+                scopeWebsiteId={scope.websiteId || 'all'}
+                scopeDateLabel={data ? `${data.scope.startDate} → ${data.scope.endDate}` : scope.preset}
+                adsScopeMode={adsScopeMode}
+                onChangeAdsScopeMode={(mode) => {
+                  setAdsScopeMode(mode);
+                  setAdsPage(1);
+                }}
+                searchTerm={searchTerm}
+                canDirectDesign={canDirectDesign}
+                briefSubmittingId={briefSubmittingId}
+                onCreateBrief={(c) => void handleCreateCampaignBrief(c)}
+                onOpenDrawer={(c) => setDrawerCampaign(c)}
+                dateFrom={data?.scope.startDate}
+                dateTo={data?.scope.endDate}
+                controlledViewMode="daily"
+                onChangeViewMode={(mode) =>
+                  setActiveSection(mode === 'summary' ? 'ads_campaigns' : 'ads_daily')
+                }
+              />
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 6B: TRANG ĐÍCH QUẢNG CÁO                                */}
+          {/* =============================================================== */}
+          {activeSection === 'ads_landing_pages' && (
+            <div className="space-y-4">
+              {ads && ads.status !== 'CONNECTED' && (
+                <div className="rounded-[12px] border bg-amber-50/80 border-amber-200 px-4 py-3 text-xs text-amber-900 flex items-center justify-between gap-2">
+                  <span>{ads.statusMessage}</span>
+                  <Link href="/settings" className="font-semibold text-[#1E3A8A] hover:underline shrink-0">
+                    Kiểm tra kết nối →
+                  </Link>
+                </div>
+              )}
+
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Trang đích quảng cáo ({ads?.breakdowns.landingPages?.length ?? 0})
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Hiệu suất từng URL đích chạy Google Ads
+                  </p>
+                </div>
+                <div tabIndex={0} role="region" aria-label="Bảng Trang đích Google Ads" className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">URL trang đích</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Chiến dịch</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Lượt nhấp</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Hiển thị</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">CTR</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">CPC TB</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chi phí</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">Chuyển đổi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(ads?.breakdowns.landingPages || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="py-8 text-center text-slate-500">
+                            {ads?.breakdowns.keywordAvailabilityNote ||
+                              'Chưa có dữ liệu trang đích Google Ads trong phạm vi đang chọn.'}
+                          </td>
+                        </tr>
+                      ) : (
+                        (ads?.breakdowns.landingPages || [])
+                          .filter(
+                            (lp) =>
+                              !searchTerm ||
+                              lp.url.toLowerCase().includes(searchTerm) ||
+                              lp.campaignName.toLowerCase().includes(searchTerm),
+                          )
+                          .map((lp, idx) => (
+                            <tr key={`${lp.url}-${lp.campaignName}-${idx}`} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-2.5 px-4 font-mono text-[11px] font-medium text-slate-900 max-w-[340px]">
+                                <a
+                                  href={lp.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[#1A73E8] hover:underline inline-flex items-center gap-1 max-w-full"
+                                  title={lp.url}
+                                >
+                                  <span className="truncate">{lp.url}</span>
+                                  <ExternalLink className="w-3 h-3 shrink-0" />
+                                </a>
+                              </th>
+                              <td className="py-2.5 px-3 text-slate-600 max-w-[220px] truncate" title={lp.campaignName}>
+                                {lp.campaignName}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                {lp.clicks.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {lp.impressions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {lp.ctrPct !== null ? `${lp.ctrPct.toFixed(2)}%` : '—'}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {lp.avgCpc !== null ? `${Math.round(lp.avgCpc).toLocaleString('vi-VN')} ₫` : '—'}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                                {Math.round(lp.cost).toLocaleString('vi-VN')} ₫
+                              </td>
+                              <td className="py-2.5 px-4 text-right text-slate-700 tabular-nums">
+                                {Number.isInteger(lp.conversions)
+                                  ? lp.conversions.toLocaleString('vi-VN')
+                                  : lp.conversions.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 6C: CỤM TỪ TÌM KIẾM THỰC TẾ                             */}
+          {/* =============================================================== */}
+          {activeSection === 'ads_search_terms' && (
+            <div className="space-y-4">
+              {ads && ads.status !== 'CONNECTED' && (
+                <div className="rounded-[12px] border bg-amber-50/80 border-amber-200 px-4 py-3 text-xs text-amber-900 flex items-center justify-between gap-2">
+                  <span>{ads.statusMessage}</span>
+                  <Link href="/settings" className="font-semibold text-[#1E3A8A] hover:underline shrink-0">
+                    Kiểm tra kết nối →
+                  </Link>
+                </div>
+              )}
+
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Cụm từ tìm kiếm ({ads?.breakdowns.searchTerms?.length ?? 0})
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Truy vấn thực tế người dùng tìm trên Google dẫn tới nhấp quảng cáo
+                  </p>
+                </div>
+                <div tabIndex={0} role="region" aria-label="Bảng Cụm từ tìm kiếm Google Ads" className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Cụm từ tìm kiếm</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Trạng thái</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Nhóm QC / Chiến dịch</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Hiển thị</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Lượt nhấp</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">CTR</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chi phí</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">Chuyển đổi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(ads?.breakdowns.searchTerms || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="py-8 text-center text-slate-500">
+                            {ads?.breakdowns.keywordAvailabilityNote ||
+                              'Chưa có dữ liệu cụm từ tìm kiếm Google Ads trong phạm vi đang chọn.'}
+                          </td>
+                        </tr>
+                      ) : (
+                        (ads?.breakdowns.searchTerms || [])
+                          .filter(
+                            (st) =>
+                              !searchTerm ||
+                              st.searchTerm.toLowerCase().includes(searchTerm) ||
+                              st.campaignName.toLowerCase().includes(searchTerm),
+                          )
+                          .map((st, idx) => (
+                            <tr key={`${st.searchTerm}-${st.campaignName}-${idx}`} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-2.5 px-4 font-semibold text-slate-900">
+                                {st.searchTerm}
+                              </th>
+                              <td className="py-2.5 px-3">
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                                    st.status === 'ADDED'
+                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                      : st.status === 'EXCLUDED'
+                                        ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                        : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {st.status || 'Chưa thêm'}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-600">
+                                <div className="font-medium text-slate-800">{st.adGroupName}</div>
+                                <div className="text-[11px] text-slate-500">{st.campaignName}</div>
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {st.impressions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                {st.clicks.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {st.ctrPct !== null ? `${st.ctrPct.toFixed(2)}%` : '—'}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                                {Math.round(st.cost).toLocaleString('vi-VN')} ₫
+                              </td>
+                              <td className="py-2.5 px-4 text-right tabular-nums">
+                                {Number.isInteger(st.conversions)
+                                  ? st.conversions.toLocaleString('vi-VN')
+                                  : st.conversions.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {/* =============================================================== */}
+          {/* SECTION 7: NHÓM QUẢNG CÁO & TỪ KHÓA (BREAKDOWNS)                */}
+          {/* =============================================================== */}
+          {activeSection === 'ads_breakdowns' && (
+            <div className="space-y-4">
+              {ads && ads.status !== 'CONNECTED' && (
+                <div className="rounded-[12px] border bg-amber-50/80 border-amber-200 px-4 py-3 text-xs text-amber-900 flex items-center justify-between gap-2">
+                  <span>{ads.statusMessage}</span>
+                  <Link href="/settings" className="font-semibold text-[#1E3A8A] hover:underline shrink-0">
+                    Kiểm tra kết nối →
+                  </Link>
+                </div>
+              )}
+
+              {/* Bảng Nhóm quảng cáo */}
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Nhóm quảng cáo ({ads?.breakdowns.adGroups.length ?? 0})
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Nhóm quảng cáo</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Chiến dịch</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chi phí</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Hiển thị</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Click</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chuyển đổi</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">CPA</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(ads?.breakdowns.adGroups || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-8 text-center text-slate-500">
+                            {ads?.breakdowns.keywordAvailabilityNote ||
+                              'Chưa có dữ liệu nhóm quảng cáo chi tiết trong phạm vi đang chọn.'}
+                          </td>
+                        </tr>
+                      ) : (
+                        (ads?.breakdowns.adGroups || [])
+                          .filter(
+                            (ag) =>
+                              !searchTerm ||
+                              ag.adGroupName.toLowerCase().includes(searchTerm) ||
+                              ag.campaignName.toLowerCase().includes(searchTerm),
+                          )
+                          .map((ag) => (
+                            <tr key={ag.adGroupId} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-2.5 px-4 font-semibold text-slate-900">
+                                {ag.adGroupName}
+                              </th>
+                              <td className="py-2.5 px-3 text-slate-600">{ag.campaignName}</td>
+                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                {Math.round(ag.cost).toLocaleString('vi-VN')} ₫
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {ag.impressions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-700 font-medium tabular-nums">
+                                {ag.clicks.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-700 tabular-nums">
+                                {Number.isInteger(ag.conversions)
+                                  ? ag.conversions.toLocaleString('vi-VN')
+                                  : ag.conversions.toFixed(2)}
+                              </td>
+                              <td className="py-2.5 px-4 text-right text-slate-700 tabular-nums">
+                                {ag.cpa !== null ? `${Math.round(ag.cpa).toLocaleString('vi-VN')} ₫` : '—'}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+
+              {/* Bảng Từ khóa quảng cáo */}
+              <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold text-slate-900">
+                    Từ khóa quảng cáo ({ads?.breakdowns.keywords.length ?? 0})
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                      <tr>
+                        <th scope="col" className="py-2.5 px-4 font-semibold">Từ khóa</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Đối sánh</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold">Nhóm QC / Chiến dịch</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Hiển thị</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Click</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">CTR</th>
+                        <th scope="col" className="py-2.5 px-3 font-semibold text-right">Chi phí</th>
+                        <th scope="col" className="py-2.5 px-4 font-semibold text-right">Chuyển đổi</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {(ads?.breakdowns.keywords || []).length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="py-8 text-center text-slate-500">
+                            {ads?.breakdowns.keywordAvailabilityNote ||
+                              'Chưa có dữ liệu từ khóa chi tiết trong phạm vi đang chọn.'}
+                          </td>
+                        </tr>
+                      ) : (
+                        (ads?.breakdowns.keywords || [])
+                          .filter(
+                            (kw) =>
+                              !searchTerm ||
+                              kw.keywordText.toLowerCase().includes(searchTerm) ||
+                              kw.campaignName.toLowerCase().includes(searchTerm),
+                          )
+                          .map((kw, idx) => (
+                            <tr key={`${kw.campaignName}-${kw.adGroupName}-${kw.keywordText}-${idx}`} className="hover:bg-slate-50/70">
+                              <th scope="row" className="py-2.5 px-4 font-semibold text-slate-900">
+                                {kw.keywordText}
+                              </th>
+                              <td className="py-2.5 px-3 text-slate-600">
+                                <span className="px-2 py-0.5 rounded bg-slate-100 text-[11px] font-medium">
+                                  {kw.matchType}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-600">
+                                <div className="font-medium text-slate-800">{kw.adGroupName}</div>
+                                <div className="text-[11px] text-slate-500">{kw.campaignName}</div>
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {kw.impressions.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                {kw.clicks.toLocaleString('vi-VN')}
+                              </td>
+                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                                {kw.ctrPct !== null ? `${kw.ctrPct.toFixed(2)}%` : '—'}
+                              </td>
+                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                                {Math.round(kw.cost).toLocaleString('vi-VN')} ₫
+                              </td>
+                              <td className="py-2.5 px-4 text-right tabular-nums">
+                                {Number.isInteger(kw.conversions)
+                                  ? kw.conversions.toLocaleString('vi-VN')
+                                  : kw.conversions.toFixed(2)}
+                              </td>
+                            </tr>
+                          ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900">Thiết bị Google Ads</h3>
+                <span className="text-[11px] font-semibold text-slate-500">
+                  {(ads?.breakdowns.devices || []).length} loại thiết bị
+                </span>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase">
+                    <tr>
+                      <th className="px-4 py-2.5">Thiết bị</th>
+                      <th className="px-3 py-2.5 text-right">Hiển thị</th>
+                      <th className="px-3 py-2.5 text-right">Nhấp chuột</th>
+                      <th className="px-4 py-2.5 text-right">Chi phí</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {(ads?.breakdowns.devices || []).length === 0 ? (
+                      <tr>
+                        <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
+                          Chưa có dữ liệu thiết bị Google Ads.
+                        </td>
+                      </tr>
+                    ) : (
+                      (ads?.breakdowns.devices || []).map((dev, idx) => {
+                        const deviceLabels: Record<string, string> = {
+                          MOBILE: 'Di động',
+                          DESKTOP: 'Máy tính',
+                          TABLET: 'Máy tính bảng',
+                          CONNECTED_TV: 'TV kết nối',
+                        };
+                        const label =
+                          deviceLabels[String(dev.device || '').toUpperCase()] ||
+                          dev.device ||
+                          'Khác';
+                        return (
+                          <tr key={`${dev.device}-${idx}`} className="hover:bg-slate-50/70">
+                            <td className="px-4 py-2.5 font-semibold text-slate-800">{label}</td>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
+                              {Number(dev.impressions || 0).toLocaleString('vi-VN')}
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
+                              {Number(dev.clicks || 0).toLocaleString('vi-VN')}
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums font-bold text-slate-900">
+                              {Math.round(Number(dev.cost || 0)).toLocaleString('vi-VN')} ₫
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
+              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900">Khung giờ hiệu quả</h3>
+                <span className="text-[11px] font-semibold text-slate-500">
+                  {(ads?.breakdowns.timeSchedule || []).length} khung giờ
+                </span>
+              </div>
+              <div className="overflow-auto max-h-[320px]">
+                <table className="w-full text-left border-collapse">
+                  <thead className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase sticky top-0">
+                    <tr>
+                      <th className="px-4 py-2.5">Thời điểm</th>
+                      <th className="px-3 py-2.5 text-right">Hiển thị</th>
+                      <th className="px-3 py-2.5 text-right">Nhấp chuột</th>
+                      <th className="px-3 py-2.5 text-right">Chi phí</th>
+                      <th className="px-4 py-2.5 text-right">Chuyển đổi</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {(ads?.breakdowns.timeSchedule || []).length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                          Chưa có dữ liệu khung giờ Google Ads.
+                        </td>
+                      </tr>
+                    ) : (
+                      (ads?.breakdowns.timeSchedule || []).map((slot, idx) => {
+                        const dayMap: Record<string, string> = {
+                          MONDAY: 'Thứ 2',
+                          TUESDAY: 'Thứ 3',
+                          WEDNESDAY: 'Thứ 4',
+                          THURSDAY: 'Thứ 5',
+                          FRIDAY: 'Thứ 6',
+                          SATURDAY: 'Thứ 7',
+                          SUNDAY: 'CN',
+                        };
+                        const dayLabel =
+                          dayMap[String(slot.dayOfWeek || '').toUpperCase()] ||
+                          slot.dayOfWeek ||
+                          '—';
+                        const conv = Number(slot.conversions || 0);
+                        return (
+                          <tr
+                            key={`${slot.dayOfWeek}-${slot.hour}-${idx}`}
+                            className="hover:bg-slate-50/70"
+                          >
+                            <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">
+                              {dayLabel} · {String(slot.hour ?? 0).padStart(2, '0')}:00
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
+                              {Number(slot.impressions || 0).toLocaleString('vi-VN')}
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
+                              {Number(slot.clicks || 0).toLocaleString('vi-VN')}
+                            </td>
+                            <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-900">
+                              {Math.round(Number(slot.cost || 0)).toLocaleString('vi-VN')} ₫
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-emerald-700">
+                              {Number.isInteger(conv) ? conv.toLocaleString('vi-VN') : conv.toFixed(2)}
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </div>
       </div>
 
       {/* Drawer chi tiết chiến dịch (Ad group / Keyword / Thiết bị / Khu vực) */}
@@ -1329,6 +2376,43 @@ export function TrackingWorkspace() {
                       : 'Chưa đủ đối soát'}
                   </div>
                 </div>
+              </div>
+
+              <div>
+                <h3 className="font-bold text-slate-900 mb-2 flex items-center gap-1.5">
+                  <ExternalLink aria-hidden="true" className="w-4 h-4 text-[#1E3A8A]" />
+                  Link đích chiến dịch ({drawerCampaign.finalUrls?.length || (drawerCampaign.primaryDestinationUrl ? 1 : 0)})
+                </h3>
+                {(drawerCampaign.finalUrls && drawerCampaign.finalUrls.length > 0) ? (
+                  <div className="space-y-1.5 rounded-[10px] bg-blue-50/50 border border-blue-200/80 p-3">
+                    {drawerCampaign.finalUrls.map((u) => (
+                      <a
+                        key={u}
+                        href={u}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center justify-between gap-2 text-[#1E3A8A] font-mono text-[11px] hover:underline break-all"
+                      >
+                        <span>{u}</span>
+                        <ExternalLink className="w-3 h-3 shrink-0" />
+                      </a>
+                    ))}
+                  </div>
+                ) : drawerCampaign.primaryDestinationUrl ? (
+                  <a
+                    href={drawerCampaign.primaryDestinationUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-[10px] bg-slate-50 border border-slate-200 px-3 py-2 text-slate-700 font-mono text-[11px] hover:underline"
+                  >
+                    <span>{drawerCampaign.primaryDestinationUrl}</span>
+                    <ExternalLink className="w-3 h-3 shrink-0" />
+                  </a>
+                ) : (
+                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-[10px] p-3">
+                    Chưa có URL đích chi tiết từ chiến dịch này.
+                  </p>
+                )}
               </div>
 
               <div>

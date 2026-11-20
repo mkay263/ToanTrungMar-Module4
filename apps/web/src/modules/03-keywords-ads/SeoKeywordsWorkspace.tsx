@@ -10,11 +10,16 @@ import {
   Download,
   ExternalLink,
   FilePlus2,
+  FileText,
   Globe,
+  LayoutDashboard,
+  MonitorSmartphone,
   RefreshCw,
   Search,
   SlidersHorizontal,
   Sparkles,
+  TrendingUp,
+  X,
 } from 'lucide-react';
 import {
   SEO_ARTICLE_STATUS_LABELS,
@@ -24,19 +29,29 @@ import {
   type SeoArticleStatus,
   type WebsiteConfigItemDto,
 } from '@toantrung/contracts';
-import { apiRequest, invalidateApiCacheByDomains, peekApiCacheEntry } from '@/core/http/client';
+import { apiRequest, peekApiCacheEntry } from '@/core/http/client';
 import { subscribeDataSync } from '@/core/http/data-sync-bus';
 import { loadRouteState, saveRouteState } from '@/core/http/route-state';
 import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
+import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
+import { GooglePlatformSwitcher } from '@/components/common/GooglePlatformSwitcher';
 
-const StockAreaChart = dynamic(
-  () => import('@/components/common/StockAreaChart').then((m) => m.StockAreaChart),
+const GscPerformanceChart = dynamic(
+  () => import('./GscPerformanceChart').then((m) => m.GscPerformanceChart),
   {
     ssr: false,
-    loading: () => <div className="h-[265px] rounded-xl bg-slate-50 animate-pulse" />,
+    loading: () => <div className="h-[340px] rounded-2xl bg-slate-50 animate-pulse" />,
+  },
+);
+
+const GoogleTrendsExplorePanel = dynamic(
+  () => import('./GoogleTrendsExplorePanel').then((m) => m.GoogleTrendsExplorePanel),
+  {
+    ssr: false,
+    loading: () => <div className="h-[360px] rounded-2xl bg-slate-50 animate-pulse" />,
   },
 );
 
@@ -52,8 +67,49 @@ const SeoAiReportPanel = dynamic(
   },
 );
 
-type SeoWorkspaceTab = 'queries' | 'pages' | 'content' | 'trends';
-type SeoChartMetric = 'clicks' | 'impressions';
+type SeoWorkspaceTab =
+  | 'overview'
+  | 'queries'
+  | 'pages'
+  | 'devices_countries'
+  | 'content'
+  | 'trends';
+
+const VALID_SEO_TABS: ReadonlySet<string> = new Set([
+  'overview',
+  'queries',
+  'pages',
+  'devices_countries',
+  'content',
+  'trends',
+]);
+
+const SEO_SECTION_META: Record<SeoWorkspaceTab, { title: string; subtitle: string }> = {
+  overview: {
+    title: 'Hiệu suất tìm kiếm (GSC)',
+    subtitle: 'Hiệu suất Google Search Console và đối soát Lead SEO',
+  },
+  queries: {
+    title: 'Từ khóa tìm kiếm',
+    subtitle: 'Lượt nhấp, hiển thị, CTR và thứ hạng từ khóa',
+  },
+  pages: {
+    title: 'Trang đích SEO',
+    subtitle: 'Hiệu suất từng trang và tình trạng lập chỉ mục Google',
+  },
+  devices_countries: {
+    title: 'Thiết bị & Quốc gia',
+    subtitle: 'Phân bổ tìm kiếm theo thiết bị và khu vực',
+  },
+  content: {
+    title: 'Kế hoạch nội dung',
+    subtitle: 'Bài viết SEO, bản nháp và tiến độ xuất bản',
+  },
+  trends: {
+    title: 'Xu hướng thị trường',
+    subtitle: 'So sánh từ khóa và chủ đề quan tâm tại Việt Nam',
+  },
+};
 
 function buildM03ApiPath(
   scope: { websiteId: string; preset: string; from: string; to: string },
@@ -61,17 +117,19 @@ function buildM03ApiPath(
   contentPage: number,
   minImpr: number,
   maxCtr: number,
+  compare: boolean,
 ): string {
   const qs = new URLSearchParams({
     view: 'spec',
     websiteId: scope.websiteId || 'all',
     preset: scope.preset || '7D',
     page: String(page),
-    pageSize: '20',
+    pageSize: '60',
     contentPage: String(contentPage),
     minImpr: String(minImpr),
     maxCtr: String(maxCtr),
   });
+  if (compare) qs.set('compare', '1');
   if (scope.preset === 'CUSTOM' && scope.from && scope.to) {
     qs.set('from', scope.from);
     qs.set('to', scope.to);
@@ -97,15 +155,17 @@ export function SeoKeywordsWorkspace() {
   const [activeTab, setActiveTab] = useState<SeoWorkspaceTab>(() => {
     if (typeof window !== 'undefined') {
       const t = new URLSearchParams(window.location.search).get('tab');
-      if (t === 'queries' || t === 'pages' || t === 'content' || t === 'trends') return t;
-      const saved = loadRouteState<{ activeTab?: SeoWorkspaceTab }>('ads');
-      if (saved?.activeTab) return saved.activeTab;
+      if (t && VALID_SEO_TABS.has(t)) return t as SeoWorkspaceTab;
+      const saved = loadRouteState<{ activeTab?: string }>('ads');
+      if (saved?.activeTab && VALID_SEO_TABS.has(saved.activeTab)) {
+        return saved.activeTab as SeoWorkspaceTab;
+      }
     }
-    return 'queries';
+    return 'overview';
   });
-  const [chartMetric, setChartMetric] = useState<SeoChartMetric>(
-    () => loadRouteState<{ chartMetric?: SeoChartMetric }>('ads')?.chartMetric || 'clicks',
-  );
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [crossFilterPage, setCrossFilterPage] = useState<string | null>(null);
+  const [crossFilterQuery, setCrossFilterQuery] = useState<string | null>(null);
   const [showAiPanel, setShowAiPanel] = useState(false);
   const [showUrlInspect, setShowUrlInspect] = useState(false);
   const [showCreateContentForm, setShowCreateContentForm] = useState(false);
@@ -134,18 +194,29 @@ export function SeoKeywordsWorkspace() {
   const [creatingContent, setCreatingContent] = useState(false);
   const [contentStatusMsg, setContentStatusMsg] = useState<string | null>(null);
 
-  // Tương tác trực tiếp Google Trends & Google Suggest VN trong tab Xu hướng
-  const [trendLookupInput, setTrendLookupInput] = useState('');
-  const [trendLookupBusy, setTrendLookupBusy] = useState(false);
-  const [trendLookupResults, setTrendLookupResults] = useState<string[] | null>(null);
-  const [showSerpKeyForm, setShowSerpKeyForm] = useState(false);
-  const [serpApiKeyInput, setSerpApiKeyInput] = useState('');
-  const [savingSerpKey, setSavingSerpKey] = useState(false);
+  useEffect(() => {
+    const onPlatformSwitch = (e: Event) => {
+      const key = (e as CustomEvent<string>).detail;
+      if (key === 'gsc') setActiveTab('overview');
+      if (key === 'trends') setActiveTab('trends');
+    };
+    window.addEventListener('tt-google-platform-click', onPlatformSwitch as EventListener);
+    return () =>
+      window.removeEventListener('tt-google-platform-click', onPlatformSwitch as EventListener);
+  }, []);
 
   const activeGscPage = activeTab === 'pages' ? pagesPage : queriesPage;
   const apiPath = useMemo(
-    () => buildM03ApiPath(scope, activeGscPage, contentPage, appliedMinImpr, appliedMaxCtr),
-    [scope, activeGscPage, contentPage, appliedMinImpr, appliedMaxCtr],
+    () =>
+      buildM03ApiPath(
+        scope,
+        activeGscPage,
+        contentPage,
+        appliedMinImpr,
+        appliedMaxCtr,
+        compareEnabled,
+      ),
+    [scope, activeGscPage, contentPage, appliedMinImpr, appliedMaxCtr, compareEnabled],
   );
   const activePathRef = useRef<string>(apiPath);
   activePathRef.current = apiPath;
@@ -281,8 +352,8 @@ export function SeoKeywordsWorkspace() {
   }, [hydrated, apiPath, scope.preset, scope.from, scope.to, fetchDashboard]);
 
   useEffect(() => {
-    saveRouteState('ads', { activeTab, chartMetric, queriesPage, pagesPage, contentPage });
-  }, [activeTab, chartMetric, queriesPage, pagesPage, contentPage]);
+    saveRouteState('ads', { activeTab, queriesPage, pagesPage, contentPage });
+  }, [activeTab, queriesPage, pagesPage, contentPage]);
 
   useEffect(() => {
     if (typeof document === 'undefined') return;
@@ -303,19 +374,11 @@ export function SeoKeywordsWorkspace() {
   }, [data]);
 
   const seo = data?.seo;
-  const clicksComparison = formatSafePeriodComparison(
-    seo?.metrics.organicSearchClicks ?? null,
-    seo?.comparison.previousClicks ?? null,
-  );
-  const imprComparison = formatSafePeriodComparison(
-    seo?.metrics.organicSearchImpressions ?? null,
-    seo?.comparison.previousImpressions ?? null,
-  );
 
   const exportCsvCurrentTab = () => {
     if (!seo) return;
     const rows: string[][] = [];
-    if (activeTab === 'queries') {
+    if (activeTab === 'queries' || activeTab === 'overview') {
       rows.push(['Từ khóa', 'Click tìm kiếm', 'Hiển thị tìm kiếm', 'CTR (%)', 'Vị trí TB', 'Thay đổi Click', 'Cải thiện vị trí']);
       for (const r of seo.tables.queries.rows) {
         rows.push([
@@ -419,19 +482,47 @@ export function SeoKeywordsWorkspace() {
     }
   };
 
+  const queryPageLinks = seo?.tables.queryPageLinks || [];
+
+  const crossMatchedQueriesSet = useMemo(() => {
+    if (!crossFilterPage) return null;
+    const target = crossFilterPage.toLowerCase();
+    return new Set(
+      queryPageLinks
+        .filter((ln) => ln.page.toLowerCase() === target)
+        .map((ln) => ln.query.toLowerCase()),
+    );
+  }, [crossFilterPage, queryPageLinks]);
+
+  const crossMatchedPagesSet = useMemo(() => {
+    if (!crossFilterQuery) return null;
+    const target = crossFilterQuery.toLowerCase();
+    return new Set(
+      queryPageLinks
+        .filter((ln) => ln.query.toLowerCase() === target)
+        .map((ln) => ln.page.toLowerCase()),
+    );
+  }, [crossFilterQuery, queryPageLinks]);
+
   const queryRowsFiltered = useMemo(() => {
-    const list = seo?.tables.queries.rows || [];
+    let list = seo?.tables.queries.rows || [];
+    if (crossMatchedQueriesSet) {
+      list = list.filter((r) => crossMatchedQueriesSet.has(r.key.toLowerCase()));
+    }
     if (!searchTerm.trim()) return list;
     const kw = searchTerm.trim().toLowerCase();
     return list.filter((r) => r.key.toLowerCase().includes(kw));
-  }, [seo?.tables.queries.rows, searchTerm]);
+  }, [seo?.tables.queries.rows, crossMatchedQueriesSet, searchTerm]);
 
   const pageRowsFiltered = useMemo(() => {
-    const list = seo?.tables.pages.rows || [];
+    let list = seo?.tables.pages.rows || [];
+    if (crossMatchedPagesSet) {
+      list = list.filter((r) => crossMatchedPagesSet.has(r.key.toLowerCase()));
+    }
     if (!searchTerm.trim()) return list;
     const kw = searchTerm.trim().toLowerCase();
     return list.filter((r) => r.key.toLowerCase().includes(kw));
-  }, [seo?.tables.pages.rows, searchTerm]);
+  }, [seo?.tables.pages.rows, crossMatchedPagesSet, searchTerm]);
 
   const contentRowsFiltered = useMemo(() => {
     const list = seo?.tables.content?.rows || [];
@@ -463,15 +554,16 @@ export function SeoKeywordsWorkspace() {
 
   return (
     <div className="space-y-4 pb-8">
+      <GooglePlatformSwitcher active={activeTab === 'trends' ? 'trends' : 'gsc'} platforms={['gsc', 'trends']} />
+
       <WebsiteDashboardHeader
         title="Từ khóa & SEO"
-        subtitle={
-          data
-            ? `Trang / từ khóa nào cần cải thiện? · ${data.scope.startDate} → ${data.scope.endDate}`
-            : 'Trang / từ khóa nào cần cải thiện? · Tạo báo cáo AI có căn cứ và đề xuất công việc nội dung'
-        }
         scope={scope}
         availableWebsites={data?.coverage.availableWebsites || knownWebsites}
+        websiteSelectorStyle="dropdown"
+        showCompareToggle={true}
+        compareEnabled={compareEnabled}
+        onToggleCompare={setCompareEnabled}
         freshnessMessage={
           loading && !data
             ? UI_VOCABULARY.freshness.updating
@@ -502,7 +594,7 @@ export function SeoKeywordsWorkspace() {
               type="button"
               disabled={refreshing}
               onClick={() => void fetchDashboard(true)}
-              className="h-9 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
+              className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               {UI_VOCABULARY.actions.refresh}
@@ -510,7 +602,7 @@ export function SeoKeywordsWorkspace() {
             <button
               type="button"
               onClick={exportCsvCurrentTab}
-              className="h-9 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
+              className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
             >
               <Download className="w-3.5 h-3.5" />
               {UI_VOCABULARY.actions.exportExcel}
@@ -518,7 +610,7 @@ export function SeoKeywordsWorkspace() {
             <button
               type="button"
               onClick={() => setShowAiPanel((prev) => !prev)}
-              className="h-9 px-3.5 rounded-lg bg-[#0B1D48] text-white hover:bg-[#172D6E] text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs"
+              className="h-8 px-3.5 rounded-lg bg-[#0B1D48] text-white hover:bg-[#172D6E] text-xs font-semibold inline-flex items-center gap-1.5 shadow-2xs"
             >
               <Sparkles className="w-3.5 h-3.5" />
               {showAiPanel ? 'Đóng báo cáo SEO' : 'Tạo báo cáo SEO'}
@@ -575,198 +667,240 @@ export function SeoKeywordsWorkspace() {
         </div>
       )}
 
-      {/* 6 KPI Tìm kiếm tự nhiên (C08) */}
-      <section aria-label="Chỉ số tìm kiếm tự nhiên" className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-        <div className="min-h-[106px] rounded-[12px] bg-white border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between">
-          <div className="text-xs font-medium text-slate-600">Click tìm kiếm</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">
-            <AnimatedMetricNumber value={seo?.metrics.organicSearchClicks ?? null} />
-          </div>
-          <div className="text-[11px] text-slate-500 truncate" title={clicksComparison.label}>
-            So kỳ trước: <span className="font-medium text-slate-700">{clicksComparison.label}</span>
-          </div>
-        </div>
+      {/* Bố cục menu dọc bên trái chuẩn Google Ads + vùng nội dung rộng bên phải */}
+      <div className="flex flex-col lg:flex-row items-start gap-4">
+        <VerticalSectionNav
+          ariaLabel="Điều hướng phân mục Từ khóa & SEO"
+          activeId={activeTab}
+          onSelect={(id) => {
+            if (VALID_SEO_TABS.has(id)) {
+              setActiveTab(id as SeoWorkspaceTab);
+            }
+          }}
+          topItems={[]}
+          groups={[
+            {
+              id: 'seo_gsc',
+              label: 'Tìm kiếm tự nhiên (GSC)',
+              defaultOpen: true,
+              items: [
+                {
+                  id: 'overview',
+                  label: 'Hiệu suất tìm kiếm',
+                  icon: LayoutDashboard,
+                },
+                {
+                  id: 'queries',
+                  label: 'Từ khóa tìm kiếm',
+                  icon: Search,
+                  badge: seo?.tables.queries.totalRows ?? null,
+                },
+                {
+                  id: 'pages',
+                  label: 'Trang đích SEO',
+                  icon: FileText,
+                  badge: seo?.tables.pages.totalRows ?? null,
+                },
+                {
+                  id: 'devices_countries',
+                  label: 'Thiết bị & Quốc gia',
+                  icon: MonitorSmartphone,
+                  badge: seo?.tables.deviceCountry?.length ?? null,
+                },
+              ],
+            },
+            {
+              id: 'seo_plan',
+              label: 'Nội dung & Xu hướng',
+              defaultOpen: true,
+              items: [
+                {
+                  id: 'content',
+                  label: 'Kế hoạch nội dung',
+                  icon: FilePlus2,
+                  badge: seo?.tables.content?.totalRows ?? null,
+                },
+                {
+                  id: 'trends',
+                  label: 'Xu hướng thị trường',
+                  icon: TrendingUp,
+                  badge: data?.trends.rows.length ?? null,
+                },
+              ],
+            },
+          ]}
+        />
 
-        <div className="min-h-[106px] rounded-[12px] bg-white border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between">
-          <div className="text-xs font-medium text-slate-600">Hiển thị tìm kiếm</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">
-            <AnimatedMetricNumber value={seo?.metrics.organicSearchImpressions ?? null} />
-          </div>
-          <div className="text-[11px] text-slate-500 truncate" title={imprComparison.label}>
-            So kỳ trước: <span className="font-medium text-slate-700">{imprComparison.label}</span>
-          </div>
-        </div>
-
-        <div className="min-h-[106px] rounded-[12px] bg-white border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between">
-          <div className="text-xs font-medium text-slate-600">CTR tìm kiếm</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">
-            {seo?.metrics.organicSearchCtrPct !== null && seo?.metrics.organicSearchCtrPct !== undefined
-              ? `${seo.metrics.organicSearchCtrPct}%`
-              : '—'}
-          </div>
-          <div className="text-[11px] text-slate-500">Click / Hiển thị tự nhiên</div>
-        </div>
-
-        <div className="min-h-[106px] rounded-[12px] bg-white border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between">
-          <div className="text-xs font-medium text-slate-600">Vị trí trung bình</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">
-            {seo?.metrics.averageSearchPosition !== null && seo?.metrics.averageSearchPosition !== undefined
-              ? seo.metrics.averageSearchPosition
-              : '—'}
-          </div>
-          <div className="text-[11px] text-slate-500">Bình quân gia quyền hiển thị</div>
-        </div>
-
-        <div className="min-h-[106px] rounded-[12px] bg-white border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between">
-          <div className="text-xs font-medium text-slate-600">Phiên từ tìm kiếm tự nhiên</div>
-          <div className="text-2xl font-bold text-slate-900 tabular-nums">
-            <AnimatedMetricNumber value={seo?.metrics.organicSessions ?? null} />
-          </div>
-          <div className="text-[11px] text-slate-500">
-            {seo?.metrics.organicEngagementRatePct !== null && seo?.metrics.organicEngagementRatePct !== undefined
-              ? `Tương tác: ${seo.metrics.organicEngagementRatePct}%`
-              : 'Kênh Organic Search'}
-          </div>
-        </div>
-
-        <div className="min-h-[106px] rounded-[12px] bg-white border border-slate-200 p-3.5 shadow-2xs flex flex-col justify-between">
-          <div className="text-xs font-medium text-slate-600">Lead từ tìm kiếm tự nhiên</div>
-          <div className="text-2xl font-bold text-[#0B1D48] tabular-nums">
-            <AnimatedMetricNumber value={seo?.metrics.organicValidLeadCount ?? 0} />
-          </div>
-          <div className="text-[11px] text-slate-500 truncate">
-            {seo?.metrics.organicLeadVerificationState === 'VERIFIED'
-              ? 'Xác minh từ dấu vết phiên'
-              : 'Chỉ tính Lead đủ bằng chứng organic'}
-          </div>
-        </div>
-      </section>
-
-      {/* Biểu đồ chính (8 cột) + Trang tăng/giảm nổi bật (4 cột) */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        <div className="lg:col-span-8 bg-white border border-slate-200 rounded-[12px] p-4 shadow-2xs">
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900">Diễn biến tìm kiếm tự nhiên theo ngày</h2>
-              <p className="text-xs text-slate-500">
-                Đơn vị: {chartMetric === 'clicks' ? 'Lượt click tìm kiếm' : 'Lượt hiển thị tìm kiếm'} · Múi giờ chuẩn GMT+7
+        <div className="flex-1 min-w-0 w-full space-y-4">
+          {/* Thanh tiêu đề phân mục hiện tại + tìm kiếm nhanh + nút thao tác mục */}
+          <div className="bg-white border border-slate-200/90 rounded-2xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-slate-900 leading-tight">
+                {SEO_SECTION_META[activeTab].title}
+              </h2>
+              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                {SEO_SECTION_META[activeTab].subtitle}
               </p>
             </div>
-            <div className="inline-flex rounded-lg bg-slate-100 p-0.5 text-xs">
-              <button
-                type="button"
-                onClick={() => setChartMetric('clicks')}
-                className={`px-2.5 py-1 rounded-md font-semibold transition ${
-                  chartMetric === 'clicks' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
-                }`}
-              >
-                Click tìm kiếm
-              </button>
-              <button
-                type="button"
-                onClick={() => setChartMetric('impressions')}
-                className={`px-2.5 py-1 rounded-md font-semibold transition ${
-                  chartMetric === 'impressions' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600'
-                }`}
-              >
-                Hiển thị tìm kiếm
-              </button>
-            </div>
-          </div>
 
-          <StockAreaChart
-            points={(seo?.charts.seoDailySeries || []).map((pt) => ({
-              date: pt.date,
-              value: chartMetric === 'clicks' ? pt.clicks : pt.impressions,
-              isMissingData:
-                pt.completenessState === 'NO_DATA' || pt.completenessState === 'QUERY_ERROR',
-              isPreliminary:
-                pt.completenessState === 'PRELIMINARY' || pt.completenessState === 'UNKNOWN',
-            }))}
-            metricLabel={chartMetric === 'clicks' ? 'click tìm kiếm' : 'hiển thị tìm kiếm'}
-            accentColor="emerald"
-            loading={loading}
-          />
-          <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
-            <span>Điểm vàng: dữ liệu Search Console sơ bộ (độ trễ chốt 1–2 ngày)</span>
-            <span>Điểm xám: chưa phát sinh dữ liệu ngày đó</span>
-          </div>
-        </div>
-
-        <div className="lg:col-span-4 bg-white border border-slate-200 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-bold text-slate-900">Biến động trang đích so kỳ trước</h2>
-              <button
-                type="button"
-                onClick={() => setActiveTab('pages')}
-                className="text-xs font-semibold text-[#1E3A8A] hover:underline"
-              >
-                Xem bảng Trang
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-500 mt-0.5">
-              {seo?.charts.pagesDeltaSummary?.comparisonNote ||
-                'Đối chiếu Click tìm kiếm của từng URL giữa kỳ này và kỳ liền trước.'}
-            </p>
-
-            <div className="mt-3 space-y-2.5 max-h-[230px] overflow-y-auto pr-1">
-              {(seo?.charts.pagesDeltaSummary?.risingPages.length || 0) === 0 &&
-              (seo?.charts.pagesDeltaSummary?.decliningPages.length || 0) === 0 ? (
-                <div className="py-10 text-center text-xs text-slate-400">
-                  Chưa có biến động lớn giữa hai kỳ đối chiếu trong phạm vi đang chọn.
+            <div className="flex flex-wrap items-center gap-2">
+              {(activeTab === 'queries' || activeTab === 'pages' || activeTab === 'content') && (
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="search"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Tìm từ khóa, URL hoặc tiêu đề..."
+                    className="h-8 pl-8 pr-3 rounded-lg border border-slate-200 text-xs text-slate-800 w-56 focus:outline-2 focus:outline-[#1E3A8A]"
+                  />
                 </div>
-              ) : (
-                <>
-                  {(seo?.charts.pagesDeltaSummary?.risingPages || []).slice(0, 3).map((row) => (
-                    <div
-                      key={`up-${row.key}`}
-                      className="rounded-lg border border-emerald-100 bg-emerald-50/40 px-2.5 py-2 text-xs"
-                    >
-                      <div className="font-mono text-[11px] text-slate-800 truncate" title={row.key}>
-                        {row.key}
-                      </div>
-                      <div className="mt-0.5 flex items-center justify-between text-[11px]">
-                        <span className="text-slate-600">{row.clicks} click kỳ này</span>
-                        <span className="font-semibold text-emerald-700 inline-flex items-center gap-0.5">
-                          <ArrowUpRight className="w-3 h-3" />+{row.clickChange ?? 0} click
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                  {(seo?.charts.pagesDeltaSummary?.decliningPages || []).slice(0, 3).map((row) => (
-                    <div
-                      key={`down-${row.key}`}
-                      className="rounded-lg border border-amber-100 bg-amber-50/50 px-2.5 py-2 text-xs"
-                    >
-                      <div className="font-mono text-[11px] text-slate-800 truncate" title={row.key}>
-                        {row.key}
-                      </div>
-                      <div className="mt-0.5 flex items-center justify-between text-[11px]">
-                        <span className="text-slate-600">{row.clicks} click kỳ này</span>
-                        <span className="font-semibold text-amber-800 inline-flex items-center gap-0.5">
-                          <ArrowDownRight className="w-3 h-3" />
-                          {row.clickChange ?? 0} click
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </>
+              )}
+              {activeTab === 'pages' && (
+                <button
+                  type="button"
+                  onClick={() => setShowUrlInspect((prev) => !prev)}
+                  className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
+                >
+                  <Globe className="w-3.5 h-3.5 text-slate-500" />
+                  <span>
+                    {showUrlInspect
+                      ? 'Ẩn trạng thái lập chỉ mục'
+                      : `Trạng thái trang trên Google (${data?.siteStatus.rows.length || 0})`}
+                  </span>
+                </button>
+              )}
+              {activeTab === 'content' && canEditContent && (
+                <button
+                  type="button"
+                  onClick={() => setShowCreateContentForm((prev) => !prev)}
+                  className="h-8 px-3 rounded-lg bg-[#0B1D48] text-white text-xs font-semibold hover:bg-[#172D6E] inline-flex items-center gap-1.5"
+                >
+                  <FilePlus2 className="w-3.5 h-3.5" />
+                  Thêm kế hoạch bài viết
+                </button>
               )}
             </div>
           </div>
 
-          <div className="pt-2.5 mt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-            <span>Cần xem quảng cáo trả phí?</span>
-            <Link href="/tracking" className="font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1">
-              Mở Chiến dịch · Quảng cáo
-              <ExternalLink className="w-3 h-3" />
-            </Link>
-          </div>
-        </div>
-      </section>
+          {activeTab === 'overview' && (
+            <div className="space-y-4">
+              <GscPerformanceChart
+                clicks={seo?.metrics.organicSearchClicks ?? null}
+                impressions={seo?.metrics.organicSearchImpressions ?? null}
+                ctrPct={seo?.metrics.organicSearchCtrPct ?? null}
+                avgPosition={seo?.metrics.averageSearchPosition ?? null}
+                previousClicks={seo?.comparison.previousClicks ?? null}
+                previousImpressions={seo?.comparison.previousImpressions ?? null}
+                series={seo?.charts.seoDailySeries || []}
+                previousSeries={seo?.charts.previousSeoDailySeries}
+                compareEnabled={compareEnabled}
+                loading={loading && !data}
+              />
 
-      {/* KHỐI CƠ HỘI TĂNG KHÁCH TRUY CẬP MIỄN PHÍ TỪ GOOGLE (rõ nghĩa, trực quan cho người dùng & Marketing) */}
+              {/* Phiên tự nhiên + Lead SEO (5 cột) + Biến động trang đích (7 cột) */}
+              <section className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                <div className="lg:col-span-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-3">
+                  <div className="rounded-[12px] bg-white border border-slate-200 p-4 shadow-2xs flex flex-col justify-between">
+                    <div className="text-xs font-medium text-slate-600">
+                      Phiên tìm kiếm tự nhiên
+                    </div>
+                    <div className="text-2xl font-bold text-slate-900 tabular-nums mt-1">
+                      <AnimatedMetricNumber value={seo?.metrics.organicSessions ?? null} />
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      {seo?.metrics.organicEngagementRatePct !== null &&
+                      seo?.metrics.organicEngagementRatePct !== undefined
+                        ? `Tỷ lệ tương tác: ${seo.metrics.organicEngagementRatePct}%`
+                        : 'Truy cập tự nhiên từ Google'}
+                    </div>
+                  </div>
+
+                  <div className="rounded-[12px] bg-white border border-slate-200 p-4 shadow-2xs flex flex-col justify-between">
+                    <div className="text-xs font-medium text-slate-600">
+                      Lead từ tìm kiếm tự nhiên
+                    </div>
+                    <div className="text-2xl font-bold text-[#0B1D48] tabular-nums mt-1">
+                      <AnimatedMetricNumber value={seo?.metrics.organicValidLeadCount ?? 0} />
+                    </div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      {seo?.metrics.organicLeadVerificationState === 'VERIFIED'
+                        ? 'Đối soát theo phiên truy cập'
+                        : 'Lead có nguồn tìm kiếm tự nhiên'}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-7 bg-white border border-slate-200 rounded-[12px] p-4 shadow-2xs flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="text-sm font-bold text-slate-900">Biến động trang đích so kỳ trước</h2>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('pages')}
+                        className="text-xs font-semibold text-[#1E3A8A] hover:underline"
+                      >
+                        Xem bảng Trang
+                      </button>
+                    </div>
+
+                    <div className="mt-3 space-y-2.5 max-h-[210px] overflow-y-auto pr-1">
+                      {(seo?.charts.pagesDeltaSummary?.risingPages.length || 0) === 0 &&
+                      (seo?.charts.pagesDeltaSummary?.decliningPages.length || 0) === 0 ? (
+                        <div className="py-8 text-center text-xs text-slate-400">
+                          Chưa có biến động lớn giữa hai kỳ đối chiếu trong phạm vi đang chọn.
+                        </div>
+                      ) : (
+                        <>
+                          {(seo?.charts.pagesDeltaSummary?.risingPages || []).slice(0, 3).map((row) => (
+                            <div
+                              key={`up-${row.key}`}
+                              className="rounded-lg border border-emerald-100 bg-emerald-50/40 px-2.5 py-2 text-xs"
+                            >
+                              <div className="font-mono text-[11px] text-slate-800 truncate" title={row.key}>
+                                {row.key}
+                              </div>
+                              <div className="mt-0.5 flex items-center justify-between text-[11px]">
+                                <span className="text-slate-600">{row.clicks} click kỳ này</span>
+                                <span className="font-semibold text-emerald-700 inline-flex items-center gap-0.5">
+                                  <ArrowUpRight className="w-3 h-3" />+{row.clickChange ?? 0} click
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                          {(seo?.charts.pagesDeltaSummary?.decliningPages || []).slice(0, 3).map((row) => (
+                            <div
+                              key={`down-${row.key}`}
+                              className="rounded-lg border border-amber-100 bg-amber-50/50 px-2.5 py-2 text-xs"
+                            >
+                              <div className="font-mono text-[11px] text-slate-800 truncate" title={row.key}>
+                                {row.key}
+                              </div>
+                              <div className="mt-0.5 flex items-center justify-between text-[11px]">
+                                <span className="text-slate-600">{row.clicks} click kỳ này</span>
+                                <span className="font-semibold text-amber-800 inline-flex items-center gap-0.5">
+                                  <ArrowDownRight className="w-3 h-3" />
+                                  {row.clickChange ?? 0} click
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="pt-2.5 mt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                    <span>Quảng cáo trả phí</span>
+                    <Link href="/tracking?section=ads_campaigns" className="font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1">
+                      Mở Google Ads
+                      <ExternalLink className="w-3 h-3" />
+                    </Link>
+                  </div>
+                </div>
+              </section>
+
+      {/* Từ khóa cơ hội */}
       <section
         aria-labelledby="seo-quick-win-heading"
         className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs space-y-3.5"
@@ -775,14 +909,14 @@ export function SeoKeywordsWorkspace() {
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h2 id="seo-quick-win-heading" className="text-sm sm:text-base font-bold text-slate-900">
-                Từ khóa dễ tăng khách truy cập ngay
+                Từ khóa cơ hội
               </h2>
               <span className="px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200 text-xs font-bold tabular-nums">
-                {seo?.charts.opportunityQueries.length || 0} từ khóa tiềm năng
+                {seo?.charts.opportunityQueries.length || 0} từ khóa
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Các từ khóa này đã có nhiều người nhìn thấy trên Google nhưng tỷ lệ bấm vào web còn thấp — chỉ cần viết bài chuyên sâu hoặc đặt lại tiêu đề thu hút hơn để tăng lượt khách vào miễn phí.
+              Hiển thị nhiều nhưng tỷ lệ nhấp còn thấp — nên tối ưu lại tiêu đề hoặc nội dung.
             </p>
           </div>
 
@@ -899,7 +1033,7 @@ export function SeoKeywordsWorkspace() {
           </div>
         )}
 
-        {showUrlInspect && (
+        {activeTab === 'overview' && showUrlInspect && (
           <div className="pt-2 border-t border-slate-100 space-y-2">
             <div className="text-[11px] text-slate-500">
               Lưu ý kỹ thuật: {data?.siteStatus.statusMessage || 'Dữ liệu URL Inspection kiểm tra từng URL cụ thể, không đại diện toàn bộ lỗi thu thập toàn trang.'}
@@ -937,76 +1071,58 @@ export function SeoKeywordsWorkspace() {
           </div>
         )}
       </section>
+          </div>
+          )}
 
-      {/* Bảng dữ liệu chính với 4 tab ngắn: Từ khóa · Trang · Nội dung · Xu hướng */}
+      {activeTab === 'pages' && showUrlInspect && (
+        <section className="bg-white border border-slate-200 rounded-[12px] p-4 shadow-2xs space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold text-slate-900">
+              Trạng thái trang trên Google ({data?.siteStatus.rows.length || 0})
+            </h3>
+            <span className="text-[11px] text-slate-500">
+              {data?.siteStatus.statusMessage || 'Dữ liệu URL Inspection kiểm tra từng URL cụ thể.'}
+            </span>
+          </div>
+          {(data?.siteStatus.rows.length || 0) === 0 ? (
+            <div className="text-xs text-slate-500 py-2">Chưa có bản ghi kiểm tra URL đơn lẻ trong phạm vi này.</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 text-slate-500 text-left">
+                    <th className="py-2 pr-3 font-semibold">URL kiểm tra</th>
+                    <th className="py-2 px-3 font-semibold">Kết luận lập chỉ mục</th>
+                    <th className="py-2 px-3 font-semibold">Trạng thái thu thập</th>
+                    <th className="py-2 pl-3 font-semibold">Lần Google thu thập gần nhất</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {data!.siteStatus.rows.slice(0, 10).map((u) => (
+                    <tr key={u.url}>
+                      <td className="py-2 pr-3 font-mono text-[11px] text-slate-800 max-w-[360px] truncate" title={u.url}>
+                        {u.url}
+                      </td>
+                      <td className="py-2 px-3 font-medium text-slate-700">{u.verdict}</td>
+                      <td className="py-2 px-3 text-slate-600">{u.coverageState}</td>
+                      <td className="py-2 pl-3 text-slate-500">
+                        {u.lastCrawlTime ? new Date(u.lastCrawlTime).toLocaleString('vi-VN') : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Bảng dữ liệu chính theo mục đã chọn trên thanh dọc */}
+      {activeTab !== 'overview' && (
       <section
         className="bg-white border border-slate-200 rounded-[12px] shadow-2xs overflow-hidden"
         style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 380px' }}
       >
-        <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-          <div role="tablist" aria-label="Phân mục Từ khóa & SEO" className="flex flex-wrap items-center gap-1.5">
-            {(
-              [
-                { id: 'queries', label: 'Từ khóa', count: seo?.tables.queries.totalRows },
-                { id: 'pages', label: 'Trang', count: seo?.tables.pages.totalRows },
-                { id: 'content', label: 'Nội dung', count: seo?.tables.content?.totalRows },
-                { id: 'trends', label: 'Xu hướng', count: data?.trends.rows.length },
-              ] as const
-            ).map((tab) => {
-              const selected = activeTab === tab.id;
-              return (
-                <button
-                  key={tab.id}
-                  role="tab"
-                  type="button"
-                  aria-selected={selected}
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`h-8 px-3 rounded-lg text-xs font-semibold transition inline-flex items-center gap-1.5 ${
-                    selected
-                      ? 'bg-[#0B1D48] text-white'
-                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                  }`}
-                >
-                  <span>{tab.label}</span>
-                  {typeof tab.count === 'number' && (
-                    <span
-                      className={`px-1.5 py-0.2 rounded text-[11px] tabular-nums ${
-                        selected ? 'bg-white/20 text-white' : 'bg-white text-slate-600'
-                      }`}
-                    >
-                      {tab.count}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {activeTab !== 'trends' && (
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="search"
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Tìm từ khóa, URL hoặc tiêu đề..."
-                  className="h-8 pl-8 pr-3 rounded-lg border border-slate-200 text-xs text-slate-800 w-56 focus:outline-2 focus:outline-[#1E3A8A]"
-                />
-              </div>
-            )}
-            {activeTab === 'content' && canEditContent && (
-              <button
-                type="button"
-                onClick={() => setShowCreateContentForm((prev) => !prev)}
-                className="h-8 px-3 rounded-lg bg-[#0B1D48] text-white text-xs font-semibold hover:bg-[#172D6E] inline-flex items-center gap-1.5"
-              >
-                <FilePlus2 className="w-3.5 h-3.5" />
-                Thêm kế hoạch bài viết
-              </button>
-            )}
-          </div>
-        </div>
 
         {activeTab === 'content' && showCreateContentForm && canEditContent && (
           <form
@@ -1068,120 +1184,191 @@ export function SeoKeywordsWorkspace() {
         )}
 
         {activeTab === 'queries' && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                  <th scope="col" className="py-2.5 px-4 text-left font-semibold">Từ khóa tìm kiếm</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">Hiển thị tìm kiếm</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">CTR</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">Vị trí trung bình</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">So kỳ trước</th>
-                  {canEditContent && (
-                    <th scope="col" className="py-2.5 px-4 text-right font-semibold">Kế hoạch nội dung</th>
-                  )}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {queryRowsFiltered.length === 0 ? (
-                  <tr>
-                    <td colSpan={canEditContent ? 7 : 6} className="py-10 text-center text-slate-400">
-                      Không có truy vấn tìm kiếm trong phạm vi đang chọn.
-                    </td>
+          <div className="space-y-0">
+            {crossFilterPage && (
+              <div className="px-4 py-2.5 bg-blue-50/80 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs text-blue-900">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="font-semibold shrink-0">Đang lọc từ khóa thuộc URL:</span>
+                  <span className="font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-blue-200 truncate max-w-[460px]" title={crossFilterPage}>
+                    {crossFilterPage}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCrossFilterPage(null)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-white border border-blue-200 hover:bg-blue-100 text-[11px] font-semibold text-blue-900 shrink-0"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Xóa lọc</span>
+                </button>
+              </div>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                    <th scope="col" className="py-2.5 px-4 text-left font-semibold">Từ khóa tìm kiếm</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">Hiển thị tìm kiếm</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">CTR</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">Vị trí trung bình</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">So kỳ trước</th>
+                    <th scope="col" className="py-2.5 px-4 text-right font-semibold">Thao tác</th>
                   </tr>
-                ) : (
-                  queryRowsFiltered.map((r) => {
-                    const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
-                    return (
-                      <tr key={r.key} className="hover:bg-slate-50/70">
-                        <td className="py-2.5 px-4 font-medium text-slate-900 max-w-[320px] truncate" title={r.key}>
-                          {r.key}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
-                          {r.clicks.toLocaleString('vi-VN')}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                          {r.impressions.toLocaleString('vi-VN')}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                          {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                          {r.averagePosition !== null ? r.averagePosition : '—'}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-[11px] text-slate-600 tabular-nums">
-                          {cmp.label}
-                        </td>
-                        {canEditContent && (
-                          <td className="py-2.5 px-4 text-right">
-                            <button
-                              type="button"
-                              onClick={() => handleQuickPlanKeyword(r.key)}
-                              className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
-                            >
-                              Đưa vào nội dung
-                            </button>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {queryRowsFiltered.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-slate-400">
+                        Không có truy vấn tìm kiếm trong phạm vi đang chọn.
+                      </td>
+                    </tr>
+                  ) : (
+                    queryRowsFiltered.map((r) => {
+                      const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
+                      return (
+                        <tr key={r.key} className="hover:bg-slate-50/70">
+                          <td className="py-2.5 px-4 font-medium text-slate-900 max-w-[320px] truncate" title={r.key}>
+                            {r.key}
                           </td>
-                        )}
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+                          <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                            {r.clicks.toLocaleString('vi-VN')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.impressions.toLocaleString('vi-VN')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.averagePosition !== null ? r.averagePosition : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-[11px] text-slate-600 tabular-nums">
+                            {cmp.label}
+                          </td>
+                          <td className="py-2.5 px-4 text-right space-x-2 whitespace-nowrap">
+                            {queryPageLinks.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCrossFilterQuery(r.key);
+                                  setCrossFilterPage(null);
+                                  setActiveTab('pages');
+                                }}
+                                className="text-[11px] font-semibold text-emerald-700 hover:underline"
+                                title="Xem trang đích của từ khóa này"
+                              >
+                                Xem trang →
+                              </button>
+                            )}
+                            {canEditContent && (
+                              <button
+                                type="button"
+                                onClick={() => handleQuickPlanKeyword(r.key)}
+                                className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
+                              >
+                                Đưa vào nội dung
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
         {activeTab === 'pages' && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                  <th scope="col" className="py-2.5 px-4 text-left font-semibold">URL trang đích</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">Hiển thị tìm kiếm</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">CTR</th>
-                  <th scope="col" className="py-2.5 px-3 text-right font-semibold">Vị trí trung bình</th>
-                  <th scope="col" className="py-2.5 px-4 text-right font-semibold">Thay đổi Click so kỳ trước</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {pageRowsFiltered.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="py-10 text-center text-slate-400">
-                      Không có dữ liệu trang đích trong phạm vi đang chọn.
-                    </td>
+          <div className="space-y-0">
+            {crossFilterQuery && (
+              <div className="px-4 py-2.5 bg-emerald-50/80 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs text-emerald-900">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="font-semibold shrink-0">Đang lọc trang đích cho từ khóa:</span>
+                  <span className="font-semibold bg-white px-2 py-0.5 rounded border border-emerald-200 truncate max-w-[460px]">
+                    &ldquo;{crossFilterQuery}&rdquo;
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCrossFilterQuery(null)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-white border border-emerald-200 hover:bg-emerald-100 text-[11px] font-semibold text-emerald-900 shrink-0"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Xóa lọc</span>
+                </button>
+              </div>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                    <th scope="col" className="py-2.5 px-4 text-left font-semibold">URL trang đích</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">Hiển thị tìm kiếm</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">CTR</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">Vị trí trung bình</th>
+                    <th scope="col" className="py-2.5 px-3 text-right font-semibold">So kỳ trước</th>
+                    {queryPageLinks.length > 0 && (
+                      <th scope="col" className="py-2.5 px-4 text-right font-semibold">Từ khóa</th>
+                    )}
                   </tr>
-                ) : (
-                  pageRowsFiltered.map((r) => {
-                    const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
-                    return (
-                      <tr key={r.key} className="hover:bg-slate-50/70">
-                        <td className="py-2.5 px-4 font-mono text-[11px] text-slate-800 max-w-[420px] truncate" title={r.key}>
-                          {r.key}
-                        </td>
-                        <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
-                          {r.clicks.toLocaleString('vi-VN')}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                          {r.impressions.toLocaleString('vi-VN')}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                          {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
-                        </td>
-                        <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                          {r.averagePosition !== null ? r.averagePosition : '—'}
-                        </td>
-                        <td className="py-2.5 px-4 text-right text-[11px] text-slate-600 tabular-nums">
-                          {cmp.label}
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {pageRowsFiltered.length === 0 ? (
+                    <tr>
+                      <td colSpan={queryPageLinks.length > 0 ? 7 : 6} className="py-10 text-center text-slate-400">
+                        Không có dữ liệu trang đích trong phạm vi đang chọn.
+                      </td>
+                    </tr>
+                  ) : (
+                    pageRowsFiltered.map((r) => {
+                      const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
+                      return (
+                        <tr key={r.key} className="hover:bg-slate-50/70">
+                          <td className="py-2.5 px-4 font-mono text-[11px] text-slate-800 max-w-[420px] truncate" title={r.key}>
+                            {r.key}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                            {r.clicks.toLocaleString('vi-VN')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.impressions.toLocaleString('vi-VN')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.averagePosition !== null ? r.averagePosition : '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-[11px] text-slate-600 tabular-nums">
+                            {cmp.label}
+                          </td>
+                          {queryPageLinks.length > 0 && (
+                            <td className="py-2.5 px-4 text-right whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCrossFilterPage(r.key);
+                                  setCrossFilterQuery(null);
+                                  setActiveTab('queries');
+                                }}
+                                className="text-[11px] font-semibold text-[#1E3A8A] hover:underline"
+                                title="Xem từ khóa kéo traffic vào trang này"
+                              >
+                                Từ khóa →
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
@@ -1245,323 +1432,100 @@ export function SeoKeywordsWorkspace() {
           </div>
         )}
 
-        {activeTab === 'trends' && (
-          <div className="p-5 space-y-4">
-            <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 text-xs text-slate-700 flex flex-wrap items-center justify-between gap-3">
-              <div className="space-y-1">
-                <div className="font-bold text-slate-900 flex items-center gap-2">
-                  <span>Nguồn xu hướng thị trường (Google Trends Việt Nam):</span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full font-semibold ${
-                      data?.trends.status === 'CONNECTED'
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-amber-100 text-amber-800'
-                    }`}
-                  >
-                    {data?.trends.status === 'CONNECTED' ? 'Đã kết nối trực tiếp' : UI_VOCABULARY.fallbacks.unconnected}
-                  </span>
-                </div>
-                <p className="text-slate-600">
-                  {data?.trends.statusMessage ||
-                    'Đang kết nối dữ liệu thực tế từ Google Trends RSS Việt Nam & Google Suggest VN.'}
-                </p>
+        {activeTab === 'devices_countries' && (() => {
+          const allRows = seo?.tables.deviceCountry || [];
+          const deviceRows = allRows.filter((r) => r.dimensionType === 'DEVICE');
+          const countryRows = allRows.filter((r) => r.dimensionType === 'COUNTRY');
+          const renderDimTable = (
+            title: string,
+            subtitle: string,
+            rows: typeof allRows,
+            emptyMsg: string,
+          ) => (
+            <section className="rounded-xl border border-slate-200 overflow-hidden bg-white">
+              <div className="px-4 py-3 border-b border-slate-200 bg-slate-50/70">
+                <h3 className="text-xs font-bold text-slate-900">{title}</h3>
+                <p className="text-[11px] text-slate-500 mt-0.5">{subtitle}</p>
               </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5 cursor-pointer">
-                  <span>Nhập CSV từ Google Trends</span>
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      const reader = new FileReader();
-                      reader.onload = async () => {
-                        try {
-                          const csvText = String(reader.result || '');
-                          const res = await apiRequest<{ importedRows: number; terms: string[] }>(
-                            '/api/v1/ads/trends',
-                            {
-                              method: 'POST',
-                              csrfToken: user?.csrfToken,
-                              body: { action: 'import_csv', csvText },
-                            },
-                          );
-                          setContentStatusMsg(
-                            `Đã nhập ${res.importedRows} mốc chỉ số Google Trends (0–100) cho: ${res.terms.join(', ')}`,
-                          );
-                          invalidateApiCacheByDomains(['ads']);
-                          await fetchDashboard(true);
-                        } catch (err) {
-                          setErrorMsg(
-                            err instanceof Error ? err.message : 'Không thể đọc file CSV Google Trends.',
-                          );
-                        }
-                      };
-                      reader.readAsText(file);
-                      e.currentTarget.value = '';
-                    }}
-                  />
-                </label>
-
-                <button
-                  type="button"
-                  onClick={() => setShowSerpKeyForm((prev) => !prev)}
-                  className="min-h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700"
-                >
-                  {data?.trends.serpApiConfigured
-                    ? 'Đổi khóa SerpApi (0–100)'
-                    : 'Gắn khóa SerpApi (0–100)'}
-                </button>
-              </div>
-            </div>
-
-            {showSerpKeyForm && (
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  if (!serpApiKeyInput.trim() || savingSerpKey) return;
-                  setSavingSerpKey(true);
-                  setErrorMsg(null);
-                  try {
-                    await apiRequest('/api/v1/ads/trends', {
-                      method: 'POST',
-                      csrfToken: user?.csrfToken,
-                      body: { action: 'save_serpapi_key', apiKey: serpApiKeyInput.trim() },
-                    });
-                    setSerpApiKeyInput('');
-                    setShowSerpKeyForm(false);
-                    setContentStatusMsg('Đã lưu khóa SerpApi để đồng bộ chỉ số Google Trends 0–100 tự động.');
-                    invalidateApiCacheByDomains(['ads']);
-                    await fetchDashboard(true);
-                  } catch (err) {
-                    setErrorMsg(err instanceof Error ? err.message : 'Không thể lưu khóa SerpApi.');
-                  } finally {
-                    setSavingSerpKey(false);
-                  }
-                }}
-                className="rounded-xl border border-slate-200 bg-slate-50 p-3.5 flex flex-wrap items-center gap-2.5 text-xs"
-              >
-                <input
-                  type="password"
-                  value={serpApiKeyInput}
-                  onChange={(e) => setSerpApiKeyInput(e.target.value)}
-                  placeholder="Dán SERPAPI_API_KEY để bật kéo chuỗi điểm 0–100 tự động..."
-                  className="flex-1 min-w-[260px] h-9 px-3 rounded-lg border border-slate-200 bg-white"
-                />
-                <button
-                  type="submit"
-                  disabled={savingSerpKey}
-                  className="h-9 px-3.5 rounded-lg bg-[#0B1D48] text-white font-semibold hover:bg-[#172D6E] disabled:opacity-50"
-                >
-                  {savingSerpKey ? 'Đang lưu...' : 'Lưu khóa'}
-                </button>
-              </form>
-            )}
-
-            {/* Thanh tra cứu trực tiếp từ khóa trên Google Việt Nam */}
-            <form
-              onSubmit={async (e) => {
-                e.preventDefault();
-                if (!trendLookupInput.trim() || trendLookupBusy) return;
-                setTrendLookupBusy(true);
-                setErrorMsg(null);
-                try {
-                  const res = await apiRequest<{ keyword: string; suggestions: string[] }>(
-                    '/api/v1/ads/trends',
-                    {
-                      method: 'POST',
-                      csrfToken: user?.csrfToken,
-                      body: { action: 'lookup_keyword', keyword: trendLookupInput.trim() },
-                    },
-                  );
-                  setTrendLookupResults(res.suggestions || []);
-                } catch (err) {
-                  setErrorMsg(err instanceof Error ? err.message : 'Không thể tra cứu xu hướng.');
-                } finally {
-                  setTrendLookupBusy(false);
-                }
-              }}
-              className="rounded-xl border border-slate-200 bg-white p-3.5 space-y-2.5"
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="text"
-                  value={trendLookupInput}
-                  onChange={(e) => setTrendLookupInput(e.target.value)}
-                  placeholder="Nhập chủ đề cần tra cứu xu hướng Google VN (VD: màn hình led p2.5, bảng led ma trận...)"
-                  className="flex-1 min-w-[260px] h-9 px-3 rounded-lg border border-slate-200 text-xs text-slate-800"
-                />
-                <button
-                  type="submit"
-                  disabled={trendLookupBusy}
-                  className="h-9 px-4 rounded-lg bg-[#0B1D48] text-white text-xs font-semibold hover:bg-[#172D6E] disabled:opacity-50"
-                >
-                  {trendLookupBusy ? 'Đang tra cứu...' : 'Tra cứu Google VN'}
-                </button>
-                {data?.trends.serpApiConfigured && (
-                  <button
-                    type="button"
-                    disabled={trendLookupBusy || !trendLookupInput.trim()}
-                    onClick={async () => {
-                      if (!trendLookupInput.trim()) return;
-                      setTrendLookupBusy(true);
-                      setErrorMsg(null);
-                      try {
-                        const res = await apiRequest<{ syncedPoints: number; relatedRising: string[] }>(
-                          '/api/v1/ads/trends',
-                          {
-                            method: 'POST',
-                            csrfToken: user?.csrfToken,
-                            body: { action: 'sync_serpapi', keyword: trendLookupInput.trim() },
-                          },
-                        );
-                        setTrendLookupResults(res.relatedRising || []);
-                        setContentStatusMsg(
-                          `Đã đồng bộ ${res.syncedPoints} ngày chỉ số Google Trends (0–100) cho "${trendLookupInput.trim()}".`,
-                        );
-                        invalidateApiCacheByDomains(['ads']);
-                        await fetchDashboard(true);
-                      } catch (err) {
-                        setErrorMsg(err instanceof Error ? err.message : 'Đồng bộ SerpApi thất bại.');
-                      } finally {
-                        setTrendLookupBusy(false);
-                      }
-                    }}
-                    className="h-9 px-3.5 rounded-lg bg-emerald-700 text-white text-xs font-semibold hover:bg-emerald-800 disabled:opacity-50"
-                  >
-                    Lấy chuỗi điểm 0–100
-                  </button>
-                )}
-              </div>
-
-              {trendLookupResults && (
-                <div className="pt-2 border-t border-slate-100 space-y-1.5">
-                  <div className="text-xs font-semibold text-slate-700">
-                    Các cụm tìm kiếm thực tế đang phổ biến trên Google Việt Nam ({trendLookupResults.length}):
-                  </div>
-                  {trendLookupResults.length === 0 ? (
-                    <div className="text-xs text-slate-500">Không có gợi ý mở rộng cho cụm từ này.</div>
-                  ) : (
-                    <div className="flex flex-wrap gap-2">
-                      {trendLookupResults.map((sug) => (
-                        <div
-                          key={sug}
-                          className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50/50 px-2.5 py-1 text-xs"
-                        >
-                          <span className="font-medium text-slate-900">{sug}</span>
-                          {canEditContent && (
-                            <button
-                              type="button"
-                              onClick={() => handleQuickPlanKeyword(sug)}
-                              className="font-semibold text-[#1E3A8A] hover:underline"
-                            >
-                              + Lên bài
-                            </button>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </form>
-
-            {/* Gợi ý tìm kiếm thực tế ngành Màn hình LED & Bảng điện tử tại Việt Nam */}
-            {(data?.trends.industrySuggestions?.length || 0) > 0 && (
-              <div className="space-y-2.5">
-                <h3 className="text-xs font-bold text-slate-900">
-                  Xu hướng cụm từ tìm kiếm ngành Màn hình LED &amp; Bảng điện tử trên Google Việt Nam
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {data!.trends.industrySuggestions!.map((group) => (
-                    <div
-                      key={group.seedTerm}
-                      className="rounded-xl border border-slate-200 bg-slate-50/60 p-3 space-y-2"
-                    >
-                      <div className="text-xs font-bold text-[#0B1D48]">
-                        Nhóm chủ đề gốc: {group.seedTerm}
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {group.suggestions.map((kw) => (
-                          <div
-                            key={kw}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs"
-                          >
-                            <span className="text-slate-800">{kw}</span>
-                            {canEditContent && (
-                              <button
-                                type="button"
-                                onClick={() => handleQuickPlanKeyword(kw)}
-                                className="text-[#1E3A8A] font-semibold hover:underline"
-                                title="Đưa cụm từ này vào kế hoạch nội dung"
-                              >
-                                + Bài
-                              </button>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Bảng dữ liệu chỉ số 0–100 hoặc Xu hướng nổi bật Google Trends RSS Việt Nam */}
-            {(data?.trends.rows.length || 0) > 0 && (
-              <div className="space-y-2">
-                <h3 className="text-xs font-bold text-slate-900">
-                  {data!.trends.rows[0]?.scaleType === 'INDEX_0_100'
-                    ? 'Chuỗi chỉ số quan tâm Google Trends theo thời gian (Thang 0–100)'
-                    : 'Xu hướng tìm kiếm nổi bật trong ngày tại Việt Nam (Google Trends RSS trực tiếp)'}
-                </h3>
-                <div className="overflow-x-auto rounded-xl border border-slate-200">
-                  <table className="w-full text-xs border-collapse">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
-                        <th scope="col" className="py-2.5 px-3 text-left font-semibold">Chủ đề / Từ khóa</th>
-                        <th scope="col" className="py-2.5 px-3 text-left font-semibold">Khu vực</th>
-                        <th scope="col" className="py-2.5 px-3 text-right font-semibold">
-                          {data!.trends.rows[0]?.scaleType === 'INDEX_0_100'
-                            ? 'Chỉ số quan tâm (0–100)'
-                            : 'Lưu lượng tìm kiếm xấp xỉ'}
-                        </th>
-                        <th scope="col" className="py-2.5 px-3 text-left font-semibold">Ngữ cảnh / Nguồn</th>
-                        <th scope="col" className="py-2.5 px-3 text-right font-semibold">Ngày ghi nhận</th>
+              <div className="overflow-x-auto max-h-[380px]">
+                <table className="w-full text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 sticky top-0">
+                      <th scope="col" className="py-2 px-4 text-left font-semibold">Phân loại</th>
+                      <th scope="col" className="py-2 px-3 text-right font-semibold">Click</th>
+                      <th scope="col" className="py-2 px-3 text-right font-semibold">Hiển thị</th>
+                      <th scope="col" className="py-2 px-3 text-right font-semibold">CTR</th>
+                      <th scope="col" className="py-2 px-4 text-right font-semibold">Vị trí TB</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {rows.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-8 text-center text-slate-400">
+                          {emptyMsg}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {data!.trends.rows.map((tr, idx) => (
-                        <tr key={`${tr.term}-${idx}`} className="hover:bg-slate-50/70">
-                          <td className="py-2.5 px-3 font-semibold text-slate-900">{tr.term}</td>
-                          <td className="py-2.5 px-3 text-slate-600">{tr.geoName}</td>
-                          <td className="py-2.5 px-3 text-right font-bold text-[#0B1D48] tabular-nums">
-                            {tr.interestValue !== null && tr.interestValue !== undefined
-                              ? tr.interestValue
-                              : tr.approxTrafficLabel || 'Đang tăng'}
+                    ) : (
+                      rows.map((r) => (
+                        <tr key={`${r.dimensionType}-${r.dimensionKey}`} className="hover:bg-slate-50/70">
+                          <th scope="row" className="py-2.5 px-4 font-semibold text-slate-900 text-left">
+                            {r.dimensionKey}
+                          </th>
+                          <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                            {r.clicks.toLocaleString('vi-VN')}
                           </td>
-                          <td className="py-2.5 px-3 text-slate-600 max-w-[320px] truncate" title={tr.newsHeadline || ''}>
-                            {tr.newsHeadline
-                              ? `${tr.newsHeadline}${tr.newsSource ? ` (${tr.newsSource})` : ''}`
-                              : tr.scaleType === 'INDEX_0_100'
-                                ? 'Google Trends (0–100)'
-                                : 'Google Trends RSS VN'}
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.impressions.toLocaleString('vi-VN')}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-500 tabular-nums">{tr.date}</td>
+                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
+                          </td>
+                          <td className="py-2.5 px-4 text-right text-slate-600 tabular-nums">
+                            {r.averagePosition !== null ? r.averagePosition : '—'}
+                          </td>
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
-            )}
-          </div>
+            </section>
+          );
+
+          return (
+            <div className="p-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              {renderDimTable(
+                `Theo Thiết bị (${deviceRows.length})`,
+                'Tìm kiếm theo Desktop, Mobile, Tablet',
+                deviceRows,
+                'Chưa có dữ liệu thiết bị trong kỳ đang chọn.',
+              )}
+              {renderDimTable(
+                `Theo Quốc gia (${countryRows.length})`,
+                'Quốc gia phát sinh lượt tìm kiếm',
+                countryRows,
+                'Chưa có dữ liệu quốc gia trong kỳ đang chọn.',
+              )}
+            </div>
+          );
+        })()}
+
+        {activeTab === 'trends' && (
+          <GoogleTrendsExplorePanel
+            trends={data?.trends}
+            csrfToken={user?.csrfToken}
+            canEditContent={canEditContent}
+            onQuickPlanKeyword={handleQuickPlanKeyword}
+            onRefreshed={async () => {
+              await fetchDashboard(true);
+            }}
+            onError={(msg) => setErrorMsg(msg)}
+            onSuccess={(msg) => setContentStatusMsg(msg)}
+          />
         )}
 
-        {activeTab !== 'trends' && totalPages > 1 && (
+        {(activeTab === 'queries' || activeTab === 'pages' || activeTab === 'content') &&
+          totalPages > 1 && (
           <div className="px-4 py-2.5 border-t border-slate-100 flex items-center justify-between text-xs text-slate-600">
             <span>
               Trang {currentPageNum} / {totalPages} ({activeTotalRows.toLocaleString('vi-VN')} dòng)
@@ -1599,6 +1563,9 @@ export function SeoKeywordsWorkspace() {
           </div>
         )}
       </section>
+      )}
+        </div>
+      </div>
     </div>
   );
 }

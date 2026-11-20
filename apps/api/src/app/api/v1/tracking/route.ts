@@ -39,6 +39,10 @@ export async function GET(req: Request) {
     if (view === 'spec') {
       const adsPage = Number(url.searchParams.get('adsPage') || 1);
       const adsPageSize = Number(url.searchParams.get('adsPageSize') || 20);
+      const rawAdsScope = url.searchParams.get('adsScope');
+      const adsScope =
+        rawAdsScope === 'all' ? 'all' : rawAdsScope === 'website' ? 'website' : undefined;
+      const compare = url.searchParams.get('compare') === '1';
       const m02 = await getM02TrafficInteractionSpec({
         websiteId,
         preset,
@@ -48,6 +52,8 @@ export async function GET(req: Request) {
         pageSize,
         adsPage,
         adsPageSize,
+        adsScope,
+        compare,
       });
       return jsonSuccess(m02);
     }

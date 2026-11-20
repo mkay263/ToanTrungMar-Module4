@@ -81,8 +81,23 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const { user, loading, unreadCount, setUnreadCountState, logout } = useSession();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    pathname === '/design' || pathname === '/ai-design',
+    () =>
+      pathname === '/design' ||
+      pathname === '/ai-design' ||
+      pathname === '/tracking' ||
+      pathname === '/ads' ||
+      pathname === '/reports',
   );
+
+  useEffect(() => {
+    setSidebarCollapsed(
+      pathname === '/design' ||
+        pathname === '/ai-design' ||
+        pathname === '/tracking' ||
+        pathname === '/ads' ||
+        pathname === '/reports',
+    );
+  }, [pathname]);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [globalSearchText, setGlobalSearchText] = useState('');
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
@@ -137,10 +152,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const [recentNotifications, setRecentNotifications] = useState<NotificationDto[]>([]);
   const [loadingBell, setLoadingBell] = useState(false);
   const bellRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    setSidebarCollapsed(pathname === '/design' || pathname === '/ai-design');
-  }, [pathname]);
 
   const fetchBellNotifications = useCallback(async () => {
     setLoadingBell(true);
