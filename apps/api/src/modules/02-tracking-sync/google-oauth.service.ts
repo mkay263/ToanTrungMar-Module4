@@ -120,6 +120,7 @@ const globalOAuthHelpers = globalThis as typeof globalThis & {
   __toantrungEnvClientCache?: StoredClientConfig | null;
   __toantrungEnvClientLoaded?: boolean;
   __toantrungTokenRefreshInFlight?: Promise<string | null> | null;
+  __toantrungOAuthKeepAliveStarted?: boolean;
 };
 
 export async function getGoogleClientConfig(): Promise<StoredClientConfig | null> {
@@ -780,12 +781,33 @@ export async function handleGoogleOAuthCallback(code: string, origin: string, st
     refreshToken: tokenData.refresh_token || existingConn?.refreshToken || null,
     expiresAt,
     isSandboxDemo: false,
+    connectionStatus: 'CONNECTED',
+    lastErrorCode: null,
+    lastErrorMessage: null,
     lastSyncAt: new Date().toISOString(),
     detectedGa4PropertyId: existingConn?.detectedGa4PropertyId && existingConn.detectedGa4PropertyId !== '213025502' ? existingConn.detectedGa4PropertyId : null,
     detectedGadsCustomerId: existingConn?.detectedGadsCustomerId && existingConn.detectedGadsCustomerId !== '889-102-4451' ? existingConn.detectedGadsCustomerId : null,
   };
 
   await saveGoogleConnection(updatedConn);
+
+  // Reset any stale Gmail 401/expired-token error state immediately upon fresh OAuth connection
+  try {
+    const cpRow = await prisma.systemSetting.findUnique({ where: { key: 'gmail_sync_checkpoint' } });
+    if (cpRow?.value) {
+      const parsedCp = JSON.parse(cpRow.value) as Record<string, unknown>;
+      parsedCp.accountKey = email.trim().toLowerCase();
+      parsedCp.lastError = null;
+      parsedCp.consecutiveFailures = 0;
+      await prisma.systemSetting.update({
+        where: { key: 'gmail_sync_checkpoint' },
+        data: { value: JSON.stringify(parsedCp) },
+      });
+    }
+  } catch {
+    // non-fatal checkpoint reset
+  }
+  bumpDomainRevisions(['leads', 'websites', 'tracking', 'ads', 'reports'], 'google_oauth_connected');
 
   // Non-destructive initial connection test & initial sync
   try {
@@ -865,7 +887,7 @@ export async function getValidAccessToken(): Promise<string | null> {
 
   // Needs refresh: coalesce concurrent refresh attempts across routes & warmers
   if (!conn.refreshToken) {
-    return conn.accessToken; // Fallback
+    return exp > 0 && exp <= now ? null : conn.accessToken;
   }
 
   if (globalOAuthHelpers.__toantrungTokenRefreshInFlight) {
@@ -875,37 +897,111 @@ export async function getValidAccessToken(): Promise<string | null> {
   const refreshPromise = (async () => {
     try {
       const cfg = await getGoogleClientConfig();
-      if (!cfg) return conn.accessToken;
+      if (!cfg) return exp > 0 && exp <= now ? null : conn.accessToken;
 
-      const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          client_id: cfg.clientId,
-          client_secret: cfg.clientSecret,
-          refresh_token: conn.refreshToken || '',
-          grant_type: 'refresh_token',
-        }).toString(),
-      });
-      if (tokenResp.ok) {
-        const data = (await tokenResp.json()) as { access_token?: string; expires_in?: number };
-        if (data.access_token) {
-          conn.accessToken = data.access_token;
-          conn.expiresAt = new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString();
-          await saveGoogleConnection(conn);
-          return data.access_token;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const tokenResp = await fetch('https://oauth2.googleapis.com/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              client_id: cfg.clientId,
+              client_secret: cfg.clientSecret,
+              refresh_token: conn.refreshToken || '',
+              grant_type: 'refresh_token',
+            }).toString(),
+          });
+          if (tokenResp.ok) {
+            const data = (await tokenResp.json()) as {
+              access_token?: string;
+              expires_in?: number;
+              refresh_token?: string;
+            };
+            if (data.access_token) {
+              conn.accessToken = data.access_token;
+              if (data.refresh_token) {
+                conn.refreshToken = data.refresh_token;
+              }
+              conn.expiresAt = new Date(Date.now() + (data.expires_in || 3600) * 1000).toISOString();
+              conn.connectionStatus = 'CONNECTED';
+              conn.lastErrorCode = null;
+              conn.lastErrorMessage = null;
+              await saveGoogleConnection(conn);
+              return data.access_token;
+            }
+          } else {
+            const errBody = await tokenResp.text().catch(() => '');
+            if (/invalid_grant|invalid_client|revoked/i.test(errBody)) {
+              conn.connectionStatus = 'EXPIRED';
+              conn.lastErrorCode = 'OAUTH_TOKEN_EXPIRED';
+              conn.lastErrorMessage =
+                'Phiên kết nối Google OAuth đã hết hạn hoặc bị thu hồi (Google OAuth chế độ Testing giới hạn 7 ngày). Vui lòng bấm Kết nối lại Google.';
+              conn.lastAttemptAt = new Date().toISOString();
+              await saveGoogleConnection(conn);
+              bumpDomainRevisions(['leads', 'tracking', 'ads', 'reports'], 'google_oauth_expired');
+              return null;
+            }
+            if (tokenResp.status >= 500 && attempt === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 800));
+              continue;
+            }
+            break;
+          }
+        } catch {
+          if (attempt === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 800));
+            continue;
+          }
         }
       }
-    } catch {
-      // ignore
     } finally {
       globalOAuthHelpers.__toantrungTokenRefreshInFlight = null;
     }
-    return conn.accessToken;
+    return exp > 0 && exp <= now ? null : conn.accessToken;
   })();
 
   globalOAuthHelpers.__toantrungTokenRefreshInFlight = refreshPromise;
   return refreshPromise;
+}
+
+/**
+ * Proactive OAuth Keep-Alive (independent of browser):
+ * Checks every 30 minutes and preemptively refreshes the Google access token
+ * when it is missing an expiry or within 20 minutes of expiring.
+ */
+export function ensureGoogleOAuthKeepAliveStarted(): void {
+  if (process.env.NODE_TEST_CONTEXT) return;
+  if (globalOAuthHelpers.__toantrungOAuthKeepAliveStarted) return;
+  globalOAuthHelpers.__toantrungOAuthKeepAliveStarted = true;
+
+  const runKeepAliveTick = async () => {
+    try {
+      const conn = await getGoogleConnection();
+      if (!conn?.connected || conn.isSandboxDemo || !conn.refreshToken || conn.connectionStatus === 'EXPIRED') {
+        return;
+      }
+      const exp = conn.expiresAt ? new Date(conn.expiresAt).getTime() : 0;
+      if (!exp || exp - Date.now() <= 20 * 60_000) {
+        await getValidAccessToken();
+      }
+    } catch {
+      // Keep-alive tick must never crash background server
+    }
+  };
+
+  const bootTimer = setTimeout(() => {
+    void runKeepAliveTick();
+  }, 15_000);
+  if (typeof bootTimer.unref === 'function') {
+    bootTimer.unref();
+  }
+
+  const interval = setInterval(() => {
+    void runKeepAliveTick();
+  }, 30 * 60 * 1000);
+  if (typeof interval.unref === 'function') {
+    interval.unref();
+  }
 }
 
 export const ALLOWED_COMPANY_GA4_PROPERTY_IDS = [

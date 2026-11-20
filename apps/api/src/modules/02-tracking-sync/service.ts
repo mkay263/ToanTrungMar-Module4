@@ -48,6 +48,7 @@ import { getGmailLeadSyncStatus } from '../01-leads/gmail-sync.service';
 import {
   bumpDomainRevisions,
   getOrComputeScopedCache,
+  getVietnamDateKey,
 } from '../../core/cache/server-data-cache';
 
 export { ALLOWED_COMPANY_GA4_PROPERTY_IDS, ALLOWED_COMPANY_GSC_SITES };
@@ -523,24 +524,45 @@ export function ensureTrackingBackgroundSchedulerStarted(): void {
   const checkAndRunScheduledSync = async () => {
     try {
       const conn = await getGoogleConnection();
-      if (!conn?.connected || conn.isSandboxDemo) return;
+      if (!conn?.connected || conn.isSandboxDemo || conn.connectionStatus === 'EXPIRED') return;
       const now = new Date();
       const vnHour = (now.getUTCHours() + 7) % 24;
       const vnMinute = now.getUTCMinutes();
+      const currentVnDay = getVietnamDateKey(now);
+
       let slot: TriggerPlatformSyncDto['scheduleSlot'] | null = null;
       if (vnHour === 2 && vnMinute < 20) slot = 'FULL_0200';
       else if (vnHour === 11 && vnMinute < 20) slot = 'LIGHT_1100';
       else if (vnHour === 17 && vnMinute < 20) slot = 'LIGHT_1700';
 
-      if (!slot) return;
-      const expectedRunType = slot === 'FULL_0200' ? 'full' : 'light';
-      const lastSync = await prisma.platformSyncLog.findFirst({
-        where: { runType: { in: [slot, expectedRunType] } },
-        orderBy: { completedAt: 'desc' },
-      });
-      if (lastSync?.completedAt && Date.now() - lastSync.completedAt.getTime() < 2 * 60 * 60 * 1000) {
-        return;
+      if (slot) {
+        const expectedRunType = slot === 'FULL_0200' ? 'full' : 'light';
+        const lastSlotSync = await prisma.platformSyncLog.findFirst({
+          where: { runType: { in: [slot, expectedRunType] } },
+          orderBy: { completedAt: 'desc' },
+        });
+        if (lastSlotSync?.completedAt && Date.now() - lastSlotSync.completedAt.getTime() < 2 * 60 * 60 * 1000) {
+          return;
+        }
+      } else {
+        // Automatic catch-up when server missed a scheduled window (e.g. PC was turned off)
+        const latestSync = await prisma.platformSyncLog.findFirst({
+          where: { status: { in: ['completed', 'success'] } },
+          orderBy: { completedAt: 'desc' },
+        });
+        const completedAt = latestSync?.completedAt ?? null;
+        const ageMs = completedAt ? Date.now() - completedAt.getTime() : Number.POSITIVE_INFINITY;
+        if (ageMs < 2 * 60 * 60 * 1000) return;
+
+        const lastSyncVnDay = completedAt ? getVietnamDateKey(completedAt) : '';
+        if (!completedAt || ageMs >= 20 * 60 * 60 * 1000 || (lastSyncVnDay && lastSyncVnDay !== currentVnDay)) {
+          slot = 'FULL_0200';
+        } else if (ageMs >= 6 * 60 * 60 * 1000) {
+          slot = 'LIGHT_1100';
+        }
       }
+
+      if (!slot) return;
       await triggerPlatformSyncExecution({
         scheduleSlot: slot,
         runGclidResolution: true,
@@ -550,6 +572,13 @@ export function ensureTrackingBackgroundSchedulerStarted(): void {
       // Background scheduler errors must not crash server process
     }
   };
+
+  const bootTimer = setTimeout(() => {
+    void checkAndRunScheduledSync();
+  }, 25_000);
+  if (typeof bootTimer.unref === 'function') {
+    bootTimer.unref();
+  }
 
   const timer = setInterval(() => {
     void checkAndRunScheduledSync();

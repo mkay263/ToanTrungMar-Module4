@@ -1111,12 +1111,19 @@ export function LeadsWorkspace() {
       connected: boolean;
       hasGmailScope: boolean;
       isSandboxDemo: boolean;
+      serverStatus?: 'RUNNING' | 'PAUSED' | 'ERROR';
       config?: { enabled?: boolean };
     }>('/api/v1/leads/gmail-sync', { skipCache: !showGmailSyncModal && gmailAutoSyncLive })
       .then((res) => {
         if (!active) return;
         setGmailAutoSyncLive(
-          Boolean(res.connected && res.hasGmailScope && !res.isSandboxDemo && res.config?.enabled),
+          Boolean(
+            res.connected &&
+              res.hasGmailScope &&
+              !res.isSandboxDemo &&
+              res.config?.enabled &&
+              res.serverStatus === 'RUNNING',
+          ),
         );
       })
       .catch(() => {

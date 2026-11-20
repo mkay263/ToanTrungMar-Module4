@@ -50,8 +50,15 @@ interface GmailSyncStatusPayload {
   connectedEmail: string | null;
   isSandboxDemo: boolean;
   hasGmailScope: boolean;
+  needsAuth?: boolean;
+  tokenExpired?: boolean;
   serverStatus?: 'RUNNING' | 'PAUSED' | 'ERROR';
   serverStatusReason?: string;
+  checkpoint?: {
+    lastError?: string | null;
+    consecutiveFailures?: number;
+    lastSuccessAt?: string | null;
+  } | null;
   syncMode?: 'GMAIL_PUSH_WITH_RECONCILIATION' | 'POLLING_WITH_RECONCILIATION';
   pushConfigured?: boolean;
   pushLimitationReason?: string | null;
@@ -241,7 +248,15 @@ export function GmailSyncModal({
     (status && status.connected && !status.isSandboxDemo && !status.hasGmailScope) ||
       runResult?.needsReauth,
   );
-  const needsAuth = Boolean((status && !status.connected) || runResult?.needsAuth);
+  const needsAuth = Boolean(
+    (status &&
+      (!status.connected ||
+        status.needsAuth ||
+        status.tokenExpired ||
+        status.checkpoint?.lastError === 'HTTP_401' ||
+        status.checkpoint?.lastError === 'TOKEN_EXPIRED')) ||
+      runResult?.needsAuth,
+  );
   const serverStatus = status?.serverStatus || (enabled ? 'RUNNING' : 'PAUSED');
   const recentLogs = status?.recentAuditLogs || [];
 
@@ -346,7 +361,13 @@ export function GmailSyncModal({
                       className="h-8 px-3 rounded-lg bg-[#1E3A8A] hover:bg-blue-800 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-60"
                     >
                       <Mail className="w-3.5 h-3.5" />
-                      <span>{needsReauth ? 'Cấp quyền đọc Gmail' : 'Kết nối Google'}</span>
+                      <span>
+                        {needsReauth
+                          ? 'Cấp quyền đọc Gmail'
+                          : status?.tokenExpired || (status?.connected && needsAuth)
+                            ? 'Kết nối lại Google'
+                            : 'Kết nối Google'}
+                      </span>
                     </button>
                   ) : (
                     <button

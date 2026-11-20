@@ -19,12 +19,42 @@ import { useSession } from '@/core/session/SessionContext';
 import { RealtimeLiveMotionIndicator } from '@/components/common/RealtimeLiveMotionIndicator';
 
 interface GmailSyncStatusResponse {
-  enabled: boolean;
-  query: string;
-  maxMessages: number;
-  pollIntervalSec: number;
-  onlyLeadKeywords: boolean;
+  connected?: boolean;
   connectedEmail?: string | null;
+  isSandboxDemo?: boolean;
+  hasGmailScope?: boolean;
+  needsAuth?: boolean;
+  tokenExpired?: boolean;
+  serverStatus?: 'RUNNING' | 'PAUSED' | 'ERROR';
+  serverStatusReason?: string;
+  lastAttemptAt?: string | null;
+  config?: {
+    enabled: boolean;
+    query: string;
+    maxMessages: number;
+    pollIntervalSec: number;
+    onlyLeadKeywords: boolean;
+    lastSyncAt: string | null;
+    lastSyncSummary: {
+      scanned: number;
+      created: number;
+      deduplicated: number;
+      skippedNoise: number;
+      failed: number;
+      error: string | null;
+    } | null;
+  };
+  checkpoint?: {
+    lastSuccessAt?: string | null;
+    lastError?: string | null;
+    consecutiveFailures?: number;
+  };
+  // Optional flat fallbacks
+  enabled?: boolean;
+  query?: string;
+  maxMessages?: number;
+  pollIntervalSec?: number;
+  onlyLeadKeywords?: boolean;
   lastRunAt?: string | null;
   lastSuccessAt?: string | null;
   lastError?: string | null;
@@ -45,6 +75,7 @@ export function AdminSyncCenterPanel() {
   const [busyMail, setBusyMail] = useState(false);
   const [busySaveMail, setBusySaveMail] = useState(false);
   const [busyGoogle, setBusyGoogle] = useState(false);
+  const [busyAuth, setBusyAuth] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<Date>(new Date());
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,11 +88,15 @@ export function AdminSyncCenterPanel() {
           skipCache: true,
         }),
       ]);
+      const cfg = mailRes.config;
       setGmailStatus(mailRes);
-      setEnabled(Boolean(mailRes.enabled));
-      setPollIntervalSec(Number(mailRes.pollIntervalSec || 30));
-      setOnlyLeadKeywords(Boolean(mailRes.onlyLeadKeywords));
-      setQuery(mailRes.query || '');
+      setEnabled(Boolean(cfg ? cfg.enabled : mailRes.enabled));
+      setPollIntervalSec(Number((cfg ? cfg.pollIntervalSec : mailRes.pollIntervalSec) || 30));
+      setOnlyLeadKeywords(Boolean(cfg ? cfg.onlyLeadKeywords : mailRes.onlyLeadKeywords));
+      setQuery(
+        (cfg ? cfg.query : mailRes.query) ||
+          'newer_than:14d -category:promotions -category:social',
+      );
       setGoogleStatus(googleRes.status);
       setLastSyncedAt(new Date());
     } catch (err) {
@@ -103,22 +138,51 @@ export function AdminSyncCenterPanel() {
     setNotice(null);
     setError(null);
     try {
-      const res = await apiRequest<{ createdCount?: number; scannedCount?: number }>(
-        '/api/v1/leads/gmail-sync',
-        {
-          method: 'POST',
-          csrfToken: user?.csrfToken,
-          body: { action: 'sync_now' },
-        },
-      );
-      setNotice(
-        `Đã quét ${res.scannedCount ?? 0} thư mới, tạo ${res.createdCount ?? 0} Lead từ Gmail.`,
-      );
+      const res = await apiRequest<{
+        ok?: boolean;
+        message?: string;
+        needsAuth?: boolean;
+        summary?: { scanned?: number; created?: number };
+        createdCount?: number;
+        scannedCount?: number;
+      }>('/api/v1/leads/gmail-sync', {
+        method: 'POST',
+        csrfToken: user?.csrfToken,
+        body: { action: 'sync_now' },
+      });
+      if (res.ok === false) {
+        setError(res.message || 'Không thể đồng bộ Gmail. Vui lòng kết nối lại Google.');
+      } else {
+        const scanned = res.summary?.scanned ?? res.scannedCount ?? 0;
+        const created = res.summary?.created ?? res.createdCount ?? 0;
+        setNotice(`Đã quét ${scanned} thư mới, tạo ${created} Lead từ Gmail.`);
+      }
       await loadAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Lỗi đồng bộ Gmail.');
     } finally {
       setBusyMail(false);
+    }
+  };
+
+  const handleReconnectGoogle = async () => {
+    setBusyAuth(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const res = await apiRequest<{ authUrl?: string | null; message?: string | null }>(
+        '/api/v1/auth/google/authorize?returnPath=/settings',
+        { skipCache: true },
+      );
+      if (res.authUrl) {
+        window.location.href = res.authUrl;
+        return;
+      }
+      setError(res.message || 'Chưa cấu hình Google Client ID & Client Secret.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể mở trang cấp quyền Google.');
+    } finally {
+      setBusyAuth(false);
     }
   };
 
@@ -140,6 +204,22 @@ export function AdminSyncCenterPanel() {
       setBusyGoogle(false);
     }
   };
+
+  const isGoogleExpired = Boolean(
+    googleStatus?.connectionStatus === 'EXPIRED' ||
+      gmailStatus?.tokenExpired ||
+      gmailStatus?.needsAuth,
+  );
+  const lastMailRunIso =
+    gmailStatus?.lastAttemptAt ||
+    gmailStatus?.config?.lastSyncAt ||
+    gmailStatus?.lastRunAt ||
+    gmailStatus?.checkpoint?.lastSuccessAt ||
+    null;
+  const mailErrorText =
+    gmailStatus?.serverStatus === 'ERROR'
+      ? gmailStatus?.serverStatusReason || gmailStatus?.checkpoint?.lastError || 'OAUTH_TOKEN_EXPIRED'
+      : gmailStatus?.checkpoint?.lastError || gmailStatus?.lastError || null;
 
   return (
     <div className="space-y-4">
@@ -186,11 +266,19 @@ export function AdminSyncCenterPanel() {
               </div>
             </div>
             <span
-              className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
-                enabled ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-600'
+              className={`px-2.5 py-1 rounded-full text-[11px] font-bold shrink-0 ${
+                !enabled
+                  ? 'bg-slate-100 text-slate-600'
+                  : isGoogleExpired || gmailStatus?.serverStatus === 'ERROR'
+                    ? 'bg-rose-50 text-rose-700'
+                    : 'bg-emerald-50 text-emerald-700'
               }`}
             >
-              {enabled ? 'Đang chạy ngầm' : 'Đã tạm dừng'}
+              {!enabled
+                ? 'Đã tạm dừng'
+                : isGoogleExpired || gmailStatus?.serverStatus === 'ERROR'
+                  ? 'Cần kết nối lại Google'
+                  : 'Đang chạy ngầm'}
             </span>
           </div>
 
@@ -233,14 +321,20 @@ export function AdminSyncCenterPanel() {
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+              <label htmlFor="admin-gmail-query-filter" className="block text-[11px] font-semibold text-slate-600 mb-1">
                 Bộ lọc tìm kiếm Gmail
               </label>
               <input
+                id="admin-gmail-query-filter"
+                name="admin_gmail_search_query_filter"
                 type="text"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="VD: toantrungco+truongvanlong"
+                placeholder="newer_than:14d -category:promotions -category:social"
                 className="w-full h-9 rounded-xl border border-slate-200 px-3 text-xs"
               />
             </div>
@@ -257,17 +351,28 @@ export function AdminSyncCenterPanel() {
               <span className="inline-flex items-center gap-1">
                 <Clock className="w-3 h-3" />
                 Kiểm tra gần nhất:{' '}
-                {gmailStatus?.lastRunAt
-                  ? new Date(gmailStatus.lastRunAt).toLocaleString('vi-VN')
+                {lastMailRunIso
+                  ? new Date(lastMailRunIso).toLocaleString('vi-VN')
                   : 'Chưa chạy'}
               </span>
-              {gmailStatus?.lastError && (
-                <span className="text-rose-600 font-medium">Lỗi: {gmailStatus.lastError}</span>
+              {mailErrorText && (
+                <span className="text-rose-600 font-medium">{mailErrorText}</span>
               )}
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 pt-1">
+            {(isGoogleExpired || !googleStatus?.connected) && (
+              <button
+                type="button"
+                onClick={() => void handleReconnectGoogle()}
+                disabled={busyAuth}
+                className="h-9 px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                <span>{busyAuth ? 'Đang mở Google...' : 'Kết nối lại Google'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handleSaveMailConfig()}
@@ -306,13 +411,19 @@ export function AdminSyncCenterPanel() {
               </div>
             </div>
             <span
-              className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
-                googleStatus?.connected
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-amber-50 text-amber-700'
+              className={`px-2.5 py-1 rounded-full text-[11px] font-bold shrink-0 ${
+                isGoogleExpired
+                  ? 'bg-rose-50 text-rose-700'
+                  : googleStatus?.connected
+                    ? 'bg-emerald-50 text-emerald-700'
+                    : 'bg-amber-50 text-amber-700'
               }`}
             >
-              {googleStatus?.connected ? 'Đã kết nối Google' : 'Chưa kết nối'}
+              {isGoogleExpired
+                ? 'Phiên Google hết hạn'
+                : googleStatus?.connected
+                  ? 'Đã kết nối Google'
+                  : 'Chưa kết nối'}
             </span>
           </div>
 
@@ -361,10 +472,21 @@ export function AdminSyncCenterPanel() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 pt-1">
+            {(isGoogleExpired || !googleStatus?.connected) && (
+              <button
+                type="button"
+                onClick={() => void handleReconnectGoogle()}
+                disabled={busyAuth}
+                className="h-9 px-3.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-60"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                <span>{busyAuth ? 'Đang mở Google...' : 'Kết nối lại Google'}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handleSyncGoogleNow()}
-              disabled={busyGoogle || !googleStatus?.connected}
+              disabled={busyGoogle || !googleStatus?.connected || isGoogleExpired}
               className="h-9 px-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold inline-flex items-center gap-1.5 disabled:opacity-60"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${busyGoogle ? 'animate-spin' : ''}`} />

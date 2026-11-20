@@ -388,6 +388,15 @@ export async function getGmailLeadSyncStatus() {
   let serverStatus: GmailServerStatus = 'RUNNING';
   let serverStatusReason = `Đang chạy tự động ở máy chủ (${pushCap.syncMode === 'GMAIL_PUSH_WITH_RECONCILIATION' ? 'Push + đối soát' : `Poller mỗi ${config.pollIntervalSec}s`})`;
 
+  const isTokenExpired = Boolean(
+    conn?.connected &&
+      !conn.isSandboxDemo &&
+      (conn.connectionStatus === 'EXPIRED' ||
+        checkpoint.lastError === 'TOKEN_EXPIRED' ||
+        checkpoint.lastError === 'HTTP_401' ||
+        checkpoint.lastError === 'OAUTH_TOKEN_EXPIRED'),
+  );
+
   if (!config.enabled) {
     serverStatus = 'PAUSED';
     serverStatusReason = 'Tự động tiếp nhận đang tạm dừng theo cấu hình máy chủ.';
@@ -398,6 +407,10 @@ export async function getGmailLeadSyncStatus() {
       : conn.isSandboxDemo
         ? 'Đang ở chế độ Sandbox Demo, chưa có kết nối Gmail thật.'
         : 'Thiếu quyền đọc Gmail (gmail.readonly).';
+  } else if (isTokenExpired) {
+    serverStatus = 'ERROR';
+    serverStatusReason =
+      'Phiên đăng nhập Google đã hết hạn hoặc bị Google thu hồi (chế độ Testing hết hạn sau 7 ngày). Vui lòng bấm "Kết nối lại Google" để tiếp tục tự động nhận Lead từ Gmail.';
   } else if (checkpoint.consecutiveFailures > 0 && checkpoint.lastError) {
     serverStatus = 'ERROR';
     serverStatusReason = `Lỗi đồng bộ gần nhất: ${checkpoint.lastError}`;
@@ -408,6 +421,8 @@ export async function getGmailLeadSyncStatus() {
     connectedEmail: conn?.connectedEmail ?? null,
     isSandboxDemo: Boolean(conn?.isSandboxDemo),
     hasGmailScope,
+    needsAuth: !conn?.connected || isTokenExpired,
+    tokenExpired: isTokenExpired,
     serverStatus,
     serverStatusReason,
     pollerStarted: Boolean(globalForGmailSync.__gmailAutoSyncPollerStarted),
@@ -713,7 +728,7 @@ async function runQuietBackgroundGmailPoll(forceIntervalCheck = false): Promise<
       }
     }
     globalForGmailSync.__gmailLastAutoAttemptMs = Date.now();
-    if (!cfg.enabled || !conn?.connected || conn.isSandboxDemo) return;
+    if (!cfg.enabled || !conn?.connected || conn.isSandboxDemo || conn.connectionStatus === 'EXPIRED') return;
     const hasGmailScope = (conn.scopes || []).some(
       (s) =>
         s === GMAIL_READONLY_SCOPE ||
