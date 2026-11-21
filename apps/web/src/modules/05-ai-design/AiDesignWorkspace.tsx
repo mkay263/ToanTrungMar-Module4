@@ -479,14 +479,16 @@ export function AiDesignWorkspace() {
   const [error, setError] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
-  // Prominent Workspace Areas: 'quick_led' (Gắn LED Nhanh & MKT) | 'perspective' (Studio AI) | 'assistant' | 'specs'
-  const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'quick_led' | 'perspective' | 'assistant' | 'specs'>('perspective');
+  // Prominent 3 Main Tabs + Settings Modal Area:
+  // 'quick_led' (Gắn LED công trình) | 'banner_prompt' (Tạo Banner / Chat AI) | 'banner_product' (Banner ghép Sản phẩm) | 'specs'
+  const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'quick_led' | 'banner_prompt' | 'banner_product' | 'specs'>('banner_prompt');
   // Side dock tab when viewing Phối cảnh on wide desktop
   const [sideDockTab, setSideDockTab] = useState<'assistant' | 'specs'>('assistant');
   const [photoVaultTab, setPhotoVaultTab] = useState<'site_photos' | 'company_products'>('site_photos');
 
-  // MK04: 4-Task Workflow, Structured Brief & Server Registry Modal
-  const [activeTaskCode, setActiveTaskCode] = useState<DesignTaskCode>('perspective_compose');
+  // MK04: 4-Task Workflow, Explicit Banner Mode Separation, Structured Brief & Server Registry Modal
+  const [activeTaskCode, setActiveTaskCode] = useState<DesignTaskCode>('banner_generate');
+  const [activeBannerMode, setActiveBannerMode] = useState<'prompt_only' | 'with_product' | null>('prompt_only');
   const [activeBrief, setActiveBrief] = useState<DesignBriefDto>({});
   const [applyLayoutOverlay, setApplyLayoutOverlay] = useState<boolean>(false);
   const [savingBrief, setSavingBrief] = useState<boolean>(false);
@@ -784,16 +786,31 @@ export function AiDesignWorkspace() {
       } else {
         const savedRoute = loadRouteState<{
           selectedId?: number | null;
-          activeWorkspaceArea?: 'quick_led' | 'perspective' | 'assistant' | 'specs';
+          activeWorkspaceArea?: 'quick_led' | 'banner_prompt' | 'banner_product' | 'specs' | 'perspective' | 'assistant';
           photoVaultTab?: 'site_photos' | 'company_products';
           searchProject?: string;
           projectListScrollTop?: number;
         }>('design:workspace');
         if (savedRoute) {
           if (savedRoute.activeWorkspaceArea) {
-            setActiveWorkspaceArea(savedRoute.activeWorkspaceArea);
+            const rawArea = savedRoute.activeWorkspaceArea;
+            const normalizedArea: 'quick_led' | 'banner_prompt' | 'banner_product' | 'specs' =
+              rawArea === 'quick_led' || rawArea === 'banner_product' || rawArea === 'specs'
+                ? rawArea
+                : 'banner_prompt';
+            setActiveWorkspaceArea(normalizedArea);
+            if (normalizedArea === 'banner_prompt') {
+              setActiveBannerMode('prompt_only');
+              setActiveTaskCode('banner_generate');
+            } else if (normalizedArea === 'banner_product') {
+              setActiveBannerMode('with_product');
+              setActiveTaskCode('banner_generate');
+              setPhotoVaultTab('company_products');
+            } else if (normalizedArea === 'quick_led') {
+              setActiveBannerMode(null);
+            }
           }
-          if (savedRoute.photoVaultTab) {
+          if (savedRoute.photoVaultTab && savedRoute.activeWorkspaceArea !== 'banner_product') {
             setPhotoVaultTab(savedRoute.photoVaultTab);
           }
           if (typeof savedRoute.searchProject === 'string') {
@@ -2953,16 +2970,41 @@ export function AiDesignWorkspace() {
       return;
     }
 
+    const isTabBannerProduct = activeWorkspaceArea === 'banner_product';
+    const isTabBannerPrompt = activeWorkspaceArea === 'banner_prompt';
     const effectiveMode = shouldRunImageMode ? 'image_generator' : 'consultant_free';
+    const effectiveBannerMode: 'prompt_only' | 'with_product' | undefined =
+      effectiveMode === 'image_generator' && (isPosterTag || isTabBannerProduct || isTabBannerPrompt)
+        ? isTabBannerProduct
+          ? 'with_product'
+          : isTabBannerPrompt
+            ? 'prompt_only'
+            : activeBannerMode || (activeProductPhotos.length > 0 ? 'with_product' : 'prompt_only')
+        : undefined;
+
+    if (
+      effectiveMode === 'image_generator' &&
+      effectiveBannerMode === 'with_product' &&
+      activeProductPhotos.length === 0
+    ) {
+      setPhotoVaultTab('company_products');
+      setError(
+        'Tab "Banner ghép Sản phẩm" yêu cầu chọn ít nhất 1 ảnh ở Kho SP Cty (bên trái) trước khi gửi. Nếu muốn tạo banner thuần mô tả chữ, hãy chuyển sang tab "Tạo Banner / Chat AI".'
+      );
+      return;
+    }
+
+    const forceBannerFromTab = effectiveBannerMode === 'prompt_only' || effectiveBannerMode === 'with_product';
     const effectiveTaskCode: DesignTaskCode =
       effectiveMode === 'consultant_free'
         ? 'brief_analyze'
-        : isPosterTag
+        : isPosterTag || forceBannerFromTab
           ? 'banner_generate'
           : activeTaskCode;
+    const isBannerRequest = effectiveBannerMode !== undefined || isPosterTag;
     const finalPrompt =
       shouldRunImageMode && !hasTaoAnhTag
-        ? `${isPosterTag ? '@TaoAnhPoster' : '@TaoAnh'}: ${trimmed}`
+        ? `${isBannerRequest ? '@TaoAnhPoster' : '@TaoAnh'}: ${trimmed}`
         : trimmed;
 
     submitLockRef.current = true;
@@ -3012,16 +3054,16 @@ export function AiDesignWorkspace() {
           selectedPhoto
       );
 
-      // Skip heavy client canvas compositing when an active Cloud AI provider will render the asset, or when generating a free-form image without a site photo
+      // For perspective compositing on local engine, or explicit local Banner-with-Product card rendering, compose client canvas preview
       let preRenderedCompositeB64: string | undefined;
       if (
         effectiveMode === 'image_generator' &&
         (selectedProviderId === 'local_sandbox' || !hasExternalCloudApiKey) &&
-        hasSurveyPhotoOnProject &&
-        !isPosterTag
+        ((hasSurveyPhotoOnProject && !isPosterTag) ||
+          (selectedProviderId === 'local_sandbox' && isPosterTag && effectiveBannerMode === 'with_product' && activeProductPhotos.length > 0))
       ) {
         const compositedB64 = await renderRealPhotoAiCompositeBase64(
-          '3d_led',
+          isPosterTag ? 'poster' : '3d_led',
           finalPrompt
         );
         if (compositedB64) {
@@ -3065,11 +3107,15 @@ export function AiDesignWorkspace() {
         bannerWidthPx: Math.round(Number(activeBrief.outputWidthPx || paramForm.bannerWidthPx) || 1536),
         bannerHeightPx: Math.round(Number(activeBrief.outputHeightPx || paramForm.bannerHeightPx) || 1024),
         aspectRatio: paramForm.aspectRatio || '16:9',
-        selectedPhotoUrl: hasSurveyPhotoOnProject ? sitePhotoUrl : undefined,
-        selectedPhotoId: selectedPhoto?.id ?? null,
-        referenceProductPhotoIds: activeProductPhotos.map((p) => p.id),
-        referenceProductPhotoUrls: activeProductPhotos.map((p) => p.url),
-        referenceProductName: activeProductPhotos[0]?.name || undefined,
+        selectedPhotoUrl: hasSurveyPhotoOnProject && !isPosterTag ? sitePhotoUrl : undefined,
+        selectedPhotoId: selectedPhoto && !isPosterTag ? selectedPhoto.id : null,
+        referenceProductPhotoIds:
+          effectiveBannerMode === 'prompt_only' ? [] : activeProductPhotos.map((p) => p.id),
+        referenceProductPhotoUrls:
+          effectiveBannerMode === 'prompt_only' ? [] : activeProductPhotos.map((p) => p.url),
+        referenceProductName:
+          effectiveBannerMode === 'prompt_only' ? undefined : activeProductPhotos[0]?.name || undefined,
+        ...(effectiveBannerMode ? { bannerMode: effectiveBannerMode } : {}),
         clientRenderedBase64: preRenderedCompositeB64,
         parentVersionId: parentVersionIdForEdit,
         sourceVersionId: parentVersionIdForEdit,
@@ -4932,13 +4978,13 @@ export function AiDesignWorkspace() {
         onChange={handleUploadProductPhotos}
       />
 
-      {/* 1. TOP MODULE HEADER BAR (CLEAN CENTERED STUDIO TOOLBAR) */}
-      <div className="flex min-h-13 w-full shrink-0 flex-wrap items-center justify-center gap-2.5 border-b border-[#D8E2F0] bg-white px-4 py-1.5 shadow-2xs">
-        {/* Workflow Switcher Pills (Màn hình Studio AI | Cài đặt thông số) */}
+      {/* 1. TOP MODULE HEADER BAR: 3 SEPARATE WORKFLOW TABS + UTILITIES */}
+      <div className="flex min-h-13 w-full shrink-0 flex-wrap items-center justify-between gap-2.5 border-b border-[#D8E2F0] bg-white px-4 py-1.5 shadow-2xs">
+        {/* 3 Clear Distinct Primary Tabs */}
         <div
           role="tablist"
-          aria-label="Khu vực làm việc Studio"
-          className="flex flex-wrap items-center gap-1.5"
+          aria-label="3 chế độ thiết kế AI"
+          className="flex flex-wrap items-center gap-1.5 rounded-xl bg-slate-100 p-1"
         >
           <button
             type="button"
@@ -4947,64 +4993,88 @@ export function AiDesignWorkspace() {
             aria-selected={activeWorkspaceArea === 'quick_led'}
             onClick={() => {
               setChatFocusMode(false);
+              setActiveBannerMode(null);
+              setPhotoVaultTab('site_photos');
               setActiveWorkspaceArea('quick_led');
               setMobilePane('canvas');
             }}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition shadow-2xs ${
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
               activeWorkspaceArea === 'quick_led'
-                ? 'bg-gradient-to-r from-[#0BAF7C] to-[#1553A2] text-white'
-                : 'border border-emerald-200 bg-emerald-50/70 text-emerald-900 hover:bg-emerald-100'
+                ? 'bg-gradient-to-r from-[#0BAF7C] to-[#1553A2] text-white shadow-2xs'
+                : 'text-slate-700 hover:bg-white/80'
             }`}
-            title="Chế độ siêu dễ 3 bước cho người không biết AI: 12 kiểu màn LED + Xuất bộ Marketing"
+            title="Chấm 1 điểm trên ảnh công trình để gắn 12 kiểu màn LED & xuất bộ ảnh Marketing"
           >
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>Gắn LED Nhanh &amp; MKT</span>
+            <span>🎯 1. Gắn LED công trình</span>
           </button>
 
           <button
             type="button"
             role="tab"
             data-testid="workspace-tab-perspective"
-            aria-selected={activeWorkspaceArea === 'perspective' && !chatFocusMode}
+            aria-selected={activeWorkspaceArea === 'banner_prompt'}
             onClick={() => {
-              setActiveWorkspaceArea('perspective');
               setChatFocusMode(false);
+              setShowHandles(false);
+              setActiveBannerMode('prompt_only');
+              setActiveTaskCode('banner_generate');
+              setActiveWorkspaceArea('banner_prompt');
               if (viewMode === 'bom') {
                 setViewMode(currentVersion ? 'result' : 'original');
               }
               setMobilePane('canvas');
             }}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-bold transition shadow-2xs ${
-              activeWorkspaceArea === 'perspective' && !chatFocusMode
-                ? 'bg-[#1553A2] text-white'
-                : 'border border-[#D8E2F0] bg-white text-[#17253F] hover:bg-slate-50'
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
+              activeWorkspaceArea === 'banner_prompt'
+                ? 'bg-[#1553A2] text-white shadow-2xs'
+                : 'text-slate-700 hover:bg-white/80'
             }`}
+            title="Trò chuyện với ToanTrung AI & sinh Banner/Poster sáng tạo trực tiếp từ câu Prompt (không lẫn ảnh Kho SP)"
           >
-            <Monitor className="h-3.5 w-3.5" />
-            <span>Studio Thiết kế</span>
+            <span>🎨 2. Tạo Banner / Chat AI</span>
           </button>
 
           <button
             type="button"
             role="tab"
-            data-testid="workspace-tab-chat-focus"
-            aria-selected={activeWorkspaceArea === 'perspective' && chatFocusMode}
+            data-testid="workspace-tab-banner-product"
+            aria-selected={activeWorkspaceArea === 'banner_product'}
             onClick={() => {
-              setActiveWorkspaceArea('perspective');
-              setChatFocusMode((prev) => !prev);
-              setMobilePane('assistant');
+              setChatFocusMode(false);
+              setShowHandles(false);
+              setActiveBannerMode('with_product');
+              setActiveTaskCode('banner_generate');
+              setPhotoVaultTab('company_products');
+              setActiveWorkspaceArea('banner_product');
+              if (viewMode === 'bom') {
+                setViewMode(currentVersion ? 'result' : 'original');
+              }
+              setMobilePane('canvas');
             }}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-bold transition shadow-2xs ${
-              activeWorkspaceArea !== 'specs' && chatFocusMode
-                ? 'bg-[#0BAF7C] text-white'
-                : 'border border-[#D8E2F0] bg-white text-[#17253F] hover:bg-slate-50'
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
+              activeWorkspaceArea === 'banner_product'
+                ? 'bg-[#7846FF] text-white shadow-2xs'
+                : 'text-slate-700 hover:bg-white/80'
             }`}
-            title="Mở rộng ToanTrung AI toàn màn hình hoặc quay lại Studio Thiết kế"
+            title="Chọn ảnh Sản phẩm từ Kho SP Cty làm nhân vật chính và tạo nền Banner quảng cáo theo mô tả Prompt"
           >
-            <MessageSquare className="h-3.5 w-3.5" />
-            <span>{chatFocusMode ? '🎨 Studio Thiết kế' : '✨ ToanTrung AI'}</span>
+            <span>🛍️ 3. Banner ghép Sản phẩm</span>
+            {activeProductPhotos.length > 0 && (
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-[10px] leading-none font-black ${
+                  activeWorkspaceArea === 'banner_product'
+                    ? 'bg-white/25 text-white'
+                    : 'bg-purple-100 text-[#6D28D9]'
+                }`}
+              >
+                {activeProductPhotos.length}
+              </span>
+            )}
           </button>
+        </div>
 
+        {/* Right Utility Actions: Thông số · Mở rộng · Lead · Upload Final · ZIP · Bàn giao */}
+        <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
             role="tab"
@@ -5012,9 +5082,9 @@ export function AiDesignWorkspace() {
             aria-selected={activeWorkspaceArea === 'specs'}
             onClick={() => {
               setChatFocusMode(false);
-              setActiveWorkspaceArea((prev) => (prev === 'specs' ? 'perspective' : 'specs'));
+              setActiveWorkspaceArea((prev) => (prev === 'specs' ? 'banner_prompt' : 'specs'));
             }}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-1.5 text-xs font-bold transition ${
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-bold transition ${
               activeWorkspaceArea === 'specs'
                 ? 'bg-[#17253F] text-white'
                 : 'border border-[#D8E2F0] bg-white text-slate-600 hover:bg-slate-50'
@@ -5022,7 +5092,7 @@ export function AiDesignWorkspace() {
             title="Mở bảng cài đặt thông tin dự án & chuẩn đầu ra"
           >
             <Settings2 className="h-3.5 w-3.5" />
-            <span>Cài đặt thông số</span>
+            <span>Thông số</span>
           </button>
 
           <button
@@ -5033,10 +5103,10 @@ export function AiDesignWorkspace() {
                 ? 'bg-amber-500 text-white shadow-2xs'
                 : 'border border-[#D8E2F0] bg-white text-slate-600 hover:bg-slate-50'
             }`}
-            title="Ẩn/Hiện cột Danh sách dự án bên trái để mở rộng tối đa vùng nhìn Phối cảnh 3D"
+            title="Ẩn/Hiện cột Danh sách dự án bên trái"
           >
             {focusCanvas ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-            <span>{focusCanvas ? 'Hiện cột trái' : 'Mở rộng vùng nhìn'}</span>
+            <span>{focusCanvas ? 'Hiện cột trái' : 'Mở rộng'}</span>
           </button>
 
           {currentProject?.leadId && (
@@ -5045,15 +5115,10 @@ export function AiDesignWorkspace() {
               className="inline-flex items-center gap-1 whitespace-nowrap rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1.5 text-xs font-extrabold text-[#1553A2] hover:bg-blue-100 transition"
               title={`Mở nhanh hồ sơ Lead ${currentProject.leadCode || currentProject.leadId} tại Module 01`}
             >
-              <span>🔗 Lead: {currentProject.leadCode || `#${currentProject.leadId}`}</span>
+              <span>🔗 {currentProject.leadCode || `Lead #${currentProject.leadId}`}</span>
             </a>
           )}
-        </div>
 
-        <div className="hidden xl:block h-5 w-px bg-slate-200" />
-
-        {/* Right: Staff Upload Final, Export ZIP, Approve & Handoff Sales */}
-        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setTabletDrawerOpen((prev) => !prev)}
@@ -5746,7 +5811,7 @@ export function AiDesignWorkspace() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setActiveWorkspaceArea('perspective')}
+                    onClick={() => setActiveWorkspaceArea('banner_prompt')}
                     className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                   >
                     Quay lại màn hình ảnh
@@ -5781,7 +5846,9 @@ export function AiDesignWorkspace() {
                     <h2 className="text-[13px] font-extrabold uppercase tracking-wide text-[#17253F] truncate">
                       {viewMode === 'compare'
                         ? 'SO SÁNH TRƯỚC & SAU KHI AI XỬ LÝ'
-                        : 'KHUNG HÌNH THIẾT KẾ & PHỐI CẢNH AI'}
+                        : activeWorkspaceArea === 'banner_product'
+                          ? 'BANNER GHÉP SẢN PHẨM CÔNG TY'
+                          : 'BANNER & ẢNH SÁNG TẠO AI (THUẦN PROMPT)'}
                     </h2>
                     <div className="inline-flex flex-wrap items-center rounded-xl border border-slate-200 bg-slate-100 p-0.5 text-[11px] font-bold">
                       <button
@@ -6131,36 +6198,50 @@ export function AiDesignWorkspace() {
                     </div>
                   ) : !selectedPhoto && !currentVersion ? (
                     <div className="flex max-w-lg flex-col items-center justify-center p-8 text-center text-white">
-                      <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/20 border border-blue-400/30 text-cyan-300">
-                        <Upload className="h-7 w-7" />
+                      <div className={`mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border ${
+                        activeWorkspaceArea === 'banner_product'
+                          ? 'bg-purple-500/20 border-purple-400/30 text-purple-300'
+                          : 'bg-blue-500/20 border-blue-400/30 text-cyan-300'
+                      }`}>
+                        <Sparkles className="h-7 w-7" />
                       </div>
                       <h3 className="text-base font-extrabold text-white">
-                        Dự án &ldquo;{currentProject?.projectName}&rdquo; chưa có ảnh khảo sát
+                        {activeWorkspaceArea === 'banner_product'
+                          ? 'Chế độ 3: Tạo Banner ghép Sản phẩm công ty'
+                          : 'Chế độ 2: Tạo Banner / Ảnh sáng tạo thuần Prompt'}
                       </h3>
                       <p className="mt-1.5 text-xs text-slate-300 leading-relaxed">
-                        Mỗi dự án sử dụng ảnh công trình riêng của khách hàng. Hãy tải ảnh trước khảo sát của dự án này lên để chấm điểm lắp đặt &amp; ghép phối cảnh 3D LED, hoặc bấm tạo Poster quảng cáo độc lập bên dưới.
+                        {activeWorkspaceArea === 'banner_product'
+                          ? 'Chọn ảnh sản phẩm trong Kho SP Cty bên trái (hoặc bấm Tải ảnh SP ở khung chat), mô tả bố cục nền & thông điệp rồi nhấn Gửi.'
+                          : 'Gõ trực tiếp yêu cầu thiết kế Banner, Poster hoặc trò chuyện hỏi ToanTrung ở khung bên phải — không cần ảnh công trình hay ảnh sản phẩm.'}
                       </p>
                       <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
-                        <button
-                          type="button"
-                          onClick={() => uploadPhotoInputRef.current?.click()}
-                          className="inline-flex items-center gap-1.5 rounded-xl bg-[#1553A2] px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-[#1E3A8A] transition"
-                        >
-                          <Upload className="h-4 w-4" />
-                          <span>Tải ảnh công trình khảo sát lên</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            handlePromptChange(
-                              `@TaoAnhPoster: Thiết kế Poster quảng cáo tỷ lệ ${paramForm.aspectRatio} (${computedLiveSpecs.resW}×${computedLiveSpecs.resH}px)`
-                            );
-                          }}
-                          className="inline-flex items-center gap-1.5 rounded-xl bg-pink-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-pink-700 transition"
-                        >
-                          <Sparkles className="h-4 w-4" />
-                          <span>Tạo Banner / Poster (@TaoAnhPoster)</span>
-                        </button>
+                        {activeWorkspaceArea === 'banner_product' ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setPhotoVaultTab('company_products');
+                              uploadProductPhotoInputRef.current?.click();
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-[#7846FF] px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-[#6D28D9] transition"
+                          >
+                            <Upload className="h-4 w-4" />
+                            <span>Tải ảnh Sản phẩm lên Kho SP</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              handlePromptChange(
+                                `@TaoAnhPoster: Thiết kế Banner quảng cáo tỷ lệ ${paramForm.aspectRatio} (${computedLiveSpecs.resW}×${computedLiveSpecs.resH}px), phong cách hiện đại, nổi bật thương hiệu Toàn Trung`
+                              );
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-xl bg-pink-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-pink-700 transition"
+                          >
+                            <Sparkles className="h-4 w-4" />
+                            <span>Điền nhanh mẫu Banner</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   ) : (
@@ -6913,6 +6994,15 @@ export function AiDesignWorkspace() {
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
+                      onClick={() => setChatFocusMode((prev) => !prev)}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50 whitespace-nowrap"
+                      title={chatFocusMode ? 'Thu gọn khung chat về 2 cột' : 'Mở rộng khung chat toàn màn hình'}
+                    >
+                      {chatFocusMode ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
+                      <span className="hidden sm:inline">{chatFocusMode ? 'Thu gọn' : 'Toàn màn hình'}</span>
+                    </button>
+                    <button
+                      type="button"
                       disabled={submitting}
                       onClick={() => void handleStartFreshChat()}
                       className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-700 hover:bg-slate-50 whitespace-nowrap disabled:opacity-50"
@@ -7024,6 +7114,17 @@ export function AiDesignWorkspace() {
                     <Settings2 className="h-3 w-3 text-[#1553A2]" />
                     <span>Model &amp; Key</span>
                   </button>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1.5 rounded-lg border border-slate-200/80 bg-slate-50 px-2.5 py-1 text-[10.5px] text-slate-600">
+                  <span>
+                    📐 <strong>Đầu ra:</strong> Ảnh <strong>2D PNG/JPG</strong> giả lập phối cảnh 3D (không phải file 3D xoay `.skp`/`.max`).
+                  </span>
+                  <span
+                    className="text-slate-500 cursor-help underline decoration-dotted"
+                    title="Chỉnh nhanh ở tab Gắn LED Nhanh = $0/0 token. Chat/Vision ~500-2.500 token (~$0.001). Sinh/sửa ảnh Cloud AI ~1.500-4.500 token (~$0.015-$0.08/ảnh tùy Model). Gói Free hồi theo phút/24h (Google 00:00 PT); gói trả phí dừng khi hết số dư nạp."
+                  >
+                    💡 Chi phí &amp; hồi token theo Key
+                  </span>
                 </div>
               </div>
 
@@ -7282,144 +7383,80 @@ export function AiDesignWorkspace() {
                 </div>
               )}
 
-              {/* Slim, Clean Bottom Composer (With Attached Product Photos & Natural Conversational UX) */}
+              {/* Ultra-Clean Tab-Specific Composer */}
               <div className="shrink-0 border-t border-slate-100 p-3 space-y-2 bg-white">
-                {!chatFocusMode && (
-                  <>
-                    {/* Active Context Bar: Shows Site Photo + Attached Company Product Photos for Compositing */}
-                    <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-200/90 bg-slate-50/80 px-2.5 py-1.5 text-[11px]">
-                      <span className="font-bold text-slate-600">Đang dùng:</span>
-                      {selectedPhoto ? (
-                        <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 font-bold text-[#1553A2] border border-blue-200">
-                          📷 Nền: {selectedPhoto.name.slice(0, 18)}
-                        </span>
-                      ) : (
-                        <span className="text-slate-400">Chưa chọn ảnh nền</span>
-                      )}
-
-                      {activeProductPhotos.map((prod) => (
-                        <span
-                          key={prod.id}
-                          className="inline-flex items-center gap-1 rounded-md bg-purple-100 px-2 py-0.5 font-extrabold text-[#6D28D9] border border-purple-300"
-                          title={`Ảnh sản phẩm công ty sẽ được ghép vào hiện trường / Banner: ${prod.name}`}
-                        >
-                          <span>📦 SP: {prod.name.replace(/^\[Sản phẩm\]\s*/i, '').slice(0, 18)}</span>
-                          <button
-                            type="button"
-                            onClick={() => void handleToggleProductPhotoRole(prod)}
-                            className="ml-0.5 text-purple-700 hover:text-red-600 font-bold"
-                            title="Bỏ đính kèm ảnh sản phẩm này"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
-
+                {!chatFocusMode && activeWorkspaceArea === 'banner_product' && (
+                  <div className="rounded-xl border border-purple-200 bg-purple-50/70 p-2.5 space-y-1.5 text-[11px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-extrabold text-[#6D28D9]">
+                        🛍️ Sản phẩm ghép vào Banner ({activeProductPhotos.length})
+                      </span>
                       <button
                         type="button"
-                        onClick={() => uploadProductPhotoInputRef.current?.click()}
-                        className="ml-auto inline-flex items-center gap-1 rounded-lg border border-purple-300 bg-white px-2 py-0.5 text-[11px] font-extrabold text-[#6D28D9] hover:bg-purple-50 transition"
-                        title="Tải thêm ảnh sản phẩm của công ty để AI ghép vào ảnh hiện trường hoặc tạo Banner"
+                        onClick={() => {
+                          setPhotoVaultTab('company_products');
+                          uploadProductPhotoInputRef.current?.click();
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-purple-300 bg-white px-2 py-0.5 text-[11px] font-bold text-[#6D28D9] hover:bg-purple-100 transition"
                       >
                         <Plus className="h-3 w-3" />
-                        <span>Ghép thêm ảnh SP</span>
+                        <span>Tải ảnh SP</span>
                       </button>
                     </div>
-
-                    {/* 1-Row Quick Action Pills */}
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <button
-                        type="button"
-                        disabled={submitting}
-                        onClick={() => {
-                          const pointsNote =
-                            touchPoints.length > 0
-                              ? ` tại ${touchPoints.length} điểm chạm (${touchPoints.map((p) => p.label).join(' → ')}) đã chấm trên ảnh`
-                              : '';
-                          const prodNote =
-                            activeProductPhotos.length > 0
-                              ? ` kết hợp với ảnh sản phẩm "${activeProductPhotos[0]?.name}"`
-                              : '';
-                          executeChatSubmit(
-                            `Phân tích bức ảnh hiện tại${pointsNote}${prodNote} và gợi ý phương án phối cảnh / thiết kế đẹp nhất giúp mình`
-                          );
-                        }}
-                        className="rounded-lg bg-[#0BAF7C] px-2.5 py-1.5 text-[11px] font-extrabold text-white shadow-2xs hover:bg-emerald-700 disabled:opacity-50 transition"
-                      >
-                        🔍 Tư vấn &amp; Phân tích ($0)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const clean = chatPrompt
-                            .replace(/^\s*@(?:taoanhposter|taoposter|tao[j]?anh)\s*:?\s*/i, '')
-                            .trim();
-                          const defaultCompositePrompt =
-                            activeProductPhotos.length > 0
-                              ? `Ghép sản phẩm "${activeProductPhotos[0]?.name.replace(/^\[Sản phẩm\]\s*/i, '')}" vào vùng chấm điểm trên ảnh hiện trường chân thực và cân đối ánh sáng`
-                              : `Phối cảnh & chỉnh sửa trực tiếp trên ảnh hiện trường theo yêu cầu, giữ nguyên góc chụp tự nhiên (${paramForm.bannerWidthPx}×${paramForm.bannerHeightPx}px)`;
-                          handlePromptChange(clean || defaultCompositePrompt);
-                        }}
-                        className="rounded-lg bg-[#7846FF] px-2.5 py-1.5 text-[11px] font-bold text-white shadow-2xs hover:bg-[#6D28D9] transition"
-                      >
-                        ✨ Phối cảnh / Ghép SP vào ảnh
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const clean = chatPrompt
-                            .replace(/^\s*@(?:taoanhposter|taoposter|tao[j]?anh)\s*:?\s*/i, '')
-                            .trim();
-                          const defaultBannerPrompt =
-                            activeProductPhotos.length > 0
-                              ? `Tạo banner quảng cáo nổi bật có chèn ảnh sản phẩm "${activeProductPhotos[0]?.name.replace(/^\[Sản phẩm\]\s*/i, '')}" tỷ lệ ${paramForm.aspectRatio} (${paramForm.bannerWidthPx}×${paramForm.bannerHeightPx}px)`
-                              : `Tạo banner quảng cáo chuyên nghiệp tỷ lệ ${paramForm.aspectRatio} (${paramForm.bannerWidthPx}×${paramForm.bannerHeightPx}px) với nội dung: `;
-                          handlePromptChange(clean || defaultBannerPrompt);
-                        }}
-                        className="rounded-lg bg-pink-600 px-2.5 py-1.5 text-[11px] font-bold text-white shadow-2xs hover:bg-pink-700 transition"
-                      >
-                        🖼️ Tạo Banner có SP
-                      </button>
-                      <button
-                        type="button"
-                        data-testid="open-prompt-library-btn"
-                        onClick={() => {
-                          setEditingPromptId(null);
-                          setNewSavedPromptTitle('');
-                          setNewSavedPromptText(chatPrompt.trim());
-                          setShowPromptLibraryModal(true);
-                        }}
-                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-[11px] font-bold text-indigo-800 hover:bg-indigo-100 transition"
-                      >
-                        📚 Mẫu lệnh ({promptLibrary.length})
-                      </button>
-                    </div>
-                  </>
+                    {activeProductPhotos.length === 0 ? (
+                      <div className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
+                        Chưa chọn ảnh sản phẩm. Hãy bấm vào ảnh ở <strong>Kho SP Cty</strong> bên trái hoặc bấm <strong>+ Tải ảnh SP</strong>.
+                      </div>
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {activeProductPhotos.map((prod) => (
+                          <span
+                            key={prod.id}
+                            className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-bold text-[#6D28D9] border border-purple-300 shadow-2xs"
+                          >
+                            <span>📦 {prod.name.replace(/^\[Sản phẩm\]\s*/i, '').slice(0, 22)}</span>
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleProductPhotoRole(prod)}
+                              className="ml-0.5 text-purple-600 hover:text-red-600 font-bold"
+                              title="Bỏ ảnh sản phẩm này"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 )}
 
-                <div className="flex flex-wrap items-center justify-between gap-2 pb-1 text-[11px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      disabled={uploadingPhoto}
-                      onClick={() => uploadPhotoInputRef.current?.click()}
-                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                      title="Đính kèm ảnh hoặc dán ảnh trực tiếp (Ctrl+V) vào khung nhập"
-                    >
-                      <Paperclip className="h-3 w-3 text-[#1553A2]" />
-                      <span>{uploadingPhoto ? 'Đang tải...' : 'Đính kèm ảnh'}</span>
-                    </button>
-                    {selectedPhoto && (
+                    {activeWorkspaceArea !== 'banner_product' && (
                       <button
                         type="button"
-                        onClick={() => setPreviewLightboxUrl(sitePhotoUrl)}
-                        className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2 py-1 text-[10.5px] font-semibold text-[#1553A2] hover:bg-blue-100 max-w-[160px] truncate"
-                        title={`Ảnh đang gắn: ${selectedPhoto.name} (Bấm để xem lớn)`}
+                        disabled={uploadingPhoto}
+                        onClick={() => uploadPhotoInputRef.current?.click()}
+                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                        title="Đính kèm ảnh tham khảo hoặc dán ảnh trực tiếp (Ctrl+V) vào khung chat"
                       >
-                        <ImageIcon className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{selectedPhoto.name}</span>
+                        <Paperclip className="h-3 w-3 text-[#1553A2]" />
+                        <span>{uploadingPhoto ? 'Đang tải...' : 'Đính kèm ảnh'}</span>
                       </button>
                     )}
+                    <button
+                      type="button"
+                      data-testid="open-prompt-library-btn"
+                      onClick={() => {
+                        setEditingPromptId(null);
+                        setNewSavedPromptTitle('');
+                        setNewSavedPromptText(chatPrompt.trim());
+                        setShowPromptLibraryModal(true);
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-bold text-indigo-800 hover:bg-indigo-100 transition"
+                    >
+                      <span>📚 Mẫu lệnh ({promptLibrary.length})</span>
+                    </button>
                   </div>
 
                   <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 p-0.5">
@@ -7459,7 +7496,11 @@ export function AiDesignWorkspace() {
                         void executeChatSubmit(chatPrompt);
                       }
                     }}
-                    placeholder="Nhắn với ToanTrung (hỏi bất cứ điều gì, dán ảnh Ctrl+V, hoặc gõ 'Tạo ảnh ...')..."
+                    placeholder={
+                      activeWorkspaceArea === 'banner_product'
+                        ? 'Mô tả nền, màu sắc, thông điệp quảng cáo quanh sản phẩm đã chọn...'
+                        : "Mô tả Banner / ảnh cần tạo (VD: 'Tạo ảnh ...') hoặc nhắn hỏi ToanTrung tự do..."
+                    }
                     className="w-full resize-none rounded-xl border border-slate-300 bg-slate-50/70 p-2.5 pr-20 text-[13px] text-slate-900 placeholder-slate-400 focus:border-[#7846FF] focus:bg-white focus:outline-none"
                   />
                   <button

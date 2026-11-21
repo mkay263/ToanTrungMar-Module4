@@ -62,8 +62,10 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
 3. **Marketing Turbo Kit (`LedQuickInstallWizard.tsx`, `led-content-presets.ts`, `marketing-export-kit.ts`)**:
    - Tự đổ Brief từ M03/M04, kho 16 mẫu 1 chạm, **Sinh Bộ 3 Biến Thể A/B**, **Ảnh Trước/Sau (3 layout)**, **Smart Focal Crop** xuất 5 khổ (`Gốc`, `1:1`, `4:5`, `16:9`, `9:16`) kèm Brand Kit Overlay & lưu công thức.
    - Bảo toàn nguyên vẹn ma trận quyền BA (`Q16` đã ghi nhận tại [OPEN_QUESTIONS.md](../decisions/OPEN_QUESTIONS.md#q16)).
-4. **Kiểm chứng & Ghi nhận (21/11/2026)**:
-   - Đã chạy và đạt: `npm run check:docs`, `npm run typecheck` (cả 4 workspace), `m05-led-geometry-and-mkt-kit.test.js` (5/5 PASS), `ai-design-studio-upgrade.test.js` (16/16 PASS), `core-security.test.js` (5/5 PASS), kiểm tra live `GET http://127.0.0.1:3000/design` (`HTTP 200`).
-   - Ghi nhận sẵn từ nền `4dac906` (ngoài phạm vi V3): `mk01-mk07-marketing-upgrade.test.js` lỗi 2/5 (`MK03` đọc cứng `storage_independent_v2/config/ai-model-registry-cache.json` trong khi `apps/api/.env` cấu hình `STORAGE_ROOT="./storage"`; `MK04 & MK05` ghi đè `effectiveTaskCode` từ `design_edit` sang `banner_generate` khi `effectiveDbType === 'banner'`).
+4. **Kiểm chứng & Bản vá QA 21/11/2026**:
+   - Thiết kế lại thanh đầu AI Studio thành **3 tab lớn tách biệt** (`🎯 1. Gắn LED công trình` | `🎨 2. Tạo Banner / Chat AI` | `🛍️ 3. Banner ghép Sản phẩm`), dời `Thông số` sang cụm tiện ích phải và gỡ bỏ hàng nút nhỏ gây rối dưới ô chat.
+   - Tách cứng `bannerMode='prompt_only'` (ẩn/bỏ qua hoàn toàn ảnh Kho SP) và `bannerMode='with_product'` (hiển thị hộp chọn SP bắt buộc) trên `AiDesignWorkspace.tsx`, `service.ts` và `packages/contracts/src/05-ai-design/index.ts`.
+   - Ngắt fallback ngầm về `LocalSandboxAiProvider.generateBannerDraft` (vốn sinh gradient trơn lệch prompt) tại `executeBannerWithFallback` khi chạy Cloud AI; giữ `design_edit` đúng ngữ nghĩa khi chỉnh sửa ảnh tham chiếu.
+   - Bổ sung giải thích rõ đầu ra là ảnh **2D PNG/JPG** giả lập phối cảnh 3D và chính sách token/hạn mức theo API Key ngay trên header trợ lý AI.
    - Bước tiếp theo: Chờ PO/Admin quyết định [Q16](../decisions/OPEN_QUESTIONS.md#q16) nếu muốn mở tab Gắn LED Nhanh trực tiếp cho `MKT_STAFF`/`MKT_LEAD`.
 

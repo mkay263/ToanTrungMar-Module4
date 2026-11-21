@@ -78,7 +78,17 @@ export function getInitials(name: string): string {
 export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() || '/dashboard';
   const router = useRouter();
-  const { user, loading, unreadCount, setUnreadCountState, logout } = useSession();
+  const {
+    user,
+    loading,
+    unreadCount,
+    setUnreadCountState,
+    latestAlertNotification,
+    dismissLatestAlert,
+    desktopNotifPermission,
+    requestDesktopNotifPermission,
+    logout,
+  } = useSession();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () =>
@@ -698,6 +708,33 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     )}
                   </div>
 
+                  {desktopNotifPermission !== 'unsupported' && (
+                    <div className="px-4 py-2 bg-blue-50/60 border-b border-blue-100 flex items-center justify-between gap-2">
+                      {desktopNotifPermission === 'granted' ? (
+                        <span className="text-[11px] font-semibold text-emerald-700">
+                          ✓ Đã bật thông báo góc màn hình Windows/Chrome (kể cả khi mở Zalo/Excel)
+                        </span>
+                      ) : desktopNotifPermission === 'denied' ? (
+                        <span className="text-[11px] text-slate-500">
+                          Thông báo trình duyệt đang tắt (có thể bật lại ở biểu tượng ổ khóa trên thanh URL).
+                        </span>
+                      ) : (
+                        <>
+                          <span className="text-[11px] text-slate-700 font-medium">
+                            Nhận báo Lead ngay cả khi mở tab khác:
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void requestDesktopNotifPermission()}
+                            className="shrink-0 px-2.5 py-1 rounded-lg bg-[#1E3A8A] text-white text-[11px] font-bold hover:bg-[#1553A2] transition"
+                          >
+                            Bật thông báo máy tính
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
                     {loadingBell ? (
                       <div className="p-6 text-center text-xs text-slate-500">
@@ -896,6 +933,71 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
             <span>Menu</span>
           </button>
         </nav>
+        {latestAlertNotification && (
+          <div
+            role="alert"
+            data-testid="global-incoming-alert-toast"
+            className="fixed bottom-16 md:bottom-5 right-4 z-50 w-[min(390px,calc(100vw-2rem))] rounded-2xl border-2 border-[#2563EB] bg-white p-4 shadow-2xl ring-4 ring-blue-500/15"
+          >
+            <div className="flex items-start gap-3">
+              <div className="w-9 h-9 rounded-xl bg-blue-600 text-white grid place-items-center shrink-0 shadow-xs">
+                <Bell aria-hidden="true" className="w-4 h-4 animate-bounce" />
+              </div>
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-[#1E3A8A] text-[10px] font-bold uppercase">
+                    {latestAlertNotification.category || 'Thông báo mới'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={dismissLatestAlert}
+                    aria-label="Đóng thông báo nổi"
+                    className="text-slate-400 hover:text-slate-700 p-0.5"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <p className="text-xs font-bold text-slate-900 leading-snug">
+                  {latestAlertNotification.title}
+                </p>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  {latestAlertNotification.summary}
+                </p>
+                <div className="pt-1.5 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetUrl = latestAlertNotification.actionUrl || '/leads';
+                      const nid = latestAlertNotification.id;
+                      dismissLatestAlert();
+                      if (user) {
+                        void apiRequest('/api/v1/notifications', {
+                          method: 'PATCH',
+                          csrfToken: user.csrfToken,
+                          body: { notificationId: nid },
+                        })
+                          .then(() => setUnreadCountState(Math.max(0, unreadCount - 1)))
+                          .catch(() => {});
+                      }
+                      router.push(targetUrl);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-[#1E3A8A] hover:bg-[#1553A2] text-white text-xs font-bold inline-flex items-center gap-1 transition shadow-2xs"
+                  >
+                    <span>{latestAlertNotification.actionLabel || 'Mở hồ sơ ngay'}</span>
+                    <ArrowUpRight className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={dismissLatestAlert}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    Để sau
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

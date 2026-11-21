@@ -38,6 +38,9 @@ export const DESIGN_TASK_CODES = [
 
 export type DesignTaskCode = (typeof DESIGN_TASK_CODES)[number];
 
+export const BANNER_MODES = ['prompt_only', 'with_product'] as const;
+export type BannerMode = (typeof BANNER_MODES)[number];
+
 export const DesignTaskCodeSchema = z.enum(DESIGN_TASK_CODES);
 
 export const DESIGN_TASK_LABELS: Record<DesignTaskCode, { title: string; subtitle: string; requiresImageOutput: boolean }> = {
@@ -535,6 +538,7 @@ export const ChatDesignRequestSchema = z.object({
   bannerHeightPx: z.coerce.number().optional().nullable(),
   aspectRatio: z.string().trim().max(30).optional().nullable(),
   applyLayoutOverlay: z.boolean().optional(),
+  bannerMode: z.enum(BANNER_MODES).optional(),
   designBrief: DesignBriefSchema.optional().nullable(),
   simulateAiTimeout: z.boolean().optional(),
   disableLocalFallback: z.boolean().optional(),

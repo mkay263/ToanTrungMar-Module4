@@ -44,3 +44,11 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
    - Triển khai `apps/api/src/modules/01-leads/` sử dụng `transitionLeadWithVersion` và các route handler tương ứng.
 4. **Giao diện người dùng (Frontend)**:
    - Xây dựng bảng Kanban Pipeline và danh sách Lead trực quan tại `apps/web/src/modules/01-leads/`.
+
+---
+
+## 4. Bản vá QA ngày 21/11/2026
+1. **Sửa lỗi chọn nhiều sản phẩm quan tâm**: Chuyển xử lý toggle checkbox từ `<label onClick>` sang `<input onChange>` ở `ManualLeadModal.tsx` và `LeadsWorkspace.tsx` để chọn được nhiều sản phẩm cùng nhóm và khác nhóm.
+2. **Danh mục sản phẩm & nhóm sản phẩm động (Admin)**: Bổ sung endpoint `/api/v1/leads/products` và `ProductCatalogModal.tsx` (guard quyền `SYSTEM_USER_ADMIN`) giúp Admin thêm chi tiết dòng LED (`P2`, `P2.5`, `P3`...) hoặc tạo nhóm sản phẩm mới qua `products` + `SystemSetting` (`lead_product_group_labels_v1`) mà vẫn giữ nguyên 25 bản ghi seed gốc.
+3. **Làm rõ tên công trình & thông báo chuyển Lead**: Làm rõ nhãn/placeholder *Tên công trình / Dự án cụ thể* để tránh trùng với *Sản phẩm quan tâm*, gửi thông báo chuông CRM kèm deep-link `/leads?leadId=...` cả khi chuyển kinh doanh lúc tạo mới, đồng thời bổ sung thông báo nổi toàn CRM + tiếng chuông nhẹ + thông báo góc màn hình Windows/Chrome khi mở tab khác (`SessionContext`, `WorkspaceShell`), thanh ghim Lead vừa bàn giao chờ tiếp nhận và nút **Copy tin nhắn & link gửi Zalo** trên `LeadsWorkspace`.
+4. **Nút tắt Quản lý danh mục SP**: Bổ sung thêm nút `+ Quản lý danh mục` cho Admin ngay trong khối `Sản phẩm quan tâm` của form chi tiết Lead.

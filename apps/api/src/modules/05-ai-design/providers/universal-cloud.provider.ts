@@ -174,7 +174,7 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
           form.append('model', effectiveModel);
           const editInstruction = hasSitePhoto
             ? `STRICTLY preserve the exact original provided photo background, structure, objects, lighting, and camera angle. Only apply the user's exact requested edit cleanly onto the provided image: ${prompt}`
-            : `Use the provided product reference image(s) faithfully without altering their shape, logo, or details: ${prompt}`;
+            : `Design a crisp, high-contrast commercial banner strictly following every instruction in this user prompt (background, colors, theme, headline, layout, lighting). Place the attached company product reference image faithfully as a hero visual inside the banner without altering its real product shape, proportions, or logo: ${prompt}`;
           form.append('prompt', editInstruction);
           form.append('size', chosenSize);
           if (includeQuality && isGptImageFamily) {

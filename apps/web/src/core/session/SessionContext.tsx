@@ -10,7 +10,7 @@ import React, {
   useState,
 } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import type { PublicBrandingDto, SessionUserDto } from '@toantrung/contracts';
+import type { NotificationDto, PublicBrandingDto, SessionUserDto } from '@toantrung/contracts';
 import {
   apiRequest,
   clearAllApiCache,
@@ -85,11 +85,15 @@ interface SessionContextValue {
   loading: boolean;
   branding: PublicBrandingDto;
   unreadCount: number;
+  latestAlertNotification: NotificationDto | null;
+  desktopNotifPermission: NotificationPermission | 'unsupported';
   refreshSession: () => Promise<SessionUserDto | null>;
   refreshBranding: () => Promise<void>;
   refreshUnreadCount: () => Promise<void>;
   setBrandingState: (next: PublicBrandingDto) => void;
   setUnreadCountState: (count: number) => void;
+  dismissLatestAlert: () => void;
+  requestDesktopNotifPermission: () => Promise<NotificationPermission | 'unsupported'>;
   logout: () => Promise<void>;
 }
 
@@ -98,13 +102,52 @@ const SessionContext = createContext<SessionContextValue>({
   loading: true,
   branding: DEFAULT_BRANDING,
   unreadCount: 0,
+  latestAlertNotification: null,
+  desktopNotifPermission: 'unsupported',
   refreshSession: async () => null,
   refreshBranding: async () => {},
   refreshUnreadCount: async () => {},
   setBrandingState: () => {},
   setUnreadCountState: () => {},
+  dismissLatestAlert: () => {},
+  requestDesktopNotifPermission: async () => 'unsupported',
   logout: async () => {},
 });
+
+function playGentleNotificationChime() {
+  if (typeof window === 'undefined') return;
+  try {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const osc1 = ctx.createOscillator();
+    const gain1 = ctx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(880, now);
+    gain1.gain.setValueAtTime(0.06, now);
+    gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+    osc1.connect(gain1);
+    gain1.connect(ctx.destination);
+    osc1.start(now);
+    osc1.stop(now + 0.14);
+
+    const osc2 = ctx.createOscillator();
+    const gain2 = ctx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(1174.66, now + 0.09);
+    gain2.gain.setValueAtTime(0.07, now + 0.09);
+    gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+    osc2.connect(gain2);
+    gain2.connect(ctx.destination);
+    osc2.start(now + 0.09);
+    osc2.stop(now + 0.28);
+  } catch {
+    // Ignore autoplay restriction or missing Web Audio support
+  }
+}
 
 function SessionAuthRedirect({
   loading,
@@ -130,12 +173,50 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [branding, setBranding] = useState<PublicBrandingDto>(DEFAULT_BRANDING);
   const [unreadCount, setUnreadCount] = useState<number>(0);
+  const [latestAlertNotification, setLatestAlertNotification] = useState<NotificationDto | null>(null);
+  const [desktopNotifPermission, setDesktopNotifPermission] = useState<NotificationPermission | 'unsupported'>('unsupported');
   const router = useRouter();
 
   const prevRevisionsRef = useRef<Record<string, number> | null>(null);
   const prevVnDateRef = useRef<string | null>(null);
   const lastRevisionCheckAtRef = useRef<number>(0);
   const pollInFlightRef = useRef<boolean>(false);
+  const seenNotificationIdsRef = useRef<Set<number>>(new Set());
+  const notifBaselineLoadedRef = useRef<boolean>(false);
+  const prevUnreadCountRef = useRef<number>(0);
+  const baseTitleRef = useRef<string>('Toàn Trung CRM');
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setDesktopNotifPermission(Notification.permission);
+    } else {
+      setDesktopNotifPermission('unsupported');
+    }
+    if (typeof document !== 'undefined' && document.title) {
+      baseTitleRef.current = document.title;
+    }
+  }, []);
+
+  const dismissLatestAlert = useCallback(() => {
+    setLatestAlertNotification(null);
+    if (typeof document !== 'undefined') {
+      document.title = baseTitleRef.current;
+    }
+  }, []);
+
+  const requestDesktopNotifPermission = useCallback(async (): Promise<NotificationPermission | 'unsupported'> => {
+    if (typeof window === 'undefined' || !('Notification' in window)) {
+      setDesktopNotifPermission('unsupported');
+      return 'unsupported';
+    }
+    try {
+      const perm = await Notification.requestPermission();
+      setDesktopNotifPermission(perm);
+      return perm;
+    } catch {
+      return Notification.permission;
+    }
+  }, []);
 
   const refreshBranding = useCallback(async () => {
     try {
@@ -189,18 +270,87 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     });
   }, [refreshBranding, refreshSession, refreshUnreadCount]);
 
-  // Central visibility-aware revision poller & midnight rollover detector
+  // Central visibility-aware revision poller, cross-machine incoming transfer alert & midnight rollover detector
   useEffect(() => {
     if (!user) {
       prevRevisionsRef.current = null;
       prevVnDateRef.current = null;
+      seenNotificationIdsRef.current.clear();
+      notifBaselineLoadedRef.current = false;
+      prevUnreadCountRef.current = 0;
+      setLatestAlertNotification(null);
       return;
     }
 
     let cancelled = false;
+
+    const surfaceNewNotifications = async () => {
+      try {
+        const res = await apiRequest<{ items: NotificationDto[]; unreadCount: number }>(
+          '/api/v1/notifications',
+          { skipCache: true },
+        );
+        if (cancelled) return;
+        const items = res.items || [];
+        const newUnread = items.filter(
+          (item) => !item.isRead && !seenNotificationIdsRef.current.has(item.id),
+        );
+        for (const item of items) {
+          seenNotificationIdsRef.current.add(item.id);
+        }
+        setUnreadCount(res.unreadCount ?? 0);
+        prevUnreadCountRef.current = res.unreadCount ?? 0;
+
+        if (!notifBaselineLoadedRef.current) {
+          notifBaselineLoadedRef.current = true;
+          return;
+        }
+        if (newUnread.length > 0) {
+          const priorityNotif =
+            newUnread.find(
+              (n) =>
+                n.title.toLowerCase().includes('bàn giao lead') ||
+                n.category.toLowerCase() === 'lead',
+            ) || newUnread[0];
+          setLatestAlertNotification(priorityNotif);
+          playGentleNotificationChime();
+
+          if (
+            typeof window !== 'undefined' &&
+            'Notification' in window &&
+            Notification.permission === 'granted'
+          ) {
+            try {
+              const desktopNotif = new Notification(priorityNotif.title, {
+                body: priorityNotif.summary,
+                tag: `tt-notif-${priorityNotif.id}`,
+              });
+              desktopNotif.onclick = () => {
+                window.focus();
+                if (priorityNotif.actionUrl) {
+                  router.push(priorityNotif.actionUrl);
+                }
+                setLatestAlertNotification(null);
+                desktopNotif.close();
+              };
+            } catch {
+              // Ignore OS notification error
+            }
+          }
+        }
+      } catch {
+        // Ignore transient notification fetch error
+      }
+    };
+
+    void surfaceNewNotifications();
+
     const checkRevisions = async (force = false) => {
       if (cancelled || pollInFlightRef.current) return;
-      if (!force && typeof document !== 'undefined' && document.hidden) return;
+      const isHidden = typeof document !== 'undefined' && document.hidden;
+      if (!force && isHidden && Date.now() - lastRevisionCheckAtRef.current < 28_000) {
+        return;
+      }
       pollInFlightRef.current = true;
       try {
         const res = await apiRequest<SystemRevisionsDto>('/api/v1/system/revisions', {
@@ -209,8 +359,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         if (cancelled) return;
         lastRevisionCheckAtRef.current = Date.now();
 
-        if (typeof res.unreadCount === 'number') {
-          setUnreadCount(res.unreadCount);
+        const nextUnread = typeof res.unreadCount === 'number' ? res.unreadCount : undefined;
+        const unreadIncreased =
+          typeof nextUnread === 'number' && nextUnread > prevUnreadCountRef.current;
+        if (typeof nextUnread === 'number') {
+          setUnreadCount(nextUnread);
+          prevUnreadCountRef.current = nextUnread;
         }
 
         const prevDate = prevVnDateRef.current;
@@ -224,11 +378,13 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         }
 
         const prevRev = prevRevisionsRef.current;
+        let notificationsDomainChanged = false;
         if (prevRev && res.revisions) {
           const changedDomains: SyncDomain[] = [];
           for (const [domain, rev] of Object.entries(res.revisions)) {
             if (prevRev[domain] !== rev) {
               changedDomains.push(domain as SyncDomain);
+              if (domain === 'notifications') notificationsDomainChanged = true;
             }
           }
           if (changedDomains.length > 0) {
@@ -242,6 +398,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         if (res.revisions) {
           prevRevisionsRef.current = { ...res.revisions };
         }
+
+        if (notifBaselineLoadedRef.current && (unreadIncreased || notificationsDomainChanged)) {
+          void surfaceNewNotifications();
+        }
       } catch {
         // Silent background check error; retry on next cadence
       } finally {
@@ -252,14 +412,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     void checkRevisions(true);
 
     const intervalId = window.setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
       void checkRevisions(false);
     }, 15_000);
 
     const onVisibilityChange = () => {
-      if (typeof document !== 'undefined' && !document.hidden) {
-        if (Date.now() - lastRevisionCheckAtRef.current >= 10_000) {
-          void checkRevisions(true);
+      if (typeof document !== 'undefined') {
+        if (!document.hidden) {
+          document.title = baseTitleRef.current;
+          if (Date.now() - lastRevisionCheckAtRef.current >= 10_000) {
+            void checkRevisions(true);
+          }
         }
       }
     };
@@ -282,7 +444,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         document.removeEventListener('visibilitychange', onVisibilityChange);
       }
     };
-  }, [user, refreshBranding, refreshUnreadCount]);
+  }, [user, router, refreshBranding, refreshUnreadCount]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (latestAlertNotification && unreadCount > 0 && document.hidden) {
+      document.title = `🔔 (${unreadCount}) ${latestAlertNotification.title}`;
+    } else if (!latestAlertNotification || unreadCount === 0) {
+      document.title = baseTitleRef.current;
+    }
+  }, [latestAlertNotification, unreadCount]);
 
   const logout = useCallback(async () => {
     try {
@@ -298,8 +469,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     clearAllApiCache();
     prevRevisionsRef.current = null;
     prevVnDateRef.current = null;
+    seenNotificationIdsRef.current.clear();
+    notifBaselineLoadedRef.current = false;
+    prevUnreadCountRef.current = 0;
     setUser(null);
     setUnreadCount(0);
+    setLatestAlertNotification(null);
     router.replace('/login');
   }, [router, user?.csrfToken]);
 
@@ -309,14 +484,31 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       loading,
       branding,
       unreadCount,
+      latestAlertNotification,
+      desktopNotifPermission,
       refreshSession,
       refreshBranding,
       refreshUnreadCount,
       setBrandingState: setBranding,
       setUnreadCountState: setUnreadCount,
+      dismissLatestAlert,
+      requestDesktopNotifPermission,
       logout,
     }),
-    [user, loading, branding, unreadCount, refreshSession, refreshBranding, refreshUnreadCount, logout],
+    [
+      user,
+      loading,
+      branding,
+      unreadCount,
+      latestAlertNotification,
+      desktopNotifPermission,
+      refreshSession,
+      refreshBranding,
+      refreshUnreadCount,
+      dismissLatestAlert,
+      requestDesktopNotifPermission,
+      logout,
+    ],
   );
 
   return (

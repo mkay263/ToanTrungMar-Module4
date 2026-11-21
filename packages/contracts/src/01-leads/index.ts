@@ -166,7 +166,17 @@ export interface ProductCatalogDto {
   productCode: string;
   productName: string;
   category: 'MAN_HINH_LED' | 'BANG_DIEN_TU' | 'KHAC';
+  categoryGroup?: string;
+  categoryGroupLabel?: string;
+  unit?: string;
   isActive: boolean;
+}
+
+export interface ProductGroupOptionDto {
+  groupKey: string;
+  label: string;
+  category: 'MAN_HINH_LED' | 'BANG_DIEN_TU' | 'KHAC';
+  productCount: number;
 }
 
 export interface LeadAttachmentDto {
@@ -434,5 +444,39 @@ export const CreatePriceCheckAlertSchema = z.object({
 });
 
 export type CreatePriceCheckAlertDto = z.infer<typeof CreatePriceCheckAlertSchema>;
+
+export const CreateProductCatalogItemSchema = z.object({
+  productName: z
+    .string()
+    .trim()
+    .min(2, 'Tên sản phẩm phải có ít nhất 2 ký tự.')
+    .max(120, 'Tên sản phẩm tối đa 120 ký tự.'),
+  categoryGroup: z
+    .string()
+    .trim()
+    .min(2, 'Vui lòng chọn hoặc nhập mã nhóm sản phẩm.')
+    .max(64),
+  categoryGroupLabel: z
+    .string()
+    .trim()
+    .min(2, 'Tên hiển thị nhóm sản phẩm cần tối thiểu 2 ký tự.')
+    .max(80)
+    .optional(),
+  productCode: z.string().trim().min(2).max(64).optional(),
+  unit: z.string().trim().min(1).max(30).default('m2'),
+});
+
+export type CreateProductCatalogItemDto = z.infer<typeof CreateProductCatalogItemSchema>;
+
+export const UpdateProductCatalogItemSchema = z.object({
+  productId: z.number().int().positive(),
+  productName: z.string().trim().min(2).max(120).optional(),
+  categoryGroup: z.string().trim().min(2).max(64).optional(),
+  categoryGroupLabel: z.string().trim().min(2).max(80).optional(),
+  unit: z.string().trim().min(1).max(30).optional(),
+  isActive: z.boolean().optional(),
+});
+
+export type UpdateProductCatalogItemDto = z.infer<typeof UpdateProductCatalogItemSchema>;
 
 export * from './vietnam-address';

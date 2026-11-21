@@ -91,6 +91,19 @@ const UNIFIED_LEAD_SOURCES: Array<{
   { label: 'Hồ sơ Đấu thầu', channel: 'email' },
 ];
 
+const DEFAULT_GROUP_LABELS: Record<string, string> = {
+  led_screen: 'Màn hình LED',
+  electronic_board: 'Bảng điện tử & Hiển thị số',
+  other: 'Dịch vụ / Nhu cầu khác',
+};
+
+function resolveProductGroupKey(p: ProductCatalogDto): string {
+  if (p.categoryGroup && p.categoryGroup.trim()) return p.categoryGroup.trim();
+  if (p.category === 'MAN_HINH_LED') return 'led_screen';
+  if (p.category === 'BANG_DIEN_TU') return 'electronic_board';
+  return 'other';
+}
+
 function cleanProductLabel(name: string): string {
   return name
     .replace(/^Khác\s*\(([^)]+)\)$/i, '$1 khác')
@@ -109,9 +122,7 @@ const ProductCheckboxGrid = memo(function ProductCheckboxGrid({
   onAddCustomItem,
   onRemoveCustomItem,
 }: ProductCheckboxGridProps) {
-  const [activeCategory, setActiveCategory] = useState<'MAN_HINH_LED' | 'BANG_DIEN_TU' | 'KHAC'>(
-    'MAN_HINH_LED',
-  );
+  const [activeGroupKey, setActiveGroupKey] = useState<string>('led_screen');
   const [productSearch, setProductSearch] = useState('');
   const [customDraft, setCustomDraft] = useState('');
 
@@ -124,23 +135,34 @@ const ProductCheckboxGrid = memo(function ProductCheckboxGrid({
     setCustomDraft('');
   };
 
-  const categoryDefs = [
-    {
-      category: 'MAN_HINH_LED' as const,
-      title: 'Màn hình LED',
-      count: products.filter((p) => p.category === 'MAN_HINH_LED').length,
-    },
-    {
-      category: 'BANG_DIEN_TU' as const,
-      title: 'Bảng điện tử & Hiển thị số',
-      count: products.filter((p) => p.category === 'BANG_DIEN_TU').length,
-    },
-    {
-      category: 'KHAC' as const,
-      title: 'Dịch vụ / Nhu cầu khác',
-      count: products.filter((p) => p.category === 'KHAC').length,
-    },
-  ];
+  const categoryDefs = useMemo(() => {
+    const map = new Map<string, { groupKey: string; title: string; count: number; selectedCount: number }>();
+    const coreOrder = ['led_screen', 'electronic_board', 'other'];
+    for (const k of coreOrder) {
+      map.set(k, {
+        groupKey: k,
+        title: DEFAULT_GROUP_LABELS[k] || k,
+        count: 0,
+        selectedCount: 0,
+      });
+    }
+    for (const p of products) {
+      const k = resolveProductGroupKey(p);
+      const existing = map.get(k) || {
+        groupKey: k,
+        title: p.categoryGroupLabel || DEFAULT_GROUP_LABELS[k] || k,
+        count: 0,
+        selectedCount: 0,
+      };
+      if (p.categoryGroupLabel && p.categoryGroupLabel.trim()) {
+        existing.title = p.categoryGroupLabel.trim();
+      }
+      existing.count += 1;
+      if (selectedSet.has(p.id)) existing.selectedCount += 1;
+      map.set(k, existing);
+    }
+    return Array.from(map.values()).filter((g) => g.count > 0 || coreOrder.includes(g.groupKey));
+  }, [products, selectedSet]);
 
   const visibleProducts = useMemo(() => {
     const q = productSearch.trim().toLowerCase();
@@ -148,9 +170,9 @@ const ProductCheckboxGrid = memo(function ProductCheckboxGrid({
       if (q) {
         return cleanProductLabel(p.productName).toLowerCase().includes(q);
       }
-      return p.category === activeCategory;
+      return resolveProductGroupKey(p) === activeGroupKey;
     });
-  }, [products, activeCategory, productSearch]);
+  }, [products, activeGroupKey, productSearch]);
 
   return (
     <div className="p-4 rounded-xl border border-slate-200/90 bg-white space-y-3">
@@ -231,37 +253,46 @@ const ProductCheckboxGrid = memo(function ProductCheckboxGrid({
         {/* Cột trái: Danh mục nhóm */}
         <div className="sm:col-span-4 flex flex-col gap-1">
           {categoryDefs.map((cat) => {
-            const isActive = !productSearch.trim() && activeCategory === cat.category;
+            const isActive = !productSearch.trim() && activeGroupKey === cat.groupKey;
             return (
               <button
-                key={cat.category}
+                key={cat.groupKey}
                 type="button"
                 onClick={() => {
                   setProductSearch('');
-                  setActiveCategory(cat.category);
+                  setActiveGroupKey(cat.groupKey);
                 }}
-                className={`w-full text-left px-3 py-2 rounded-lg text-xs transition flex items-center justify-between ${
+                className={`w-full text-left px-3 py-2 rounded-lg text-xs transition flex items-center justify-between gap-1.5 ${
                   isActive
                     ? 'bg-blue-50/90 text-[#1E3A8A] font-bold border-l-4 border-l-[#2563EB]'
                     : 'text-slate-700 hover:bg-slate-50 font-medium'
                 }`}
               >
-                <span>{cat.title}</span>
-                <span className="text-[11px] text-slate-400">({cat.count})</span>
+                <span className="truncate">{cat.title}</span>
+                <span className="inline-flex items-center gap-1 shrink-0">
+                  {cat.selectedCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-[#2563EB] text-white text-[10px] font-bold leading-none">
+                      {cat.selectedCount}
+                    </span>
+                  )}
+                  <span className="text-[11px] text-slate-400">({cat.count})</span>
+                </span>
               </button>
             );
           })}
         </div>
 
-        {/* Cột phải: Chỉ hiển thị các sản phẩm của mục đang chọn */}
+        {/* Cột phải: Chỉ hiển thị các sản phẩm của mục đang chọn (Hỗ trợ chọn nhiều sản phẩm cùng lúc) */}
         <div className="sm:col-span-8 p-3 rounded-xl border border-slate-200/90 bg-slate-50/40 space-y-2.5">
+          <div className="text-[11px] text-slate-500">
+            Có thể tick chọn nhiều sản phẩm trong cùng nhóm hoặc khác nhóm.
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {visibleProducts.map((p) => {
               const checked = selectedSet.has(p.id);
               return (
                 <label
                   key={p.id}
-                  onClick={() => onToggleProduct(p.id)}
                   className={`flex items-center gap-2.5 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
                     checked
                       ? 'bg-blue-50/80 border-blue-300 text-[#1E3A8A] font-semibold'
@@ -271,8 +302,8 @@ const ProductCheckboxGrid = memo(function ProductCheckboxGrid({
                   <input
                     type="checkbox"
                     checked={checked}
-                    onChange={() => {}}
-                    className="w-4 h-4 accent-[#2563EB] rounded pointer-events-none"
+                    onChange={() => onToggleProduct(p.id)}
+                    className="w-4 h-4 accent-[#2563EB] rounded cursor-pointer"
                   />
                   <span className="truncate">{cleanProductLabel(p.productName)}</span>
                 </label>
@@ -280,7 +311,7 @@ const ProductCheckboxGrid = memo(function ProductCheckboxGrid({
             })}
           </div>
 
-          {(activeCategory === 'KHAC' || productSearch.trim() !== '') && (
+          {(activeGroupKey === 'other' || productSearch.trim() !== '') && (
             <div className="pt-2 border-t border-slate-200/80 flex gap-1.5">
               <input
                 type="text"
@@ -321,7 +352,17 @@ interface ManualLeadModalProps {
   onOpenExistingLead?: (leadId: number) => void;
   currentUserId?: number;
   csrfToken?: string;
-  onCreatedSuccess: (leadCode: string, assignedMsg: string) => Promise<void>;
+  onCreatedSuccess: (
+    leadCode: string,
+    assignedMsg: string,
+    transferMeta?: {
+      leadId: number;
+      leadCode: string;
+      targetSalesName: string;
+      reason: string;
+      label: string;
+    },
+  ) => Promise<void>;
 }
 
 function normalizePhoneDigits(raw: string): string {
@@ -531,11 +572,24 @@ export function ManualLeadModal({
         csrfToken,
         body: parsed.data,
       });
+      const targetSalesObj =
+        tickReassign && reassignSalesId
+          ? salesOptions.find((s) => s.id === Number(reassignSalesId))
+          : undefined;
       await onCreatedSuccess(
         created.leadCode,
         tickReassign && reassignSalesId
           ? 'Đã chuyển giao cho NVKD được chỉ định.'
           : 'Đã gán cho người tạo.',
+        tickReassign && reassignSalesId
+          ? {
+              leadId: created.id,
+              leadCode: created.leadCode,
+              targetSalesName: targetSalesObj?.fullName || `NVKD #${reassignSalesId}`,
+              reason: reassignReason,
+              label: projectName || companyName || phone,
+            }
+          : undefined,
       );
       onClose();
     } catch (err) {
@@ -972,15 +1026,18 @@ export function ManualLeadModal({
 
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">
-                  Tên dự án / Công trình
+                  Tên công trình / Dự án cụ thể
                 </label>
                 <input
                   name="projectName"
                   type="text"
                   defaultValue=""
-                  placeholder="VD: Màn hình LED Hội trường..."
+                  placeholder="VD: Hội trường UBND Q.1, Showroom Toyota Thủ Đức..."
                   className="w-full h-9 px-3 rounded-lg border border-slate-200 font-medium text-slate-900 focus:outline-none focus:border-[#1E3A8A]"
                 />
+                <span className="block text-[10.5px] text-slate-400 mt-0.5">
+                  Ghi tên công trình/địa điểm để kiểm tra trùng dự án; chủng loại SP chọn ở mục bên dưới.
+                </span>
               </div>
 
               <div>

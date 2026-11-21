@@ -1978,52 +1978,57 @@ export async function processChatDesignRequest(
     ]),
   );
 
-  // Gather any Product Reference Photos (ảnh sản phẩm mẫu từ Kho Sản phẩm Công ty dùng chung hoặc của dự án)
-  const requestedProductIds = new Set(input.referenceProductPhotoIds || []);
-  const productReferencePhotoObjs = photosList.filter(
-    (p) => requestedProductIds.has(p.id) || (requestedProductIds.size === 0 && p.photoRole === 'product_reference')
-  );
+  // Gather any Product Reference Photos (only when NOT explicitly running pure-prompt banner mode)
+  const isPromptOnlyBannerMode = input.bannerMode === 'prompt_only';
+  const requestedProductIds = new Set(isPromptOnlyBannerMode ? [] : input.referenceProductPhotoIds || []);
+  const productReferencePhotoObjs = isPromptOnlyBannerMode
+    ? []
+    : photosList.filter(
+        (p) => requestedProductIds.has(p.id) || (requestedProductIds.size === 0 && p.photoRole === 'product_reference')
+      );
   const productReferenceBuffers: Array<{ buffer: Buffer; mimeType: string; name: string }> = [];
   const attachedProductPhotosMeta: Array<{ id: string; name: string; url: string }> = [];
   const seenStorageKeys = new Set<string>();
 
-  for (const prodPhoto of productReferencePhotoObjs) {
-    attachedProductPhotosMeta.push({
-      id: prodPhoto.id,
-      name: prodPhoto.name,
-      url: prodPhoto.url,
-    });
-    if (prodPhoto.storageObjectKey && !seenStorageKeys.has(prodPhoto.storageObjectKey)) {
-      seenStorageKeys.add(prodPhoto.storageObjectKey);
-      const f = readPrivateBusinessFile(prodPhoto.storageObjectKey);
-      if (f && f.buffer.length > 0) {
-        productReferenceBuffers.push({
-          buffer: f.buffer,
-          mimeType: f.mimeType || 'image/jpeg',
-          name: prodPhoto.name,
-        });
-      }
-    }
-  }
-
-  // Also support Company Product Vault photos selected across projects via referenceProductPhotoUrls
-  for (const rawUrl of input.referenceProductPhotoUrls || []) {
-    try {
-      const q = rawUrl.includes('?') ? rawUrl.split('?')[1] || '' : '';
-      const storageKey = new URLSearchParams(q).get('key');
-      if (storageKey && !seenStorageKeys.has(storageKey)) {
-        seenStorageKeys.add(storageKey);
-        const f = readPrivateBusinessFile(storageKey);
+  if (!isPromptOnlyBannerMode) {
+    for (const prodPhoto of productReferencePhotoObjs) {
+      attachedProductPhotosMeta.push({
+        id: prodPhoto.id,
+        name: prodPhoto.name,
+        url: prodPhoto.url,
+      });
+      if (prodPhoto.storageObjectKey && !seenStorageKeys.has(prodPhoto.storageObjectKey)) {
+        seenStorageKeys.add(prodPhoto.storageObjectKey);
+        const f = readPrivateBusinessFile(prodPhoto.storageObjectKey);
         if (f && f.buffer.length > 0) {
           productReferenceBuffers.push({
             buffer: f.buffer,
             mimeType: f.mimeType || 'image/jpeg',
-            name: input.referenceProductName || f.fileName || 'san-pham-cong-ty.png',
+            name: prodPhoto.name,
           });
         }
       }
-    } catch {
-      // ignore invalid url
+    }
+
+    // Also support Company Product Vault photos selected across projects via referenceProductPhotoUrls
+    for (const rawUrl of input.referenceProductPhotoUrls || []) {
+      try {
+        const q = rawUrl.includes('?') ? rawUrl.split('?')[1] || '' : '';
+        const storageKey = new URLSearchParams(q).get('key');
+        if (storageKey && !seenStorageKeys.has(storageKey)) {
+          seenStorageKeys.add(storageKey);
+          const f = readPrivateBusinessFile(storageKey);
+          if (f && f.buffer.length > 0) {
+            productReferenceBuffers.push({
+              buffer: f.buffer,
+              mimeType: f.mimeType || 'image/jpeg',
+              name: input.referenceProductName || f.fileName || 'san-pham-cong-ty.png',
+            });
+          }
+        }
+      } catch {
+        // ignore invalid url
+      }
     }
   }
 
@@ -2744,9 +2749,21 @@ export async function processChatDesignRequest(
   }
 
   const effectiveTaskCode: DesignTaskCode =
-    effectiveDbType === 'banner'
-      ? 'banner_generate'
-      : input.taskCode || 'perspective_compose';
+    input.taskCode === 'design_edit'
+      ? 'design_edit'
+      : effectiveDbType === 'banner'
+        ? 'banner_generate'
+        : input.taskCode || 'perspective_compose';
+
+  if (
+    input.bannerMode === 'with_product' &&
+    effectiveTaskCode === 'banner_generate' &&
+    productReferenceBuffers.length === 0
+  ) {
+    throw new Error(
+      'MISSING_PRODUCT_REFERENCE_IMAGE: Luồng "Tạo Banner ghép SP" yêu cầu chọn ít nhất 1 ảnh sản phẩm từ Kho SP Cty. Nếu muốn tạo banner thuần chữ không dùng ảnh SP, hãy chuyển sang luồng "Banner thuần Prompt".'
+    );
+  }
 
   if (
     effectiveTaskCode === 'design_edit' &&

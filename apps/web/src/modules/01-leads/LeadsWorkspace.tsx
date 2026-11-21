@@ -81,6 +81,10 @@ const GmailSyncModal = dynamic(
   () => import('./GmailSyncModal').then((m) => m.GmailSyncModal),
   { ssr: false },
 );
+const ProductCatalogModal = dynamic(
+  () => import('./ProductCatalogModal').then((m) => m.ProductCatalogModal),
+  { ssr: false },
+);
 const LeadActivityTimeline = dynamic(
   () => import('./LeadActivityTimeline').then((m) => m.LeadActivityTimeline),
   {
@@ -679,9 +683,7 @@ export function LeadsWorkspace() {
   const [customStartDate, setCustomStartDate] = useState('');
   const [customEndDate, setCustomEndDate] = useState('');
   const [showDateDropdown, setShowDateDropdown] = useState(false);
-  const [editActiveProductCategory, setEditActiveProductCategory] = useState<
-    'MAN_HINH_LED' | 'BANG_DIEN_TU' | 'KHAC'
-  >('MAN_HINH_LED');
+  const [editActiveProductGroup, setEditActiveProductGroup] = useState<string>('led_screen');
   const [editProductSearch, setEditProductSearch] = useState('');
   const [b2bHorizonFilter, setB2bHorizonFilter] = useState<string>('all');
   const [sourceWebsiteFilter, setSourceWebsiteFilter] = useState<string>('all');
@@ -710,7 +712,16 @@ export function LeadsWorkspace() {
     'info' | 'pipeline' | 'attachments' | 'activity'
   >('info');
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showProductCatalogModal, setShowProductCatalogModal] = useState(false);
   const [showGmailSyncModal, setShowGmailSyncModal] = useState(false);
+  const [lastTransferShare, setLastTransferShare] = useState<{
+    leadId: number;
+    leadCode: string;
+    targetSalesName: string;
+    reason: string;
+    label: string;
+    copied?: boolean;
+  } | null>(null);
   const [gmailAutoSyncLive, setGmailAutoSyncLive] = useState(false);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importPreviewRows, setImportPreviewRows] = useState<
@@ -2224,8 +2235,18 @@ export function LeadsWorkspace() {
           reasonDetail: reassignDetail || null,
         },
       });
+      const targetSalesObj = salesOptions.find((s) => s.id === Number(reassignTargetId));
+      const fullTransferReason = reassignDetail ? `${reassignCategory}: ${reassignDetail}` : reassignCategory;
       isDetailDirtyRef.current = false;
-      setFeedbackMsg(`Đã chuyển giao Lead ${selectedLead.leadCode} thành công.`);
+      setFeedbackMsg(`Đã chuyển giao Lead ${selectedLead.leadCode} cho ${targetSalesObj?.fullName || 'NVKD mới'} và gửi thông báo CRM.`);
+      setLastTransferShare({
+        leadId: selectedLead.id,
+        leadCode: selectedLead.leadCode,
+        targetSalesName: targetSalesObj?.fullName || `NVKD #${reassignTargetId}`,
+        reason: fullTransferReason,
+        label: selectedLead.projectName || selectedLead.companyName || selectedLead.leadCode,
+        copied: false,
+      });
       await fetchLeads();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Lỗi chuyển giao Lead.');
@@ -2620,8 +2641,141 @@ export function LeadsWorkspace() {
     }
   };
 
+  const pendingTransferredToMeLeads = useMemo(() => {
+    if (!user) return [];
+    return leads.filter((l) => {
+      if (l.spamStatus !== 'NONE' || l.assignedSalesId !== user.id) return false;
+      if (l.pipelineStatus === 'won' || l.pipelineStatus === 'lost') return false;
+      const acts = l.activities || [];
+      const transferAct = acts.find(
+        (a) => a.actionType === 'reassign_sales' || a.actionType === 'auto_reassign',
+      );
+      if (!transferAct) return false;
+      const transferMs = new Date(transferAct.createdAt).getTime();
+      const confirmedMs = l.receivedConfirmedAt ? new Date(l.receivedConfirmedAt).getTime() : 0;
+      const hasConfirmActAfter = acts.some(
+        (a) => a.actionType === 'confirm_receive' && new Date(a.createdAt).getTime() >= transferMs,
+      );
+      return !hasConfirmActAfter && (!l.receivedConfirmedAt || transferMs > confirmedMs);
+    });
+  }, [leads, user]);
+
+  const handleCopyTransferZaloText = async () => {
+    if (!lastTransferShare || typeof window === 'undefined') return;
+    const directUrl = `${window.location.origin}/leads?leadId=${lastTransferShare.leadId}`;
+    const text = `[Toàn Trung CRM] Mình vừa chuyển giao Lead ${lastTransferShare.leadCode} (${lastTransferShare.label}) cho ${lastTransferShare.targetSalesName} · Lý do: ${lastTransferShare.reason}. Bấm link để mở & xác nhận tiếp nhận ngay: ${directUrl}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setLastTransferShare((prev) => (prev ? { ...prev, copied: true } : null));
+    } catch {
+      setFeedbackMsg(`Tin nhắn gửi Zalo: ${text}`);
+    }
+  };
+
   return (
     <div className="space-y-3.5">
+      {pendingTransferredToMeLeads.length > 0 && (
+        <div
+          role="region"
+          aria-label="Lead mới được chuyển giao chờ tiếp nhận"
+          className="rounded-xl border border-amber-300 bg-amber-50/90 px-4 py-3 shadow-2xs space-y-2"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-extrabold text-amber-950">
+              <Bell className="w-4 h-4 text-amber-700 shrink-0" />
+              <span>
+                Bạn có {pendingTransferredToMeLeads.length} Lead vừa được chuyển giao đang chờ xác nhận tiếp nhận:
+              </span>
+            </div>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            {pendingTransferredToMeLeads.slice(0, 3).map((tLead) => {
+              const transferAct = (tLead.activities || []).find(
+                (a) => a.actionType === 'reassign_sales' || a.actionType === 'auto_reassign',
+              );
+              return (
+                <div
+                  key={tLead.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-white px-3 py-2 text-xs"
+                >
+                  <div className="min-w-0 flex-1">
+                    <span className="font-extrabold text-[#1E3A8A]">{tLead.leadCode}</span>
+                    <span className="mx-1.5 text-slate-300">·</span>
+                    <span className="font-semibold text-slate-900">
+                      {tLead.projectName || tLead.companyName || tLead.phone}
+                    </span>
+                    {transferAct && (
+                      <span className="ml-2 text-slate-600">
+                        (Từ <strong>{transferAct.actorName}</strong>
+                        {transferAct.reason ? ` · ${transferAct.reason}` : ''})
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => openLeadDetail(tLead.id, 'info')}
+                      className="px-2.5 py-1 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-800 font-semibold"
+                    >
+                      Mở hồ sơ
+                    </button>
+                    <button
+                      type="button"
+                      disabled={submitting}
+                      onClick={() => void handleConfirmReceive(tLead)}
+                      className="px-2.5 py-1 rounded-lg bg-[#0BAF7C] hover:bg-emerald-700 text-white font-bold inline-flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>Xác nhận tiếp nhận</span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {lastTransferShare && (
+        <div
+          role="status"
+          className="rounded-xl border border-emerald-300 bg-emerald-50/90 px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+        >
+          <div className="flex items-center gap-2 text-emerald-950 min-w-0">
+            <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span className="truncate">
+              Đã chuyển giao <strong>{lastTransferShare.leadCode}</strong> cho{' '}
+              <strong>{lastTransferShare.targetSalesName}</strong> (đã gửi thông báo trên CRM).
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void handleCopyTransferZaloText()}
+              className={`px-3 py-1.5 rounded-lg font-bold inline-flex items-center gap-1.5 transition ${
+                lastTransferShare.copied
+                  ? 'bg-emerald-700 text-white'
+                  : 'bg-[#1E3A8A] hover:bg-[#1553A2] text-white'
+              }`}
+            >
+              <span>
+                {lastTransferShare.copied
+                  ? '✓ Đã copy! Dán gửi Zalo/Chat ngay'
+                  : '📋 Copy tin nhắn & link gửi Zalo'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setLastTransferShare(null)}
+              className="p-1 text-emerald-700 hover:text-emerald-950 font-bold"
+              title="Đóng"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* C06: Sáu ô tổng hợp chuẩn BA (Tổng Lead hợp lệ + 5 trạng thái bán hàng; ghi rõ bao gồm/loại trừ; không đánh số 1..6) */}
       <section aria-label="Tổng hợp trạng thái Lead" className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3">
         <button
@@ -2963,6 +3117,17 @@ export function LeadsWorkspace() {
             >
               <Plus aria-hidden="true" className="w-3.5 h-3.5" />
               <span>{UI_VOCABULARY.actions.createLead}</span>
+            </button>
+          )}
+          {user && hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN') && (
+            <button
+              type="button"
+              onClick={() => setShowProductCatalogModal(true)}
+              className="min-h-8 px-2.5 rounded-[10px] border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] text-xs font-semibold inline-flex items-center gap-1 transition-colors whitespace-nowrap"
+              title="Quản lý danh mục sản phẩm & thêm nhóm sản phẩm mới (Dành cho Admin)"
+            >
+              <Layers aria-hidden="true" className="w-3.5 h-3.5" />
+              <span>Danh mục SP</span>
             </button>
           )}
         </div>
@@ -4081,8 +4246,11 @@ export function LeadsWorkspace() {
             setSelectedLeadId(leadId);
             setLeadDetailTab('info');
           }}
-          onCreatedSuccess={async (leadCode, assignedMsg) => {
+          onCreatedSuccess={async (leadCode, assignedMsg, transferMeta) => {
             setFeedbackMsg(`Đã tạo thành công hồ sơ ${leadCode}. ${assignedMsg}`);
+            if (transferMeta) {
+              setLastTransferShare({ ...transferMeta, copied: false });
+            }
             await fetchLeads();
           }}
         />
@@ -4097,6 +4265,16 @@ export function LeadsWorkspace() {
           onSynced={() => {
             void fetchLeads();
           }}
+        />
+      )}
+
+      {/* Modal Quản lý Danh mục Sản phẩm & Nhóm SP (Admin) */}
+      {showProductCatalogModal && (
+        <ProductCatalogModal
+          open={showProductCatalogModal}
+          onClose={() => setShowProductCatalogModal(false)}
+          csrfToken={user?.csrfToken}
+          onCatalogUpdated={() => fetchLeads(true)}
         />
       )}
 
@@ -5549,15 +5727,18 @@ export function LeadsWorkspace() {
                             </div>
                             <div>
                               <label className="block text-xs font-medium text-slate-600 mb-1">
-                                Tên dự án / Công trình
+                                Tên công trình / Dự án cụ thể
                               </label>
                               <input
                                 type="text"
                                 value={editProjectName}
                                 onChange={(e) => setEditProjectName(e.target.value)}
-                                placeholder="VD: Màn hình LED Hội trường..."
+                                placeholder="VD: Hội trường UBND Q.1, Showroom Toyota Thủ Đức..."
                                 className="w-full h-9 px-3 rounded-lg border border-slate-200 font-medium text-slate-900 focus:outline-none focus:border-[#1E3A8A]"
                               />
+                              <span className="block text-[10.5px] text-slate-400 mt-0.5">
+                                Tên công trình dùng kiểm tra trùng dự án; chủng loại SP tick chọn ở khối bên dưới.
+                              </span>
                             </div>
                             <div>
                               <label className="block text-xs font-medium text-slate-600 mb-1">
@@ -5613,9 +5794,20 @@ export function LeadsWorkspace() {
                                 2. Sản phẩm quan tâm *
                               </span>
                             </div>
-                            <span className="px-2.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-bold">
-                              Đã chọn {editProductIds.length + editCustomServiceItems.length} sản phẩm
-                            </span>
+                            <div className="flex items-center gap-2">
+                              {user && hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN') && (
+                                <button
+                                  type="button"
+                                  onClick={() => setShowProductCatalogModal(true)}
+                                  className="px-2 py-0.5 rounded-md border border-blue-200 bg-white hover:bg-blue-50 text-[#1E3A8A] text-[11px] font-bold transition"
+                                >
+                                  + Quản lý danh mục
+                                </button>
+                              )}
+                              <span className="px-2.5 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-[#1E3A8A] text-xs font-bold">
+                                Đã chọn {editProductIds.length + editCustomServiceItems.length} sản phẩm
+                              </span>
+                            </div>
                           </div>
 
                           {/* Thanh tìm kiếm sản phẩm + Các thẻ sản phẩm đã chọn */}
@@ -5693,104 +5885,139 @@ export function LeadsWorkspace() {
                             </div>
                           </div>
 
-                          {/* Bố cục 2 cột: Cột trái chọn mục -> Cột phải chỉ sổ các sản phẩm thuộc mục đó */}
+                          {/* Bố cục 2 cột: Cột trái chọn nhóm -> Cột phải sổ sản phẩm của nhóm (Hỗ trợ chọn nhiều SP cùng nhóm) */}
                           <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-start pt-1">
-                            <div className="sm:col-span-4 flex flex-col gap-1">
-                              {(
-                                [
-                                  {
-                                    category: 'MAN_HINH_LED' as const,
-                                    title: 'Màn hình LED',
-                                    count: products.filter((p) => p.category === 'MAN_HINH_LED')
-                                      .length,
-                                  },
-                                  {
-                                    category: 'BANG_DIEN_TU' as const,
-                                    title: 'Bảng điện tử & Hiển thị số',
-                                    count: products.filter((p) => p.category === 'BANG_DIEN_TU')
-                                      .length,
-                                  },
-                                  {
-                                    category: 'KHAC' as const,
-                                    title: 'Dịch vụ / Nhu cầu khác',
-                                    count: products.filter((p) => p.category === 'KHAC').length,
-                                  },
-                                ]
-                              ).map((cat) => {
-                                const isActive =
-                                  !editProductSearch.trim() &&
-                                  editActiveProductCategory === cat.category;
-                                return (
-                                  <button
-                                    key={cat.category}
-                                    type="button"
-                                    onClick={() => {
-                                      setEditProductSearch('');
-                                      setEditActiveProductCategory(cat.category);
-                                    }}
-                                    className={`w-full text-left px-3 py-2 rounded-lg text-xs transition flex items-center justify-between ${
-                                      isActive
-                                        ? 'bg-blue-50/90 text-[#1E3A8A] font-bold border-l-4 border-l-[#2563EB]'
-                                        : 'text-slate-700 hover:bg-slate-50 font-medium'
-                                    }`}
-                                  >
-                                    <span>{cat.title}</span>
-                                    <span className="text-[11px] text-slate-400">
-                                      ({cat.count})
-                                    </span>
-                                  </button>
-                                );
-                              })}
-                            </div>
+                            {(() => {
+                              const getGroupKey = (p: ProductCatalogDto): string => {
+                                if (p.categoryGroup && p.categoryGroup.trim()) return p.categoryGroup.trim();
+                                if (p.category === 'MAN_HINH_LED') return 'led_screen';
+                                if (p.category === 'BANG_DIEN_TU') return 'electronic_board';
+                                return 'other';
+                              };
+                              const defaultLabels: Record<string, string> = {
+                                led_screen: 'Màn hình LED',
+                                electronic_board: 'Bảng điện tử & Hiển thị số',
+                                other: 'Dịch vụ / Nhu cầu khác',
+                              };
+                              const groupMap = new Map<
+                                string,
+                                { groupKey: string; title: string; count: number; selectedCount: number }
+                              >();
+                              const coreOrder = ['led_screen', 'electronic_board', 'other'];
+                              for (const k of coreOrder) {
+                                groupMap.set(k, {
+                                  groupKey: k,
+                                  title: defaultLabels[k] || k,
+                                  count: 0,
+                                  selectedCount: 0,
+                                });
+                              }
+                              for (const p of products) {
+                                const k = getGroupKey(p);
+                                const entry = groupMap.get(k) || {
+                                  groupKey: k,
+                                  title: p.categoryGroupLabel || defaultLabels[k] || k,
+                                  count: 0,
+                                  selectedCount: 0,
+                                };
+                                if (p.categoryGroupLabel && p.categoryGroupLabel.trim()) {
+                                  entry.title = p.categoryGroupLabel.trim();
+                                }
+                                entry.count += 1;
+                                if (editProductIds.includes(p.id)) entry.selectedCount += 1;
+                                groupMap.set(k, entry);
+                              }
+                              const groupList = Array.from(groupMap.values()).filter(
+                                (g) => g.count > 0 || coreOrder.includes(g.groupKey),
+                              );
 
-                            <div className="sm:col-span-8 p-3 rounded-xl border border-slate-200/90 bg-slate-50/40 space-y-2.5">
-                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                {products
-                                  .filter((p) => {
-                                    const q = editProductSearch.trim().toLowerCase();
-                                    if (q) {
-                                      return p.productName.toLowerCase().includes(q);
-                                    }
-                                    return p.category === editActiveProductCategory;
-                                  })
-                                  .map((p) => {
-                                    const checked = editProductIds.includes(p.id);
-                                    const cleanName = p.productName
-                                      .replace(/^Khác\s*\(([^)]+)\)$/i, '$1 khác')
-                                      .replace(/\s*\([^)]*\)/g, '')
-                                      .trim();
-                                    return (
-                                      <label
-                                        key={p.id}
-                                        onClick={() => {
-                                          setEditProductIds((prev) =>
-                                            prev.includes(p.id)
-                                              ? prev.length > 1
-                                                ? prev.filter((id) => id !== p.id)
-                                                : prev
-                                              : [...prev, p.id],
-                                          );
-                                        }}
-                                        className={`flex items-center gap-2.5 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
-                                          checked
-                                            ? 'bg-blue-50/80 border-blue-300 text-[#1E3A8A] font-semibold'
-                                            : 'bg-white border-slate-200/80 text-slate-700 hover:border-slate-300'
-                                        }`}
-                                      >
-                                        <input
-                                          type="checkbox"
-                                          checked={checked}
-                                          onChange={() => {}}
-                                          className="w-4 h-4 accent-[#2563EB] rounded pointer-events-none"
-                                        />
-                                        <span className="truncate">{cleanName}</span>
-                                      </label>
-                                    );
-                                  })}
-                              </div>
+                              const filteredProducts = products.filter((p) => {
+                                const q = editProductSearch.trim().toLowerCase();
+                                if (q) {
+                                  return p.productName.toLowerCase().includes(q);
+                                }
+                                return getGroupKey(p) === editActiveProductGroup;
+                              });
 
-                              {(editActiveProductCategory === 'KHAC' ||
-                                editProductSearch.trim() !== '') && (
+                              return (
+                                <>
+                                  <div className="sm:col-span-4 flex flex-col gap-1">
+                                    {groupList.map((cat) => {
+                                      const isActive =
+                                        !editProductSearch.trim() &&
+                                        editActiveProductGroup === cat.groupKey;
+                                      return (
+                                        <button
+                                          key={cat.groupKey}
+                                          type="button"
+                                          onClick={() => {
+                                            setEditProductSearch('');
+                                            setEditActiveProductGroup(cat.groupKey);
+                                          }}
+                                          className={`w-full text-left px-3 py-2 rounded-lg text-xs transition flex items-center justify-between gap-1.5 ${
+                                            isActive
+                                              ? 'bg-blue-50/90 text-[#1E3A8A] font-bold border-l-4 border-l-[#2563EB]'
+                                              : 'text-slate-700 hover:bg-slate-50 font-medium'
+                                          }`}
+                                        >
+                                          <span className="truncate">{cat.title}</span>
+                                          <span className="inline-flex items-center gap-1 shrink-0">
+                                            {cat.selectedCount > 0 && (
+                                              <span className="px-1.5 py-0.5 rounded-full bg-[#2563EB] text-white text-[10px] font-bold leading-none">
+                                                {cat.selectedCount}
+                                              </span>
+                                            )}
+                                            <span className="text-[11px] text-slate-400">
+                                              ({cat.count})
+                                            </span>
+                                          </span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+
+                                  <div className="sm:col-span-8 p-3 rounded-xl border border-slate-200/90 bg-slate-50/40 space-y-2.5">
+                                    <div className="text-[11px] text-slate-500">
+                                      Tick chọn nhiều sản phẩm cùng lúc (trong cùng nhóm hoặc khác nhóm).
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      {filteredProducts.map((p) => {
+                                        const checked = editProductIds.includes(p.id);
+                                        const cleanName = p.productName
+                                          .replace(/^Khác\s*\(([^)]+)\)$/i, '$1 khác')
+                                          .replace(/\s*\([^)]*\)/g, '')
+                                          .trim();
+                                        return (
+                                          <label
+                                            key={p.id}
+                                            className={`flex items-center gap-2.5 p-2 rounded-lg border text-xs cursor-pointer select-none transition ${
+                                              checked
+                                                ? 'bg-blue-50/80 border-blue-300 text-[#1E3A8A] font-semibold'
+                                                : 'bg-white border-slate-200/80 text-slate-700 hover:border-slate-300'
+                                            }`}
+                                          >
+                                            <input
+                                              type="checkbox"
+                                              checked={checked}
+                                              onChange={() => {
+                                                setEditProductIds((prev) =>
+                                                  prev.includes(p.id)
+                                                    ? prev.length > 1 || editCustomServiceItems.length > 0
+                                                      ? prev.filter((id) => id !== p.id)
+                                                      : prev
+                                                    : [...prev, p.id],
+                                                );
+                                              }}
+                                              className="w-4 h-4 accent-[#2563EB] rounded cursor-pointer"
+                                            />
+                                            <span className="truncate">{cleanName}</span>
+                                          </label>
+                                        );
+                                      })}
+                                    </div>
+
+                                    {(editActiveProductGroup === 'other' ||
+                                      editProductSearch.trim() !== '') && (
                                 <div className="pt-2 border-t border-slate-200/80 flex gap-1.5">
                                   <input
                                     type="text"
@@ -5848,6 +6075,9 @@ export function LeadsWorkspace() {
                                 </div>
                               )}
                             </div>
+                                </>
+                              );
+                            })()}
                           </div>
 
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">

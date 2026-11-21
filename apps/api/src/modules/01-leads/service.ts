@@ -5,7 +5,7 @@ import {
   parseBigIntString,
   transitionLeadWithVersion,
 } from '@toantrung/database';
-import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
+import { bumpDomainRevisions, getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import {
   containsMonetaryAmountText,
   hasBaPermission,
@@ -17,6 +17,7 @@ import {
   type ContactChannel,
   type CreateManualLeadDto,
   type CreatePrivateQuoteVersionDto,
+  type CreateProductCatalogItemDto,
   type LeadActivityDto,
   type LeadAttachmentDto,
   type LeadDesignSummaryDto,
@@ -26,11 +27,13 @@ import {
   type PipelineStatus,
   type PriceCheckAlertDto,
   type ProductCatalogDto,
+  type ProductGroupOptionDto,
   type ReassignLeadDto,
   type SalesAssigneeOptionDto,
   type SessionUserDto,
   type TransitionPipelineDto,
   type UpdateLeadDetailsDto,
+  type UpdateProductCatalogItemDto,
 } from '@toantrung/contracts';
 import {
   deletePrivateBusinessFile,
@@ -102,10 +105,95 @@ function maskEmail(email: string | null): string | null {
   return `${local.slice(0, 2)}***@${domain}`;
 }
 
+const SETTING_KEY_PRODUCT_GROUP_LABELS = 'lead_product_group_labels_v1';
+const DEFAULT_PRODUCT_GROUP_LABELS: Record<string, string> = {
+  led_screen: 'Màn hình LED',
+  electronic_board: 'Bảng điện tử & Hiển thị số',
+  other: 'Dịch vụ / Nhu cầu khác',
+};
+
 function mapProductCategory(group: string): ProductCatalogDto['category'] {
   if (group === 'led_screen') return 'MAN_HINH_LED';
   if (group === 'electronic_board') return 'BANG_DIEN_TU';
   return 'KHAC';
+}
+
+function slugifyCatalogIdentifier(raw: string, separator: '_' | '-', maxLen = 48): string {
+  const clean = (raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .replace(/[^a-zA-Z0-9]+/g, separator)
+    .replace(new RegExp(`^\\${separator}+|\\${separator}+$`, 'g'), '');
+  return clean.slice(0, maxLen);
+}
+
+async function loadProductGroupLabels(): Promise<Record<string, string>> {
+  const row = await prisma.systemSetting.findUnique({
+    where: { key: SETTING_KEY_PRODUCT_GROUP_LABELS },
+  });
+  if (!row?.value) return { ...DEFAULT_PRODUCT_GROUP_LABELS };
+  try {
+    const parsed = JSON.parse(row.value) as Record<string, unknown>;
+    const merged: Record<string, string> = { ...DEFAULT_PRODUCT_GROUP_LABELS };
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'string' && v.trim()) {
+        merged[k] = v.trim();
+      }
+    }
+    return merged;
+  } catch {
+    return { ...DEFAULT_PRODUCT_GROUP_LABELS };
+  }
+}
+
+async function saveCustomProductGroupLabel(
+  groupKey: string,
+  label: string,
+  updatedById?: number,
+): Promise<Record<string, string>> {
+  const current = await loadProductGroupLabels();
+  const trimmedLabel = label.trim();
+  if (trimmedLabel) {
+    current[groupKey] = trimmedLabel;
+    await prisma.systemSetting.upsert({
+      where: { key: SETTING_KEY_PRODUCT_GROUP_LABELS },
+      create: {
+        key: SETTING_KEY_PRODUCT_GROUP_LABELS,
+        value: JSON.stringify(current),
+        updatedById: updatedById ?? null,
+      },
+      update: {
+        value: JSON.stringify(current),
+        updatedById: updatedById ?? null,
+      },
+    });
+  }
+  return current;
+}
+
+function mapProductCatalogRow(
+  p: {
+    id: number;
+    productCode: string;
+    productName: string;
+    categoryGroup: string;
+    unit: string;
+    isActive: boolean;
+  },
+  labels: Record<string, string>,
+): ProductCatalogDto {
+  return {
+    id: p.id,
+    productCode: p.productCode,
+    productName: p.productName,
+    category: mapProductCategory(p.categoryGroup),
+    categoryGroup: p.categoryGroup,
+    categoryGroupLabel: labels[p.categoryGroup] || p.categoryGroup,
+    unit: p.unit,
+    isActive: p.isActive,
+  };
 }
 
 export async function generateNextLeadCode(): Promise<string> {
@@ -247,11 +335,12 @@ export async function listProductsAndSalesOptions(currentUser: SessionUserDto) {
     domains: ['leads', 'auth'],
     ttlMs: 60_000,
     compute: async () => {
-      const [products, salesUsers] = await Promise.all([
+      const [products, groupLabels, salesUsers] = await Promise.all([
         prisma.product.findMany({
           where: { isActive: true },
           orderBy: { id: 'asc' },
         }),
+        loadProductGroupLabels(),
         prisma.user.findMany({
           where: {
             isActive: true,
@@ -278,11 +367,11 @@ export async function listProductsAndSalesOptions(currentUser: SessionUserDto) {
           orderBy: { id: 'asc' },
         }),
       ]);
-      return { products, salesUsers };
+      return { products, groupLabels, salesUsers };
     },
   });
 
-  const { products, salesUsers } = cached.data;
+  const { products, groupLabels, salesUsers } = cached.data;
   const senderEntry = salesUsers.find((u) => u.id === currentUser.id);
   const senderActiveCount = senderEntry ? senderEntry._count.assignedLeads : 999;
 
@@ -304,13 +393,7 @@ export async function listProductsAndSalesOptions(currentUser: SessionUserDto) {
     };
   });
 
-  const productDtos: ProductCatalogDto[] = products.map((p) => ({
-    id: p.id,
-    productCode: p.productCode,
-    productName: p.productName,
-    category: mapProductCategory(p.categoryGroup),
-    isActive: p.isActive,
-  }));
+  const productDtos: ProductCatalogDto[] = products.map((p) => mapProductCatalogRow(p, groupLabels));
 
   return { products: productDtos, salesOptions };
 }
@@ -1025,6 +1108,23 @@ export async function createManualLead(actor: SessionUserDto, input: CreateManua
     }
   });
 
+  if (input.reassignToSalesId && input.reassignToSalesId !== actor.id) {
+    await prisma.notification
+      .create({
+        data: {
+          userId: input.reassignToSalesId,
+          title: `Nhận bàn giao Lead ${ingested.lead.leadCode}`,
+          summary: `${actor.fullName} vừa tạo và chuyển giao Lead ${input.companyName || normalizedPhone} cho bạn (${input.reassignReason || 'Chuyển ngay khi tạo mới'}).`,
+          category: 'Lead',
+          actionLabel: 'Mở hồ sơ Lead',
+          actionUrl: `/leads?leadId=${ingested.lead.id}`,
+          requiredPermission: 'LEAD_VIEW_OWN',
+        },
+      })
+      .catch(() => null);
+    bumpDomainRevisions(['leads', 'notifications'], 'lead_created_and_reassigned');
+  }
+
   return ingested.lead;
 }
 
@@ -1348,11 +1448,12 @@ export async function reassignLeadSales(
       title: `Nhận bàn giao Lead ${existing.leadCode}`,
       summary: `${actor.fullName} vừa chuyển giao Lead ${existing.companyName || existing.phone} cho bạn (${fullReason}).`,
       category: 'Lead',
-      actionLabel: 'Mở Quản lý Lead',
-      actionUrl: '/leads',
+      actionLabel: 'Mở hồ sơ Lead',
+      actionUrl: `/leads?leadId=${existing.id}`,
       requiredPermission: 'LEAD_VIEW_OWN',
     },
   });
+  bumpDomainRevisions(['leads', 'notifications'], 'lead_reassigned');
 
   return result;
 }
@@ -1939,5 +2040,136 @@ export async function setSalesReceivingStatus(actor: SessionUserDto, isReceiving
     select: { id: true, fullName: true, isReceivingLeads: true },
   });
   return updated;
+}
+
+export async function listProductCatalogWithGroups(includeInactive = false): Promise<{
+  products: ProductCatalogDto[];
+  groups: ProductGroupOptionDto[];
+}> {
+  const [rows, labels] = await Promise.all([
+    prisma.product.findMany({
+      where: includeInactive ? {} : { isActive: true },
+      orderBy: [{ id: 'asc' }],
+    }),
+    loadProductGroupLabels(),
+  ]);
+
+  const products = rows.map((p) => mapProductCatalogRow(p, labels));
+  const groupKeys = Array.from(
+    new Set([...Object.keys(DEFAULT_PRODUCT_GROUP_LABELS), ...Object.keys(labels), ...rows.map((r) => r.categoryGroup)]),
+  );
+  const groups: ProductGroupOptionDto[] = groupKeys.map((groupKey) => ({
+    groupKey,
+    label: labels[groupKey] || groupKey,
+    category: mapProductCategory(groupKey),
+    productCount: products.filter((p) => p.categoryGroup === groupKey && p.isActive).length,
+  }));
+
+  return { products, groups };
+}
+
+export async function createProductCatalogItem(
+  actor: SessionUserDto,
+  input: CreateProductCatalogItemDto,
+): Promise<{ product: ProductCatalogDto; groups: ProductGroupOptionDto[] }> {
+  if (!hasBaPermission(actor.roleCode, 'SYSTEM_USER_ADMIN')) {
+    throw new Error('FORBIDDEN: Chỉ Quản trị viên mới được phép thêm hoặc chỉnh sửa danh mục sản phẩm.');
+  }
+
+  const normalizedGroupKey =
+    input.categoryGroup in DEFAULT_PRODUCT_GROUP_LABELS
+      ? input.categoryGroup
+      : slugifyCatalogIdentifier(input.categoryGroup, '_', 48).toLowerCase();
+
+  if (!normalizedGroupKey) {
+    throw new Error('Mã nhóm sản phẩm không hợp lệ.');
+  }
+
+  const groupLabelToSave =
+    input.categoryGroupLabel?.trim() ||
+    (!(normalizedGroupKey in DEFAULT_PRODUCT_GROUP_LABELS) ? input.categoryGroup.trim() : '');
+  if (groupLabelToSave) {
+    await saveCustomProductGroupLabel(normalizedGroupKey, groupLabelToSave, actor.id);
+  }
+
+  const cleanName = input.productName.trim();
+  const sameGroupItems = await prisma.product.findMany({
+    where: { categoryGroup: normalizedGroupKey },
+    select: { id: true, productName: true },
+  });
+  if (sameGroupItems.some((item) => item.productName.trim().toLowerCase() === cleanName.toLowerCase())) {
+    throw new Error(`Sản phẩm "${cleanName}" đã có trong nhóm này. Bạn có thể bật hoặc sửa trực tiếp mục hiện có.`);
+  }
+
+  let baseCode = input.productCode?.trim()
+    ? slugifyCatalogIdentifier(input.productCode, '_', 48).toUpperCase()
+    : slugifyCatalogIdentifier(cleanName, '_', 48).toUpperCase();
+  if (!baseCode) {
+    baseCode = `SP_${Date.now()}`;
+  }
+
+  const existingCode = await prisma.product.findUnique({ where: { productCode: baseCode } });
+  let finalCode = baseCode;
+  if (existingCode) {
+    if (input.productCode?.trim()) {
+      throw new Error(`Mã sản phẩm "${baseCode}" đã tồn tại.`);
+    }
+    finalCode = `${baseCode.slice(0, 42)}_${Date.now().toString().slice(-4)}`;
+  }
+
+  const created = await prisma.product.create({
+    data: {
+      categoryGroup: normalizedGroupKey,
+      productCode: finalCode,
+      productName: cleanName,
+      unit: input.unit?.trim() || 'm2',
+      isActive: true,
+    },
+  });
+
+  bumpDomainRevisions(['leads'], 'product_catalog_created');
+  const catalog = await listProductCatalogWithGroups(true);
+  const createdDto = catalog.products.find((p) => p.id === created.id) || mapProductCatalogRow(created, await loadProductGroupLabels());
+  return { product: createdDto, groups: catalog.groups };
+}
+
+export async function updateProductCatalogItem(
+  actor: SessionUserDto,
+  input: UpdateProductCatalogItemDto,
+): Promise<{ product: ProductCatalogDto; groups: ProductGroupOptionDto[] }> {
+  if (!hasBaPermission(actor.roleCode, 'SYSTEM_USER_ADMIN')) {
+    throw new Error('FORBIDDEN: Chỉ Quản trị viên mới được phép cập nhật danh mục sản phẩm.');
+  }
+
+  const existing = await prisma.product.findUnique({ where: { id: input.productId } });
+  if (!existing) {
+    throw new Error('Không tìm thấy sản phẩm trong danh mục.');
+  }
+
+  let nextGroup = existing.categoryGroup;
+  if (input.categoryGroup) {
+    nextGroup =
+      input.categoryGroup in DEFAULT_PRODUCT_GROUP_LABELS
+        ? input.categoryGroup
+        : slugifyCatalogIdentifier(input.categoryGroup, '_', 48).toLowerCase() || existing.categoryGroup;
+  }
+  if (input.categoryGroupLabel?.trim()) {
+    await saveCustomProductGroupLabel(nextGroup, input.categoryGroupLabel.trim(), actor.id);
+  }
+
+  const updated = await prisma.product.update({
+    where: { id: input.productId },
+    data: {
+      ...(input.productName?.trim() ? { productName: input.productName.trim() } : {}),
+      ...(input.categoryGroup ? { categoryGroup: nextGroup } : {}),
+      ...(input.unit?.trim() ? { unit: input.unit.trim() } : {}),
+      ...(typeof input.isActive === 'boolean' ? { isActive: input.isActive } : {}),
+    },
+  });
+
+  bumpDomainRevisions(['leads'], 'product_catalog_updated');
+  const catalog = await listProductCatalogWithGroups(true);
+  const updatedDto = catalog.products.find((p) => p.id === updated.id) || mapProductCatalogRow(updated, await loadProductGroupLabels());
+  return { product: updatedDto, groups: catalog.groups };
 }
 

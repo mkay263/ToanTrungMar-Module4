@@ -588,7 +588,9 @@ export class AiDesignProviderFactory {
   ): Promise<ProviderGenerationResult> {
     const { config } = this.getCatalog();
     const targetProviderId = requestedProviderId || config.defaultProviderId || 'google_imagen';
-    const allowFallback = !input.disableLocalFallback && !input.requireReferenceEdit && config.autoFallbackToLocal;
+    // Strict anti-gradient rule: never silently replace a failed Cloud Banner/Product-Banner with LocalSandbox synthetic gradient.
+    // Users must explicitly choose `local_sandbox` if they want local template rendering.
+    const allowFallback = false;
     const taskCode: DesignTaskCode = input.requireReferenceEdit ? 'design_edit' : 'banner_generate';
 
     if (this.isChatOnlyModel(input.modelId)) {
