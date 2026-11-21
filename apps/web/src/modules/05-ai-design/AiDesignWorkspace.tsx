@@ -71,6 +71,11 @@ const ModelRegistryModal = dynamic(
   { ssr: false, loading: () => null }
 );
 
+const LedQuickInstallWizard = dynamic(
+  () => import('./LedQuickInstallWizard').then((m) => m.LedQuickInstallWizard),
+  { ssr: false, loading: () => null }
+);
+
 interface LeadOpt {
   id: number;
   leadCode: string;
@@ -474,8 +479,8 @@ export function AiDesignWorkspace() {
   const [error, setError] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
-  // Three Prominent Workspace Areas: 'perspective' (Phối cảnh) | 'assistant' (Trợ lý AI) | 'specs' (Thông số)
-  const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'perspective' | 'assistant' | 'specs'>('perspective');
+  // Prominent Workspace Areas: 'quick_led' (Gắn LED Nhanh & MKT) | 'perspective' (Studio AI) | 'assistant' | 'specs'
+  const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'quick_led' | 'perspective' | 'assistant' | 'specs'>('perspective');
   // Side dock tab when viewing Phối cảnh on wide desktop
   const [sideDockTab, setSideDockTab] = useState<'assistant' | 'specs'>('assistant');
   const [photoVaultTab, setPhotoVaultTab] = useState<'site_photos' | 'company_products'>('site_photos');
@@ -779,7 +784,7 @@ export function AiDesignWorkspace() {
       } else {
         const savedRoute = loadRouteState<{
           selectedId?: number | null;
-          activeWorkspaceArea?: 'perspective' | 'assistant' | 'specs';
+          activeWorkspaceArea?: 'quick_led' | 'perspective' | 'assistant' | 'specs';
           photoVaultTab?: 'site_photos' | 'company_products';
           searchProject?: string;
           projectListScrollTop?: number;
@@ -4938,8 +4943,29 @@ export function AiDesignWorkspace() {
           <button
             type="button"
             role="tab"
+            data-testid="workspace-tab-quick-led"
+            aria-selected={activeWorkspaceArea === 'quick_led'}
+            onClick={() => {
+              setChatFocusMode(false);
+              setActiveWorkspaceArea('quick_led');
+              setMobilePane('canvas');
+            }}
+            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition shadow-2xs ${
+              activeWorkspaceArea === 'quick_led'
+                ? 'bg-gradient-to-r from-[#0BAF7C] to-[#1553A2] text-white'
+                : 'border border-emerald-200 bg-emerald-50/70 text-emerald-900 hover:bg-emerald-100'
+            }`}
+            title="Chế độ siêu dễ 3 bước cho người không biết AI: 12 kiểu màn LED + Xuất bộ Marketing"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            <span>Gắn LED Nhanh &amp; MKT</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
             data-testid="workspace-tab-perspective"
-            aria-selected={activeWorkspaceArea !== 'specs' && !chatFocusMode}
+            aria-selected={activeWorkspaceArea === 'perspective' && !chatFocusMode}
             onClick={() => {
               setActiveWorkspaceArea('perspective');
               setChatFocusMode(false);
@@ -4949,7 +4975,7 @@ export function AiDesignWorkspace() {
               setMobilePane('canvas');
             }}
             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-bold transition shadow-2xs ${
-              activeWorkspaceArea !== 'specs' && !chatFocusMode
+              activeWorkspaceArea === 'perspective' && !chatFocusMode
                 ? 'bg-[#1553A2] text-white'
                 : 'border border-[#D8E2F0] bg-white text-[#17253F] hover:bg-slate-50'
             }`}
@@ -4962,7 +4988,7 @@ export function AiDesignWorkspace() {
             type="button"
             role="tab"
             data-testid="workspace-tab-chat-focus"
-            aria-selected={activeWorkspaceArea !== 'specs' && chatFocusMode}
+            aria-selected={activeWorkspaceArea === 'perspective' && chatFocusMode}
             onClick={() => {
               setActiveWorkspaceArea('perspective');
               setChatFocusMode((prev) => !prev);
@@ -5667,7 +5693,39 @@ export function AiDesignWorkspace() {
         </aside>
 
         {/* ================= MAIN WORKSPACE AREA ================= */}
-        {activeWorkspaceArea === 'specs' ? (
+        {activeWorkspaceArea === 'quick_led' ? (
+          <div
+            className={`${
+              mobilePane === 'canvas' || mobilePane === 'assistant' ? 'flex' : 'hidden md:flex'
+            } flex-1 min-w-0 min-h-0 overflow-hidden`}
+          >
+            <LedQuickInstallWizard
+              project={currentProject}
+              selectedPhoto={selectedPhoto}
+              resolvedSitePhotoUrl={sitePhotoUrl}
+              companyProductPhotos={companyProductVaultPhotos}
+              activeBrief={activeBrief}
+              canUseAiDesign={canUseAiDesign}
+              csrfToken={user?.csrfToken}
+              selectedProviderId={selectedProviderId}
+              selectedModelId={selectedModelId}
+              onUploadSitePhotosClick={() => uploadPhotoInputRef.current?.click()}
+              onCreateProjectClick={() => {
+                setNewProjectName('');
+                setNewContactName('');
+                setNewLeadId('');
+                setNewPrompt('');
+                setNewProjectFiles([]);
+                setShowCreateModal(true);
+              }}
+              onRefreshProject={async (pid) => {
+                await loadData(pid, true);
+              }}
+              onToast={(msg) => setSuccessToast(msg)}
+              onError={(msg) => setError(msg)}
+            />
+          </div>
+        ) : activeWorkspaceArea === 'specs' ? (
           /* FULL-WIDTH "THÔNG SỐ" WORKSPACE AREA — ĐƠN GIẢN HÓA 2 CỘT */
           <div className="flex-1 overflow-y-auto p-5 bg-slate-100">
             <div className="mx-auto max-w-5xl space-y-4">

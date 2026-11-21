@@ -22,6 +22,7 @@ export interface PerspectiveGenerationInput {
   referenceImageUrl: string;
   referenceImageBuffer?: Buffer;
   referenceImageMimeType?: string;
+  maskImageBuffer?: Buffer;
   productReferenceBuffers?: Array<{ buffer: Buffer; mimeType: string; name: string }>;
   sourcePhotoId?: string | null;
   sourceVersionId?: number | null;
@@ -51,6 +52,7 @@ export interface BannerGenerationInput {
   prompt: string;
   referenceImageBuffer?: Buffer;
   referenceImageMimeType?: string;
+  maskImageBuffer?: Buffer;
   productReferenceBuffers?: Array<{ buffer: Buffer; mimeType: string; name: string }>;
   sourceVersionId?: number | null;
   dimensions: {

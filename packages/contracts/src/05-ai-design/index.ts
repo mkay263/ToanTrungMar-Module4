@@ -356,6 +356,7 @@ export interface DesignRequestItemDto {
   screenHeightM: number | null;
   installZoneBboxJson: string | null;
   placementQuad: QuadCoordinatesDto | null;
+  ledScreens?: LedScreenInstanceDto[];
   bannerWidthPx: number | null;
   bannerHeightPx: number | null;
   aspectRatio: string | null;
@@ -624,3 +625,244 @@ export const RefreshModelRegistrySchema = z.object({
 });
 
 export type RefreshModelRegistryDto = z.infer<typeof RefreshModelRegistrySchema>;
+
+// ================= V3: Universal 12 LED Shapes, 1-Click Auto-Snap & Marketing Turbo Kit =================
+
+export const LED_SCREEN_SHAPES = [
+  'flat_rect',
+  'rounded_rect',
+  'circle_oval',
+  'free_polygon',
+  'curved_arc',
+  'corner_90_smooth',
+  'cylindrical_column',
+  'multi_segment_wave',
+  'transparent_glass',
+  'led_floor',
+  'led_ceiling',
+  'led_standee',
+] as const;
+
+export type LedScreenShapeType = (typeof LED_SCREEN_SHAPES)[number];
+
+export const LedScreenShapeSchema = z.enum(LED_SCREEN_SHAPES);
+
+export const LED_SCREEN_SHAPE_META: Record<
+  LedScreenShapeType,
+  {
+    label: string;
+    shortLabel: string;
+    group: 'planar' | 'curved_3d' | 'material_spatial' | 'multi_standee';
+    description: string;
+    defaultTransparencyPct: number;
+  }
+> = {
+  flat_rect: {
+    label: 'Màn LED phẳng 4 góc',
+    shortLabel: 'Phẳng 4 góc',
+    group: 'planar',
+    description: 'Màn hình chữ nhật chuẩn lắp tường phòng họp, hội trường, showroom, biển hiệu.',
+    defaultTransparencyPct: 0,
+  },
+  rounded_rect: {
+    label: 'Bo góc tròn / Mái vòm',
+    shortLabel: 'Bo góc / Vòm',
+    group: 'planar',
+    description: 'Màn hình bo tròn 4 góc đều hoặc bo 2 góc trên tạo dáng vòm kiến trúc sang trọng.',
+    defaultTransparencyPct: 0,
+  },
+  circle_oval: {
+    label: 'Hình Tròn / Elip / Oval',
+    shortLabel: 'Tròn / Oval',
+    group: 'planar',
+    description: 'Màn LED tròn/oval nội tiếp tự nghiêng theo đúng phối cảnh vách tường.',
+    defaultTransparencyPct: 0,
+  },
+  free_polygon: {
+    label: 'Đa giác N điểm bo góc',
+    shortLabel: 'Đa giác N điểm',
+    group: 'planar',
+    description: 'Chấm 3–24 đỉnh né khung cửa, cột dầm, hình chữ T/L/lục giác và bo tròn từng đỉnh.',
+    defaultTransparencyPct: 0,
+  },
+  curved_arc: {
+    label: 'Cong lồi / Cong lõm (Dẻo)',
+    shortLabel: 'Màn Cong',
+    group: 'curved_3d',
+    description: 'Module LED dẻo uốn cong theo sảnh bán nguyệt hoặc vách cong showroom.',
+    defaultTransparencyPct: 0,
+  },
+  corner_90_smooth: {
+    label: 'Góc 90° & Bo 3D Naked-Eye',
+    shortLabel: 'Góc L / 3D',
+    group: 'curved_3d',
+    description: 'Ghép 2 mặt phẳng vuông góc tòa nhà hoặc bo mượt góc 3D không kính.',
+    defaultTransparencyPct: 0,
+  },
+  cylindrical_column: {
+    label: 'Bọc cột trụ tròn 360°',
+    shortLabel: 'Bọc cột 360°',
+    group: 'curved_3d',
+    description: 'Ôm tròn thân cột kết cấu sảnh TTTM / sân bay với đổ bóng khối trụ 3D.',
+    defaultTransparencyPct: 0,
+  },
+  multi_segment_wave: {
+    label: 'Dải uốn sóng S / U',
+    shortLabel: 'Uốn sóng S/U',
+    group: 'curved_3d',
+    description: 'Màn hình dải dài uốn lượn liên tục nhiều nhịp quanh sảnh hoặc quầy bar.',
+    defaultTransparencyPct: 0,
+  },
+  transparent_glass: {
+    label: 'LED Trong suốt (Vách kính)',
+    shortLabel: 'Trong suốt',
+    group: 'material_spatial',
+    description: 'Xuyên sáng 40%–85% lắp sau vách kính showroom, thấy rõ không gian bên trong.',
+    defaultTransparencyPct: 68,
+  },
+  led_floor: {
+    label: 'Màn LED Sàn chịu lực',
+    shortLabel: 'LED Sàn',
+    group: 'material_spatial',
+    description: 'Lắp âm hoặc nổi mặt sàn catwalk/sân khấu kèm lớp kính phản chiếu cường lực.',
+    defaultTransparencyPct: 0,
+  },
+  led_ceiling: {
+    label: 'Màn LED Trần vòm kỹ thuật số',
+    shortLabel: 'LED Trần',
+    group: 'material_spatial',
+    description: 'Ốp trần sảnh tiệc, showroom, hành lang tạo hiệu ứng bầu trời hoặc ánh sáng động.',
+    defaultTransparencyPct: 0,
+  },
+  led_standee: {
+    label: 'Standee / Poster LED đứng',
+    shortLabel: 'Standee đứng',
+    group: 'multi_standee',
+    description: 'Màn GOB chân đứng đặt sảnh chờ, hành lang kèm đế kim loại & bóng tiếp xúc sàn.',
+    defaultTransparencyPct: 0,
+  },
+};
+
+export const LedCornerRadiiSchema = z.object({
+  tl: z.number().min(0).max(50).default(0),
+  tr: z.number().min(0).max(50).default(0),
+  br: z.number().min(0).max(50).default(0),
+  bl: z.number().min(0).max(50).default(0),
+});
+
+export type LedCornerRadiiDto = z.infer<typeof LedCornerRadiiSchema>;
+
+export const LedPolygonVertexSchema = z.object({
+  x: z.number().min(0).max(100),
+  y: z.number().min(0).max(100),
+  cornerRadiusPct: z.number().min(0).max(45).optional(),
+});
+
+export type LedPolygonVertexDto = z.infer<typeof LedPolygonVertexSchema>;
+
+export const LedMaterialOptionsSchema = z.object({
+  transparencyPct: z.number().min(0).max(95).default(0),
+  lumaKeyThreshold: z.number().min(0).max(100).default(18),
+  hasGlassReflection: z.boolean().default(false),
+  floorGlassSpecular: z.number().min(0).max(100).default(0),
+  cabinetGridStrength: z.number().min(0).max(100).default(18),
+  bezelThicknessPx: z.number().min(0).max(30).default(6),
+  brightnessPct: z.number().min(40).max(160).default(102),
+  ambientSpillPct: z.number().min(0).max(100).default(35),
+  floorReflectionPct: z.number().min(0).max(100).default(0),
+  hasStandeeBase: z.boolean().default(false),
+});
+
+export type LedMaterialOptionsDto = z.infer<typeof LedMaterialOptionsSchema>;
+
+export const LedScreenInstanceSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  name: z.string().trim().min(1).max(120).default('Màn hình LED #1'),
+  shapeType: LedScreenShapeSchema.default('flat_rect'),
+  quad: QuadCoordinatesSchema,
+  polygonPoints: z.array(LedPolygonVertexSchema).max(24).optional(),
+  secondaryQuad: QuadCoordinatesSchema.optional().nullable(),
+  cornerRoundnessPct: z.number().min(0).max(50).optional(),
+  curveSagTopPct: z.number().min(-40).max(40).optional(),
+  curveSagBottomPct: z.number().min(-40).max(40).optional(),
+  cylinderPerspectivePct: z.number().min(-40).max(40).optional(),
+  cornerRadiiPct: LedCornerRadiiSchema.optional(),
+  material: LedMaterialOptionsSchema.optional(),
+  contentPresetId: z.string().trim().max(120).optional().nullable(),
+  contentImageUrl: z.string().trim().max(1000).optional().nullable(),
+  contentCustomPrompt: z.string().trim().max(800).optional().nullable(),
+  syncSharedContent: z.boolean().optional(),
+});
+
+export type LedScreenInstanceDto = z.infer<typeof LedScreenInstanceSchema>;
+
+export const MARKETING_EXPORT_FORMATS = ['original', '1:1', '4:5', '16:9', '9:16'] as const;
+
+export type MarketingExportFormatType = (typeof MARKETING_EXPORT_FORMATS)[number];
+
+export const AutoDetectLedPlacementRequestSchema = z.object({
+  action: z.literal('auto_detect_led_placement').optional(),
+  photoId: z.string().trim().max(120).optional().nullable(),
+  clickPoint: z
+    .object({
+      x: z.number().min(0).max(100),
+      y: z.number().min(0).max(100),
+    })
+    .optional()
+    .nullable(),
+  annotatedImageBase64: z.string().max(12_000_000).optional().nullable(),
+  preferredShapeType: LedScreenShapeSchema.optional().nullable(),
+});
+
+export type AutoDetectLedPlacementRequestDto = z.infer<
+  typeof AutoDetectLedPlacementRequestSchema
+>;
+
+export const LedQuickInstallRequestSchema = z.object({
+  action: z.literal('quick_install_led').optional(),
+  mode: z.enum(['fast_composite', 'realistic_ai_blend']).default('fast_composite'),
+  photoId: z.string().trim().max(120).optional().nullable(),
+  screens: z.array(LedScreenInstanceSchema).min(1).max(12),
+  guidedCompositeBase64: z.string().min(32).max(20_000_000),
+  originalPhotoBase64: z.string().max(20_000_000).optional().nullable(),
+  alphaMaskBase64: z.string().max(15_000_000).optional().nullable(),
+  occlusionMaskBase64: z.string().max(15_000_000).optional().nullable(),
+  note: z.string().trim().max(600).optional().nullable(),
+  variantLabel: z.string().trim().max(120).optional().nullable(),
+  contentSummary: z.string().trim().max(400).optional().nullable(),
+  contextHint: z.string().trim().max(240).optional().nullable(),
+  providerId: z.enum(AI_PROVIDER_IDS).optional(),
+  modelId: z.string().trim().max(120).optional().nullable(),
+  marketingFormat: z.enum(MARKETING_EXPORT_FORMATS).optional(),
+});
+
+export type LedQuickInstallRequestDto = z.infer<typeof LedQuickInstallRequestSchema>;
+
+export const GenerateLedScreenContentRequestSchema = z.object({
+  action: z.literal('generate_led_screen_content').optional(),
+  prompt: z.string().trim().min(2, 'Vui lòng nhập mô tả ngắn nội dung cần hiển thị trên màn LED.').max(800),
+  aspectRatio: z.string().trim().max(24).optional().nullable(),
+  shapeType: LedScreenShapeSchema.optional().nullable(),
+  transparentMode: z.boolean().optional(),
+  providerId: z.enum(AI_PROVIDER_IDS).optional(),
+  modelId: z.string().trim().max(120).optional().nullable(),
+});
+
+export type GenerateLedScreenContentRequestDto = z.infer<
+  typeof GenerateLedScreenContentRequestSchema
+>;
+
+export interface LedPlacementRecipeDto {
+  id: string;
+  name: string;
+  shapeType: LedScreenShapeType;
+  presetId: string;
+  marketingFormat: MarketingExportFormatType;
+  includeBrandKit: boolean;
+  includeBeforeAfter: boolean;
+  brightnessPct: number;
+  bezelThicknessPx: number;
+  transparencyPct: number;
+  createdAt: string;
+}
+

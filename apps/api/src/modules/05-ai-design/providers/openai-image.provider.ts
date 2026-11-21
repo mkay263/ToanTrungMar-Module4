@@ -101,32 +101,53 @@ export class OpenAiImageProvider implements AiDesignProvider {
 
       let res: Response;
       if (isGptImageModel && (hasSitePhoto || hasProductPhotos)) {
-        const form = new FormData();
-        form.append('model', apiModel);
-        form.append('prompt', input.prompt);
-        form.append('size', '1536x1024');
-        if (hasSitePhoto && input.referenceImageBuffer) {
-          const blob = new Blob([new Uint8Array(input.referenceImageBuffer)], {
-            type: input.referenceImageMimeType || 'image/png',
-          });
-          form.append('image[]', blob, 'site-photo.png');
-        }
-        if (hasProductPhotos && input.productReferenceBuffers) {
-          input.productReferenceBuffers.forEach((prod, idx) => {
-            const blob = new Blob([new Uint8Array(prod.buffer)], {
-              type: prod.mimeType || 'image/png',
+        const buildEditsForm = (includeMask: boolean): FormData => {
+          const form = new FormData();
+          form.append('model', apiModel);
+          form.append('prompt', input.prompt);
+          form.append('size', '1536x1024');
+          if (hasSitePhoto && input.referenceImageBuffer) {
+            const blob = new Blob([new Uint8Array(input.referenceImageBuffer)], {
+              type: input.referenceImageMimeType || 'image/png',
             });
-            form.append('image[]', blob, prod.name || `product-${idx + 1}.png`);
-          });
-        }
+            form.append('image[]', blob, 'site-photo.png');
+          }
+          if (includeMask && input.maskImageBuffer && input.maskImageBuffer.length > 0) {
+            const maskBlob = new Blob([new Uint8Array(input.maskImageBuffer)], {
+              type: 'image/png',
+            });
+            form.append('mask', maskBlob, 'mask.png');
+          }
+          if (hasProductPhotos && input.productReferenceBuffers) {
+            input.productReferenceBuffers.forEach((prod, idx) => {
+              const blob = new Blob([new Uint8Array(prod.buffer)], {
+                type: prod.mimeType || 'image/png',
+              });
+              form.append('image[]', blob, prod.name || `product-${idx + 1}.png`);
+            });
+          }
+          return form;
+        };
+
+        const hasMask = Boolean(input.maskImageBuffer && input.maskImageBuffer.length > 0);
         res = await fetch('https://api.openai.com/v1/images/edits', {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
           },
-          body: form,
+          body: buildEditsForm(hasMask),
           signal: AbortSignal.timeout(75000),
         });
+        if (!res.ok && hasMask && (res.status === 400 || res.status === 422)) {
+          res = await fetch('https://api.openai.com/v1/images/edits', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            body: buildEditsForm(false),
+            signal: AbortSignal.timeout(75000),
+          });
+        }
       } else {
         const bodyPayload: Record<string, unknown> = {
           model: isGptImageModel ? apiModel : 'dall-e-3',
@@ -274,33 +295,54 @@ export class OpenAiImageProvider implements AiDesignProvider {
       let res: Response;
 
       if (isGptImageModel && (hasSitePhoto || hasProductPhotos)) {
-        const form = new FormData();
-        form.append('model', apiModel);
-        form.append('prompt', input.prompt);
-        form.append(
-          'size',
-          input.dimensions.widthPx >= input.dimensions.heightPx ? '1536x1024' : '1024x1536'
-        );
-        if (hasSitePhoto && input.referenceImageBuffer) {
-          const blob = new Blob([new Uint8Array(input.referenceImageBuffer)], {
-            type: input.referenceImageMimeType || 'image/png',
+        const buildBannerEditsForm = (includeMask: boolean): FormData => {
+          const form = new FormData();
+          form.append('model', apiModel);
+          form.append('prompt', input.prompt);
+          form.append(
+            'size',
+            input.dimensions.widthPx >= input.dimensions.heightPx ? '1536x1024' : '1024x1536'
+          );
+          if (hasSitePhoto && input.referenceImageBuffer) {
+            const blob = new Blob([new Uint8Array(input.referenceImageBuffer)], {
+              type: input.referenceImageMimeType || 'image/png',
+            });
+            form.append('image[]', blob, 'site-photo.png');
+          }
+          if (includeMask && input.maskImageBuffer && input.maskImageBuffer.length > 0) {
+            const maskBlob = new Blob([new Uint8Array(input.maskImageBuffer)], {
+              type: 'image/png',
+            });
+            form.append('mask', maskBlob, 'mask.png');
+          }
+          input.productReferenceBuffers?.forEach((prod, idx) => {
+            const blob = new Blob([new Uint8Array(prod.buffer)], {
+              type: prod.mimeType || 'image/png',
+            });
+            form.append('image[]', blob, prod.name || `product-${idx + 1}.png`);
           });
-          form.append('image[]', blob, 'site-photo.png');
-        }
-        input.productReferenceBuffers?.forEach((prod, idx) => {
-          const blob = new Blob([new Uint8Array(prod.buffer)], {
-            type: prod.mimeType || 'image/png',
-          });
-          form.append('image[]', blob, prod.name || `product-${idx + 1}.png`);
-        });
+          return form;
+        };
+
+        const hasMask = Boolean(input.maskImageBuffer && input.maskImageBuffer.length > 0);
         res = await fetch('https://api.openai.com/v1/images/edits', {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
           },
-          body: form,
+          body: buildBannerEditsForm(hasMask),
           signal: AbortSignal.timeout(75000),
         });
+        if (!res.ok && hasMask && (res.status === 400 || res.status === 422)) {
+          res = await fetch('https://api.openai.com/v1/images/edits', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            body: buildBannerEditsForm(false),
+            signal: AbortSignal.timeout(75000),
+          });
+        }
       } else {
         const bodyPayload: Record<string, unknown> = {
           model: isGptImageModel ? apiModel : 'dall-e-3',

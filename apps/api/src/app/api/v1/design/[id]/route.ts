@@ -3,7 +3,10 @@ import { ConcurrencyConflictError } from '@toantrung/database';
 import {
   AddProjectPhotoSchema,
   ApproveDesignVersionSchema,
+  AutoDetectLedPlacementRequestSchema,
   ChatDesignRequestSchema,
+  GenerateLedScreenContentRequestSchema,
+  LedQuickInstallRequestSchema,
   RegenerateDesignDraftSchema,
   UpdateDesignProjectSchema,
 } from '@toantrung/contracts';
@@ -15,11 +18,14 @@ import {
 import {
   addProjectPhoto,
   approveDesignAssetVersion,
+  autoDetectLedPlacement,
   deleteDesignAssetVersion,
   deleteDesignProject,
   deleteProjectPhoto,
   evaluateProjectTechnicalBom,
+  executeQuickLedInstall,
   ForbiddenDesignProjectAccessError,
+  generateLedScreenContent,
   getDesignProjectForUser,
   processChatDesignRequest,
   regenerateDesignDraftByAi,
@@ -259,6 +265,45 @@ export async function POST(
           placementQuad: raw.placementQuad as any,
         });
         return jsonSuccess(res, 201);
+      }
+
+      if (action === 'auto_detect_led_placement') {
+        const parsedAuto = AutoDetectLedPlacementRequestSchema.safeParse(raw);
+        if (!parsedAuto.success) {
+          return jsonError(
+            'VALIDATION_ERROR',
+            parsedAuto.error.issues[0]?.message || 'Tham số nhận diện vị trí LED không hợp lệ.',
+            400
+          );
+        }
+        const res = await autoDetectLedPlacement(auth.user, requestId, parsedAuto.data);
+        return jsonSuccess(res, 200);
+      }
+
+      if (action === 'quick_install_led') {
+        const parsedQuick = LedQuickInstallRequestSchema.safeParse(raw);
+        if (!parsedQuick.success) {
+          return jsonError(
+            'VALIDATION_ERROR',
+            parsedQuick.error.issues[0]?.message || 'Thông số gắn màn LED nhanh không hợp lệ.',
+            400
+          );
+        }
+        const res = await executeQuickLedInstall(auth.user, requestId, parsedQuick.data);
+        return jsonSuccess(res, 201);
+      }
+
+      if (action === 'generate_led_screen_content') {
+        const parsedContent = GenerateLedScreenContentRequestSchema.safeParse(raw);
+        if (!parsedContent.success) {
+          return jsonError(
+            'VALIDATION_ERROR',
+            parsedContent.error.issues[0]?.message || 'Mô tả nội dung hiển thị màn LED không hợp lệ.',
+            400
+          );
+        }
+        const res = await generateLedScreenContent(auth.user, requestId, parsedContent.data);
+        return jsonSuccess(res, 200);
       }
 
       // Final render upload via JSON base64

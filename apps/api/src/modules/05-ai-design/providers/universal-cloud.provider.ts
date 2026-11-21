@@ -76,7 +76,8 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
     referenceImageBuffer?: Buffer,
     referenceImageMimeType?: string,
     productReferenceBuffers?: Array<{ buffer: Buffer; mimeType: string; name: string }>,
-    requireReferenceEdit?: boolean
+    requireReferenceEdit?: boolean,
+    maskImageBuffer?: Buffer
   ): Promise<ProviderGenerationResult> {
     const started = Date.now();
     if (simulateTimeout) {
@@ -166,41 +167,67 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
       if (mustUseReferenceEdit) {
         // Strict image editing path (/v1/images/edits): NEVER silently fall back to text-only /images/generations
         const editsEndpoint = this.apiEndpoint.replace(/\/images\/generations\/?$/i, '/images/edits');
-        const form = new FormData();
-        form.append('model', effectiveModel);
-        const editInstruction = hasSitePhoto
-          ? `STRICTLY preserve the exact original provided photo background, structure, objects, lighting, and camera angle. Only apply the user's exact requested edit cleanly onto the provided image: ${prompt}`
-          : `Use the provided product reference image(s) faithfully without altering their shape, logo, or details: ${prompt}`;
-        form.append('prompt', editInstruction);
-        form.append('size', chosenSize);
+        const hasMask = Boolean(maskImageBuffer && maskImageBuffer.length > 0);
 
-        if (hasSitePhoto && referenceImageBuffer) {
-          const blob = new Blob([new Uint8Array(referenceImageBuffer)], {
-            type: referenceImageMimeType || 'image/png',
-          });
-          form.append('image', blob, 'site-photo.png');
-        }
-        if (hasProductPhotos && productReferenceBuffers) {
-          productReferenceBuffers.forEach((prod, idx) => {
-            const blob = new Blob([new Uint8Array(prod.buffer)], {
-              type: prod.mimeType || 'image/png',
+        const buildEditForm = (includeMask: boolean, includeQuality: boolean): FormData => {
+          const form = new FormData();
+          form.append('model', effectiveModel);
+          const editInstruction = hasSitePhoto
+            ? `STRICTLY preserve the exact original provided photo background, structure, objects, lighting, and camera angle. Only apply the user's exact requested edit cleanly onto the provided image: ${prompt}`
+            : `Use the provided product reference image(s) faithfully without altering their shape, logo, or details: ${prompt}`;
+          form.append('prompt', editInstruction);
+          form.append('size', chosenSize);
+          if (includeQuality && isGptImageFamily) {
+            form.append('quality', 'high');
+          }
+
+          if (hasSitePhoto && referenceImageBuffer) {
+            const blob = new Blob([new Uint8Array(referenceImageBuffer)], {
+              type: referenceImageMimeType || 'image/png',
             });
-            form.append(
-              hasSitePhoto || idx > 0 ? 'image[]' : 'image',
-              blob,
-              prod.name || `product-${idx + 1}.png`
-            );
-          });
-        }
+            form.append('image', blob, 'site-photo.png');
+          }
+          if (includeMask && maskImageBuffer && maskImageBuffer.length > 0) {
+            const maskBlob = new Blob([new Uint8Array(maskImageBuffer)], {
+              type: 'image/png',
+            });
+            form.append('mask', maskBlob, 'mask.png');
+          }
+          if (hasProductPhotos && productReferenceBuffers) {
+            productReferenceBuffers.forEach((prod, idx) => {
+              const blob = new Blob([new Uint8Array(prod.buffer)], {
+                type: prod.mimeType || 'image/png',
+              });
+              form.append(
+                hasSitePhoto || idx > 0 ? 'image[]' : 'image',
+                blob,
+                prod.name || `product-${idx + 1}.png`
+              );
+            });
+          }
+          return form;
+        };
 
         response = await fetch(editsEndpoint, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
           },
-          body: form,
+          body: buildEditForm(hasMask, true),
           signal: AbortSignal.timeout(75000),
         });
+
+        // Graceful fallback if third-party proxy rejects optional `mask` or `quality` parameter on /images/edits
+        if (!response.ok && (response.status === 400 || response.status === 422)) {
+          response = await fetch(editsEndpoint, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            body: buildEditForm(false, false),
+            signal: AbortSignal.timeout(75000),
+          });
+        }
       } else {
         const fullBleedPrompt = `${prompt.trim()}. Full-bleed edge-to-edge composition filling 100% of the frame with no margins, no letterboxing, no borders, no rounded frame corners, ultra-sharp crisp high-resolution details.`;
         const payloadBody: Record<string, unknown> = {
@@ -401,7 +428,8 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
       input.referenceImageBuffer,
       input.referenceImageMimeType,
       input.productReferenceBuffers,
-      input.requireReferenceEdit
+      input.requireReferenceEdit,
+      input.maskImageBuffer
     );
   }
 
@@ -416,7 +444,8 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
       input.referenceImageBuffer,
       input.referenceImageMimeType,
       input.productReferenceBuffers,
-      input.requireReferenceEdit
+      input.requireReferenceEdit,
+      input.maskImageBuffer
     );
   }
 }

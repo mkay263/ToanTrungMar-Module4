@@ -10,6 +10,7 @@
 import zlib from 'node:zlib';
 import type { QuadCoordinatesDto } from '@toantrung/contracts';
 import type { CompositingProtectionMode } from './design-context';
+import { mapPointToQuadHomographyUV } from './led-homography';
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -342,57 +343,7 @@ export function mapPointToQuadUV(
   py: number,
   quad: QuadCoordinatesDto
 ): { inside: boolean; u: number; v: number; edgeDist: number } {
-  const p00 = quad.topLeft;
-  const p10 = quad.topRight;
-  const p11 = quad.bottomRight;
-  const p01 = quad.bottomLeft;
-
-  const c0 = cross2D(p00.x, p00.y, p10.x, p10.y, px, py);
-  const c1 = cross2D(p10.x, p10.y, p11.x, p11.y, px, py);
-  const c2 = cross2D(p11.x, p11.y, p01.x, p01.y, px, py);
-  const c3 = cross2D(p01.x, p01.y, p00.x, p00.y, px, py);
-
-  const allPositive = c0 >= -0.05 && c1 >= -0.05 && c2 >= -0.05 && c3 >= -0.05;
-  const allNegative = c0 <= 0.05 && c1 <= 0.05 && c2 <= 0.05 && c3 <= 0.05;
-  const inside = allPositive || allNegative;
-
-  // Iterative inverse bilinear solver (3 Newton steps) for exact perspective-correct (u, v)
-  let u = 0.5;
-  let v = 0.5;
-  for (let iter = 0; iter < 4; iter++) {
-    const xEst =
-      (1 - u) * (1 - v) * p00.x +
-      u * (1 - v) * p10.x +
-      u * v * p11.x +
-      (1 - u) * v * p01.x;
-    const yEst =
-      (1 - u) * (1 - v) * p00.y +
-      u * (1 - v) * p10.y +
-      u * v * p11.y +
-      (1 - u) * v * p01.y;
-
-    const rx = px - xEst;
-    const ry = py - yEst;
-
-    const dxdu = (1 - v) * (p10.x - p00.x) + v * (p11.x - p01.x);
-    const dxdv = (1 - u) * (p01.x - p00.x) + u * (p11.x - p10.x);
-    const dydu = (1 - v) * (p10.y - p00.y) + v * (p11.y - p01.y);
-    const dydv = (1 - u) * (p01.y - p00.y) + u * (p11.y - p10.y);
-
-    const det = dxdu * dydv - dxdv * dydu;
-    if (Math.abs(det) < 1e-6) break;
-
-    u += (dydv * rx - dxdv * ry) / det;
-    v += (-dydu * rx + dxdu * ry) / det;
-  }
-
-  const edgeDist = Math.min(u, 1 - u, v, 1 - v);
-  return {
-    inside: inside && u >= -0.01 && u <= 1.01 && v >= -0.01 && v <= 1.01,
-    u: Math.max(0, Math.min(1, u)),
-    v: Math.max(0, Math.min(1, v)),
-    edgeDist,
-  };
+  return mapPointToQuadHomographyUV(px, py, quad);
 }
 
 export interface PerspectiveCompositeResult {
@@ -494,19 +445,26 @@ export function renderPerspectiveCompositeWithProtection(params: {
           outRgb[idx + 1] = isInnerRim ? (isRedTone ? 190 : 210) : 20;
           outRgb[idx + 2] = isInnerRim ? (isRedTone ? 120 : 255) : 28;
         } else if (decodedOverlay) {
-          // Sample from AI-generated screen texture at (u, v)
-          const sx = Math.min(
-            decodedOverlay.width - 1,
-            Math.max(0, Math.floor(u * decodedOverlay.width))
-          );
-          const sy = Math.min(
-            decodedOverlay.height - 1,
-            Math.max(0, Math.floor(v * decodedOverlay.height))
-          );
-          const sIdx = (sy * decodedOverlay.width + sx) * 3;
-          outRgb[idx] = decodedOverlay.rgb[sIdx];
-          outRgb[idx + 1] = decodedOverlay.rgb[sIdx + 1];
-          outRgb[idx + 2] = decodedOverlay.rgb[sIdx + 2];
+          // Bilinear sample from AI-generated screen texture at (u, v) for sharp perspective edges
+          const srcX = Math.max(0, Math.min(decodedOverlay.width - 1, u * (decodedOverlay.width - 1)));
+          const srcY = Math.max(0, Math.min(decodedOverlay.height - 1, v * (decodedOverlay.height - 1)));
+          const x0 = Math.floor(srcX);
+          const x1 = Math.min(decodedOverlay.width - 1, x0 + 1);
+          const y0 = Math.floor(srcY);
+          const y1 = Math.min(decodedOverlay.height - 1, y0 + 1);
+          const wx = srcX - x0;
+          const wy = srcY - y0;
+          const invWx = 1 - wx;
+          const invWy = 1 - wy;
+          const i00 = (y0 * decodedOverlay.width + x0) * 3;
+          const i10 = (y0 * decodedOverlay.width + x1) * 3;
+          const i01 = (y1 * decodedOverlay.width + x0) * 3;
+          const i11 = (y1 * decodedOverlay.width + x1) * 3;
+          for (let c = 0; c < 3; c++) {
+            const top = decodedOverlay.rgb[i00 + c] * invWx + decodedOverlay.rgb[i10 + c] * wx;
+            const bot = decodedOverlay.rgb[i01 + c] * invWx + decodedOverlay.rgb[i11 + c] * wx;
+            outRgb[idx + c] = Math.round(top * invWy + bot * wy);
+          }
         } else {
           // Synthesize vivid LED display content matching the design context & style
           const wave1 = Math.sin(u * 8 + v * 4) * 0.5 + 0.5;

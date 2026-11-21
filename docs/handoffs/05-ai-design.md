@@ -49,3 +49,21 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
    - Ghi nhận `requestedModel`, `reportedModel` (cảnh báo alias gateway), `generationOrigin` (`AI_PLUS_LAYOUT`, `CLOUD_AI`).
    - Xuất file ZIP chứa đầy đủ file ảnh, file thiết kế và file metadata `design-brief-and-lineage.json`.
 
+---
+
+## 4. Nâng cấp V3: Gắn Màn LED Nhanh 12 Hình thái + Marketing Turbo Kit (21/11/2026)
+1. **Universal LED Geometry & Material Engine (`led-homography.ts`, `led-geometry-engine.ts`)**:
+   - Nâng cấp toán học từ inverse bilinear sang **Projective Homography `3×3`** và **chuẩn hóa 4 đỉnh chống xoắn** (`canonicalizeQuad`).
+   - Hỗ trợ đủ **12 hình thái LED thực tế** (`flat_rect`, `rounded_rect` / mái vòm Arch, `circle_oval`, `free_polygon` 3–24 đỉnh bo góc, `curved_arc`, `corner_90_smooth`, `cylindrical_column` 360°, `multi_segment_wave`, `transparent_glass` xuyên kính 40–85%, `led_floor`, `led_ceiling`, `led_standee`) và **tổ hợp nhiều màn hình (`screens[]`) trong cùng 1 ảnh**.
+2. **1-Chạm Vision Auto-Snap + Cloud AI Alpha Mask & Pixel Guard (`led-placement-playbook.ts`, `service.ts`)**:
+   - Action `auto_detect_led_placement`: Gắn lưới tọa độ `0..100` & chấm đỏ gửi Vision AI để tự khoanh đúng khung & gợi ý hình thái LED.
+   - Action `quick_install_led`: Hỗ trợ cả **Xuất Nhanh (`$0`)** lẫn **Hòa sáng Cloud AI** (gửi kèm `Guided Composite` + `Alpha Mask PNG` vào `universal-cloud.provider.ts` / `openai-image.provider.ts` và bảo toàn 100% ảnh gốc ngoài vùng chọn bằng `applyPostAiPixelGuard`, tôn trọng **Cọ đưa vật cản tiền cảnh lên trước**).
+   - Action `generate_led_screen_content`: AI vẽ riêng ruột màn hình (nền đen cho LED Trong suốt, tâm tròn cho Oval) rồi ép vào khung.
+3. **Marketing Turbo Kit (`LedQuickInstallWizard.tsx`, `led-content-presets.ts`, `marketing-export-kit.ts`)**:
+   - Tự đổ Brief từ M03/M04, kho 16 mẫu 1 chạm, **Sinh Bộ 3 Biến Thể A/B**, **Ảnh Trước/Sau (3 layout)**, **Smart Focal Crop** xuất 5 khổ (`Gốc`, `1:1`, `4:5`, `16:9`, `9:16`) kèm Brand Kit Overlay & lưu công thức.
+   - Bảo toàn nguyên vẹn ma trận quyền BA (`Q16` đã ghi nhận tại [OPEN_QUESTIONS.md](../decisions/OPEN_QUESTIONS.md#q16)).
+4. **Kiểm chứng & Ghi nhận (21/11/2026)**:
+   - Đã chạy và đạt: `npm run check:docs`, `npm run typecheck` (cả 4 workspace), `m05-led-geometry-and-mkt-kit.test.js` (5/5 PASS), `ai-design-studio-upgrade.test.js` (16/16 PASS), `core-security.test.js` (5/5 PASS), kiểm tra live `GET http://127.0.0.1:3000/design` (`HTTP 200`).
+   - Ghi nhận sẵn từ nền `4dac906` (ngoài phạm vi V3): `mk01-mk07-marketing-upgrade.test.js` lỗi 2/5 (`MK03` đọc cứng `storage_independent_v2/config/ai-model-registry-cache.json` trong khi `apps/api/.env` cấu hình `STORAGE_ROOT="./storage"`; `MK04 & MK05` ghi đè `effectiveTaskCode` từ `design_edit` sang `banner_generate` khi `effectiveDbType === 'banner'`).
+   - Bước tiếp theo: Chờ PO/Admin quyết định [Q16](../decisions/OPEN_QUESTIONS.md#q16) nếu muốn mở tab Gắn LED Nhanh trực tiếp cho `MKT_STAFF`/`MKT_LEAD`.
+
