@@ -292,12 +292,26 @@ function inferOperationsFromCatalogMetadata(
     }
   }
 
-  // OpenAI & OpenAI-compatible gateways
-  if (/gpt-image|gpt-2\.5-image/.test(lower)) {
+  // OpenAI & OpenAI-compatible gateways (including APIVN, OpenRouter, OneAPI/NewAPI)
+  if (/gpt-image|gpt-2\.5-image|gpt-4o-image/.test(lower)) {
     return {
       ops: ['image_generation', 'image_editing_ref', 'inpainting_mask', 'multi_image_ref', 'transparent_bg'],
       evidence: 'documentation',
       note: 'Hỗ trợ /images/generations và /images/edits kèm ảnh tham chiếu.',
+    };
+  }
+  if (/gemini-.*-image|image-generation|banana/.test(lower)) {
+    return {
+      ops: ['text_analysis', 'vision_understanding', 'image_generation', 'image_editing_ref', 'multi_image_ref'],
+      evidence: 'documentation',
+      note: 'Gemini Multimodal Image qua Gateway: sinh ảnh mới và chỉnh sửa kèm ảnh tham chiếu.',
+    };
+  }
+  if (lower.startsWith('imagen-') || /midjourney|ideogram|recraft/.test(lower)) {
+    return {
+      ops: ['image_generation', 'image_editing_ref'],
+      evidence: 'documentation',
+      note: 'Model chuyên sinh & thiết kế ảnh qua Gateway.',
     };
   }
   if (/dall-e-3/.test(lower)) {
@@ -644,6 +658,15 @@ export class AiModelRegistryService {
         if (!res.ok) {
           const errText = await res.text();
           const classified = classifyUpstreamAiHttpError(res.status, errText);
+          let upstreamHint = '';
+          try {
+            const parsedErr = JSON.parse(errText) as { error?: { message?: string } };
+            if (parsedErr?.error?.message) {
+              upstreamHint = ` [${parsedErr.error.message}]`;
+            }
+          } catch {
+            // ignore non-json error body
+          }
           return {
             connection: {
               providerId,
@@ -654,7 +677,7 @@ export class AiModelRegistryService {
               maskedCredential: maskSecretValue(apiKey),
               listApiSupported: true,
               listApiStatus: 'error',
-              listApiDetail: classified.shortReason,
+              listApiDetail: `${classified.shortReason} (Key đã gửi: ${maskSecretValue(apiKey) || 'trống'})${upstreamHint}`,
               discoveredModelCount: 0,
               lastDiscoveryAt: new Date().toISOString(),
               cacheExpiresAt: null,
@@ -1283,11 +1306,11 @@ export class AiModelRegistryService {
       ? params.taskCode === 'design_edit'
         ? targetEntry.supportedOperations.includes('image_editing_ref')
         : targetEntry.supportedOperations.includes('image_generation') ||
-          targetEntry.supportedOperations.includes('image_editing_ref')
+        targetEntry.supportedOperations.includes('image_editing_ref')
       : true;
     const supportsChat = targetEntry
       ? targetEntry.supportedOperations.includes('text_analysis') ||
-        targetEntry.supportedOperations.includes('vision_understanding')
+      targetEntry.supportedOperations.includes('vision_understanding')
       : false;
 
     if (isImageTask && !supportsImage) {

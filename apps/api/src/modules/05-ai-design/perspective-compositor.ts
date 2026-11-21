@@ -660,20 +660,29 @@ export function processBannerToTargetResolution(params: {
   }
 
   for (let y = 0; y < outH; y++) {
-    const sy = Math.min(
-      decoded.height - 1,
-      cropY + Math.floor((y / Math.max(1, outH - 1)) * (cropH - 1))
-    );
+    const srcY = cropY + (y / Math.max(1, outH - 1)) * Math.max(0, cropH - 1);
+    const y0 = Math.min(decoded.height - 1, Math.floor(srcY));
+    const y1 = Math.min(decoded.height - 1, y0 + 1);
+    const wy = srcY - y0;
+    const invWy = 1 - wy;
     for (let x = 0; x < outW; x++) {
-      const sx = Math.min(
-        decoded.width - 1,
-        cropX + Math.floor((x / Math.max(1, outW - 1)) * (cropW - 1))
-      );
-      const srcIdx = (sy * decoded.width + sx) * 3;
+      const srcX = cropX + (x / Math.max(1, outW - 1)) * Math.max(0, cropW - 1);
+      const x0 = Math.min(decoded.width - 1, Math.floor(srcX));
+      const x1 = Math.min(decoded.width - 1, x0 + 1);
+      const wx = srcX - x0;
+      const invWx = 1 - wx;
+
+      const idx00 = (y0 * decoded.width + x0) * 3;
+      const idx10 = (y0 * decoded.width + x1) * 3;
+      const idx01 = (y1 * decoded.width + x0) * 3;
+      const idx11 = (y1 * decoded.width + x1) * 3;
       const dstIdx = (y * outW + x) * 3;
-      outRgb[dstIdx] = decoded.rgb[srcIdx];
-      outRgb[dstIdx + 1] = decoded.rgb[srcIdx + 1];
-      outRgb[dstIdx + 2] = decoded.rgb[srcIdx + 2];
+
+      for (let c = 0; c < 3; c++) {
+        const top = decoded.rgb[idx00 + c] * invWx + decoded.rgb[idx10 + c] * wx;
+        const bot = decoded.rgb[idx01 + c] * invWx + decoded.rgb[idx11 + c] * wx;
+        outRgb[dstIdx + c] = Math.round(top * invWy + bot * wy);
+      }
     }
   }
 

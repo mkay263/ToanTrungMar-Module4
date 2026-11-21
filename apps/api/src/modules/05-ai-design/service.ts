@@ -15,6 +15,7 @@ import {
   sanitizeProjectOrSubjectText,
   toMonetaryAmountDto,
   type AddProjectPhotoDto,
+  type AiProviderId,
   type ApproveDesignVersionDto,
   type ChatDesignRequestDto,
   type ConfigureAiProvidersDto,
@@ -49,12 +50,17 @@ import { notifyLeadSalesOnDesignCompleted } from '../01-leads/service';
 import {
   AiDesignProviderFactory,
   AiModelRegistryService,
+  resolveEffectiveProviderCredential,
   type ProviderStatusInfo,
 } from './providers';
 import {
   routeDesignCommand,
   validateCommandReadiness,
 } from './command-router';
+import {
+  formatVietnamNowLabel,
+  gatherLiveWebGrounding,
+} from './live-web-grounding';
 import {
   createInitialDesignContext,
   extractAndMergeUserChatContext,
@@ -608,13 +614,13 @@ function mapDesignRequestRowToDto(
             id: `msg-ai-welcome-${r.id}`,
             role: 'assistant',
             text: providerStatus.isConfigured
-              ? 'Chào bạn! Trợ lý thiết kế AI đã kết nối khóa API. Bạn có thể chọn ảnh hiện trạng công trình, kiểm tra cấu hình cabinet LED chuẩn mm hoặc gửi yêu cầu tạo phối cảnh / banner.'
-              : 'Chào bạn! Hiện máy chủ chưa gắn khóa API tạo ảnh đám mây (GEMINI_API_KEY). Bạn vẫn có thể dựng phối cảnh trực tiếp trên ảnh công trình thật, kiểm tra tính toán kỹ thuật cabinet LED độc lập (mm) và lưu lịch sử phiên bản.',
+              ? 'Chào bạn! Mình là ToanTrung AI — trợ lý thông minh hỗ trợ trò chuyện, tra cứu thông tin, tạo ảnh và dựng phối cảnh 3D. Bạn cần mình giúp gì hôm nay?'
+              : 'Chào bạn! Mình là ToanTrung AI. Bạn có thể trò chuyện, tải ảnh công trình dựng phối cảnh hoặc gắn khóa API để sử dụng đầy đủ AI đám mây.',
             timestamp: r.createdAt.toISOString(),
             chatMode: 'consultant_free',
             modelUsed: providerStatus.isConfigured
               ? providerStatus.activeModel
-              : 'Chế độ dựng kỹ thuật nội bộ (chưa kết nối khóa AI)',
+              : 'ToanTrung Studio',
             cost: '$0.00',
             status: 'success',
           },
@@ -1151,12 +1157,11 @@ export async function createDesignRequestWithAiDraft(
           id: `msg-ai-welcome-${Date.now()}`,
           role: 'assistant',
           text: [
-            `👋 **AI Tư vấn Kỹ thuật LED Toàn Trung (Miễn phí $0):**`,
-            `• Đã khởi tạo dự án **${input.projectName || 'Dự án mới'}** (${Math.round(dimensionsData.widthM * 1000)}×${Math.round(dimensionsData.heightM * 1000)}mm).`,
+            `👋 **Xin chào! Mình là ToanTrung AI:**`,
+            `• Đã sẵn sàng phiên làm việc **${input.projectName || 'Trò chuyện mới'}**. Bạn có thể hỏi bất cứ điều gì, tra cứu thông tin trực tuyến hoặc yêu cầu tạo ảnh ngay trong khung chat.`,
             leadPhotos.length > 0
               ? `• Đã tự động đồng bộ **${leadPhotos.length} ảnh khảo sát** từ hồ sơ Lead liên kết.`
-              : `• Bước 1: Hãy bấm **+ Thêm ảnh** ở cột trái để tải ảnh công trình của dự án này lên.`,
-            `• Bước 2: Bấm **🎯 Chấm điểm trên ảnh** để chọn vị trí lắp đặt, sau đó bấm **🔍 Phân tích ($0)** hoặc gọi **@TaoAnh** / **@TaoAnhPoster** để AI kết xuất ảnh.`,
+              : `• Nếu cần dựng phối cảnh LED trên ảnh thật, bạn chỉ cần tải ảnh ở cột trái rồi nhắn yêu cầu cho ToanTrung nhé.`,
           ].join('\n'),
           timestamp: new Date().toISOString(),
           chatMode: 'consultant_free',
@@ -1580,7 +1585,7 @@ function buildConsultantReplyAndSuggestedPrompt(params: {
     }
     return {
       replyText:
-        'Chào bạn! 👋 Mình là trợ lý AI Gemini. Bạn có thể trò chuyện bình thường với mình về bất kỳ chủ đề nào (hỏi đáp, lên ý tưởng, viết nội dung, tính toán, hoặc tư vấn màn hình LED). Bạn đang cần mình hỗ trợ gì hôm nay?',
+        'Chào bạn! 👋 Mình là **ToanTrung** — trợ lý AI đa năng của bạn. Bạn có thể hỏi bất cứ chủ đề nào (tin tức, thời tiết, tỷ giá, kiến thức, viết nội dung, lập trình) hoặc yêu cầu tạo ảnh trực tiếp. Bạn đang cần mình hỗ trợ gì hôm nay?',
     };
   }
 
@@ -1592,7 +1597,7 @@ function buildConsultantReplyAndSuggestedPrompt(params: {
   ) {
     return {
       replyText:
-        'Mình là trợ lý AI (Google Gemini Flash) hoạt động như một AI trò chuyện bình thường! 😊\n• Bạn có thể hỏi đáp mọi kiến thức, nhờ viết bài quảng cáo, dịch thuật, tính toán hoặc tâm sự thoải mái.\n• Ngoài ra, vì đang tích hợp trong Studio Toàn Trung nên khi nào bạn cần phân tích ảnh công trình hoặc ghép phối cảnh 3D màn hình LED (`@TaoAnh`), mình cũng có thể làm ngay cho bạn!',
+        'Mình là **ToanTrung AI**! 😊 Bạn có thể hỏi đáp mọi kiến thức, tra cứu thông tin trực tuyến, nhờ viết bài quảng cáo, dịch thuật, tính toán hoặc yêu cầu tạo/sửa ảnh bất kỳ lúc nào.',
     };
   }
 
@@ -1671,12 +1676,11 @@ function buildConsultantReplyAndSuggestedPrompt(params: {
     return { replyText, suggestedTaoAnhPrompt };
   }
 
-  // 9. General open-ended conversation fallback (Natural, helpful response without forcing the 3-bullet hardware template!)
+  // 9. General open-ended conversation fallback (Natural, helpful response without forcing site photo or hardware specs!)
   return {
     replyText: [
-      `Mình đã nhận được chia sẻ của bạn: *"${cleanUser}"*.`,
-      `• Nếu bạn đang muốn trao đổi thêm ý tưởng, hỏi thông tin kỹ thuật, soạn nội dung báo giá/quảng cáo hoặc cần giải đáp bất kỳ vấn đề gì, bạn cứ nhắn cụ thể hơn nhé — mình trả lời trực tiếp như một AI bình thường!`,
-      `• Còn nếu bạn muốn mình nhìn ảnh công trình để tư vấn vị trí lắp LED hoặc ghép ảnh 3D, bạn chỉ cần bấm nút **🔍 Phân tích ảnh ($0)** hoặc **🏢 @TaoAnh (Ghép 3D)** ngay bên dưới nhé!`,
+      `Mình đã ghi nhận yêu cầu của bạn: **"${cleanUser}"**.`,
+      `• Bạn có thể trò chuyện tự do với mình về bất kỳ chủ đề nào (lên ý tưởng sáng tạo, viết nội dung, giải đáp thắc mắc, lập kế hoạch) hoặc gõ trực tiếp **"Tạo ảnh <mô tả bức ảnh bạn muốn>"** để mình vẽ ảnh ngay theo yêu cầu của bạn mà không cần tải ảnh công trình hay nhập thông số kỹ thuật!`,
     ].join('\n'),
   };
 }
@@ -2104,23 +2108,255 @@ export async function processChatDesignRequest(
     }
 
     let suggestedTaoAnhPrompt: string | undefined = fallbackConsult.suggestedTaoAnhPrompt;
-    let consultModelUsed = 'Google Gemini 3 Flash (Trợ lý AI)';
+    let consultModelUsed = 'ToanTrung AI';
 
-    // If a real Google Gemini API Key (e.g., from user's Gmail / Google AI Studio / Vertex Express) is configured, call Gemini live for ALL chat turns!
+    // Call live LLM (supports both OpenAI-compatible Gateways like APIVN / CCPRO / OpenAI AND Google Gemini API) for natural multi-turn conversation!
     const { config: aiCfg } = AiDesignProviderFactory.getCatalog();
     const geminiApiKey =
       aiCfg.providers.google_imagen?.apiKey ||
       process.env.GEMINI_API_KEY ||
       process.env.IMAGEN_API_KEY;
+    const customCred = resolveEffectiveProviderCredential('custom_endpoint', aiCfg);
+    const openAiCred = resolveEffectiveProviderCredential('openai_dalle', aiCfg);
     const isOfflineUnitTest = Boolean(process.env.NODE_TEST_CONTEXT);
 
-    if (geminiApiKey && !input.simulateAiTimeout && !isOfflineUnitTest) {
+    const liveGrounding =
+      !input.simulateAiTimeout && !isOfflineUnitTest
+        ? await gatherLiveWebGrounding(input.prompt).catch(() => null)
+        : null;
+
+    const asksAboutLedSpecs =
+      /\b(p1\.|p2\.|p3|p4|p5|cabinet|module|pixel\s*pitch|nits|kích\s*thước\s*màn|bao\s*nhiêu\s*mét|công\s*suất\s*điện|điểm\s*chạm)\b/i.test(
+        input.prompt
+      );
+    const sysInstruction = [
+      `Thời gian hiện tại (Việt Nam): ${formatVietnamNowLabel()}.`,
+      'Bạn là ToanTrung — trợ lý AI thông minh, thân thiện, đa năng và chuyên nghiệp.',
+      'NGUYÊN TẮC QUAN TRỌNG:',
+      '1. Khi được hỏi tên hoặc giới thiệu bản thân, hãy xưng là ToanTrung AI. Trò chuyện tự nhiên, thông minh, trả lời thẳng vào đúng câu hỏi hoặc yêu cầu của người dùng về BẤT KỲ chủ đề nào (thời tiết, tin tức, tỷ giá, kiến thức chung, viết lách, marketing, ý tưởng thiết kế, lập trình, kinh doanh, đời sống...).',
+      '2. TUYỆT ĐỐI KHÔNG tự ý nhắc đến hay ép người dùng phải tải ảnh công trình, chấm 4 góc hay nhập thông số màn hình LED (mm, P2.5, cabinet) nếu người dùng không hỏi về thông số LED.',
+      ...(asksAboutLedSpecs
+        ? [
+            `3. Người dùng đang hỏi về kỹ thuật LED; thông số tham khảo hiện tại (nếu cần): LED ${pitch}, kích thước ${wM}m x ${hM}m, tỷ lệ ${ratio}.`,
+          ]
+        : []),
+      '4. Nếu người dùng nhờ lên ý tưởng tạo ảnh hoặc muốn vẽ/tạo một bức ảnh theo mô tả tự do, hãy tư vấn nhiệt tình và có thể gợi ý ở dòng cuối một câu lệnh dạng: `@taobanner: <mô tả chi tiết bức ảnh cần tạo>` để người dùng bấm tạo ảnh ngay.',
+      ...(liveGrounding?.contextText
+        ? [
+            '',
+            '=== DỮ LIỆU THỜI GIAN THỰC ĐÃ TRA CỨU TỪ INTERNET ===',
+            liveGrounding.contextText,
+            '=== HƯỚNG DẪN DÙNG DỮ LIỆU ===',
+            'Dùng ngay dữ liệu thời gian thực phía trên để trả lời chính xác, tự nhiên và đầy đủ cho người dùng. KHÔNG được nói rằng bạn không có internet hay kiến thức bị giới hạn đến năm 2025.',
+          ]
+        : []),
+    ].join('\n');
+
+    const rawHistory = (currentMeta.chatMessages || [])
+      .filter((m) => m.text && !m.id.startsWith('msg-ai-welcome-'))
+      .slice(-8);
+
+    let liveChatSucceeded = false;
+
+    // A. Try OpenAI-compatible Gateway (/v1/chat/completions) first if user selected custom_endpoint or openai_dalle (e.g. APIVN, CCPRO, OpenAI)
+    const preferGatewayChat =
+      input.providerId === 'custom_endpoint' ||
+      input.providerId === 'openai_dalle' ||
+      aiCfg.defaultProviderId === 'custom_endpoint' ||
+      aiCfg.defaultProviderId === 'openai_dalle' ||
+      !geminiApiKey;
+
+    const gatewayKey =
+      input.providerId === 'openai_dalle'
+        ? openAiCred.apiKey || customCred.apiKey
+        : customCred.apiKey || openAiCred.apiKey;
+    const gatewayRawEndpoint =
+      input.providerId === 'openai_dalle' && openAiCred.apiKey
+        ? openAiCred.apiEndpoint || 'https://api.openai.com/v1'
+        : customCred.apiEndpoint || openAiCred.apiEndpoint || 'https://api.openai.com/v1';
+
+    if (preferGatewayChat && gatewayKey && !input.simulateAiTimeout && !isOfflineUnitTest) {
       try {
-        const quadInfo = input.placementQuad || currentMeta.placementQuad || DEFAULT_PLACEMENT_QUAD;
-        // Only attach the heavy survey photo when the user actually asks about the photo/room/image/wall
+        const cleanBase = gatewayRawEndpoint
+          .replace(/\/(images\/generations|images\/edits|chat\/completions|models).*$/i, '')
+          .replace(/\/+$/, '');
+        const chatUrl = cleanBase.endsWith('/v1')
+          ? `${cleanBase}/chat/completions`
+          : `${cleanBase}/v1/chat/completions`;
+
+        const rankGatewayModel = (id: string): number => {
+          const l = id.toLowerCase();
+          if (l.includes('gemini-3') || l.includes('claude-sonnet') || l.includes('gpt-6')) return 0;
+          if (l.includes('gpt-5') || l.includes('claude-opus') || l.includes('gpt-4o')) return 1;
+          if (l.includes('haiku') || l.includes('mini') || l.includes('lite') || l.includes('nano')) {
+            return 3;
+          }
+          return 2;
+        };
+
+        const rawRequestedChatCandidate =
+          input.modelId &&
+          input.modelId !== 'toantrung-rules-v3' &&
+          input.modelId !== 'toantrung-studio-v3' &&
+          !input.modelId.includes('image') &&
+          !input.modelId.includes('imagen') &&
+          !input.modelId.includes('dall-e')
+            ? input.modelId.trim()
+            : '';
+
+        const discoveredGatewayChatModels = (
+          aiCfg.providers.custom_endpoint?.discoveredModels ||
+          aiCfg.providers.openai_dalle?.discoveredModels ||
+          []
+        )
+          .map((m) => m.id.trim())
+          .filter((id) => id && AiDesignProviderFactory.isChatOnlyModel(id));
+
+        const sortedGatewayModels = [...discoveredGatewayChatModels].sort(
+          (a, b) => rankGatewayModel(a) - rankGatewayModel(b)
+        );
+
+        const isExplicitHaiku = /haiku/i.test(rawRequestedChatCandidate);
+        const gatewayCandidates = Array.from(
+          new Set(
+            [
+              ...(isExplicitHaiku ? [rawRequestedChatCandidate] : []),
+              ...(!isExplicitHaiku && rawRequestedChatCandidate ? [rawRequestedChatCandidate] : []),
+              ...sortedGatewayModels,
+              'gpt-4o-mini',
+              'gpt-4o',
+              'gemini-2.5-flash',
+            ].filter(Boolean)
+          )
+        ).slice(0, 3);
+
+        const oaBaseHistory = rawHistory.map((m) => ({
+          role: (m.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+          content: m.text.trim(),
+        }));
+
+        const asksAboutGatewayVisual =
+          input.taskCode === 'brief_analyze' ||
+          attachedProductPhotosMeta.length > 0 ||
+          /nhìn\s*ảnh|xem\s*ảnh|phân\s*tích\s*ảnh|trong\s*bức\s*ảnh|ảnh\s*này|hình\s*này/i.test(
+            input.prompt
+          );
+        const wantsGatewayVision =
+          asksAboutGatewayVisual &&
+          Boolean(
+            activePhotoFileData &&
+              activePhotoFileData.buffer.length > 0 &&
+              activePhotoFileData.buffer.length < 4 * 1024 * 1024
+          );
+
+        type GatewayMessage = {
+          role: 'system' | 'user' | 'assistant';
+          content:
+            | string
+            | Array<
+                | { type: 'text'; text: string }
+                | { type: 'image_url'; image_url: { url: string } }
+              >;
+        };
+
+        const oaTextMessages: GatewayMessage[] = [
+          { role: 'system', content: sysInstruction },
+          ...oaBaseHistory,
+          { role: 'user', content: input.prompt },
+        ];
+
+        const oaVisionMessages: GatewayMessage[] =
+          wantsGatewayVision && activePhotoFileData
+            ? [
+                { role: 'system', content: sysInstruction },
+                ...oaBaseHistory,
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: input.prompt },
+                    {
+                      type: 'image_url',
+                      image_url: {
+                        url: `data:${
+                          activePhotoFileData.mimeType?.startsWith('image/')
+                            ? activePhotoFileData.mimeType
+                            : 'image/jpeg'
+                        };base64,${activePhotoFileData.buffer.toString('base64')}`,
+                      },
+                    },
+                  ],
+                },
+              ]
+            : oaTextMessages;
+
+        for (const gwModel of gatewayCandidates) {
+          try {
+            let gwRes = await fetch(chatUrl, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${gatewayKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: gwModel,
+                messages: oaVisionMessages,
+                max_tokens: 1400,
+                temperature: 0.7,
+              }),
+              signal: AbortSignal.timeout(15000),
+            });
+            // If gateway/model rejects multimodal image_url with 400/422, retry once with plain text
+            if (!gwRes.ok && (gwRes.status === 400 || gwRes.status === 422) && wantsGatewayVision) {
+              gwRes = await fetch(chatUrl, {
+                method: 'POST',
+                headers: {
+                  Authorization: `Bearer ${gatewayKey}`,
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  model: gwModel,
+                  messages: oaTextMessages,
+                  max_tokens: 1400,
+                  temperature: 0.7,
+                }),
+                signal: AbortSignal.timeout(15000),
+              });
+            }
+            if (gwRes.ok) {
+              const gwJson = (await gwRes.json()) as {
+                model?: string;
+                choices?: Array<{ message?: { content?: string } }>;
+              };
+              const extracted = gwJson.choices?.[0]?.message?.content?.trim();
+              if (extracted) {
+                const cmdMatch = extracted.match(/(@(?:TaoAnhPoster|TaoAnh|taobanner|taoanh)\s*:?[^\n]+)/i);
+                if (cmdMatch) {
+                  suggestedTaoAnhPrompt = cmdMatch[1].trim();
+                  replyText = extracted.replace(cmdMatch[0], '').trim() || extracted;
+                } else {
+                  suggestedTaoAnhPrompt = undefined;
+                  replyText = extracted;
+                }
+                consultModelUsed = gwJson.model || gwModel || 'ToanTrung AI';
+                liveChatSucceeded = true;
+                break;
+              }
+            }
+          } catch {
+            // Try next gateway model
+          }
+        }
+      } catch {
+        // Fall through to Gemini or fallback
+      }
+    }
+
+    if (!liveChatSucceeded && geminiApiKey && !input.simulateAiTimeout && !isOfflineUnitTest) {
+      try {
+        // Only attach the survey photo when the user explicitly asks to inspect the photo
         const asksAboutVisualImage =
           input.taskCode === 'brief_analyze' ||
-          /ảnh|hình|nhìn|xem|phân tích|trong phòng|vách|tường|vị trí|showroom|công trình|mặt tiền|ghép|sửa|thêm|xóa|bỏ/i.test(
+          /nhìn\s*ảnh|xem\s*ảnh|phân\s*tích\s*ảnh|trong\s*bức\s*ảnh\s*này/i.test(
             input.prompt
           );
         const wantsImageAttachment =
@@ -2130,29 +2366,6 @@ export async function processChatDesignRequest(
               activePhotoFileData.buffer.length > 0 &&
               activePhotoFileData.buffer.length < 5 * 1024 * 1024
           );
-
-        const hasMeasuredPhysicalDims = Boolean(
-          (designContext.provenance.widthMm === 'user_confirmed' && designContext.fields.widthMm) ||
-            input.screenWidthM ||
-            currentMeta.screenWidthM,
-        );
-        const dimContextNote = hasMeasuredPhysicalDims
-          ? `LED ${pitch}, kích thước đo đạc ${Math.round(wM * 1000)}x${Math.round(hM * 1000)}mm (${wM}m x ${hM}m), tỷ lệ ${ratio}, vùng lắp TL(${quadInfo.topLeft.x}%,${quadInfo.topLeft.y}%) -> BR(${quadInfo.bottomRight.x}%,${quadInfo.bottomRight.y}%).`
-          : `Ấn phẩm/Banner kích thước ${bW}×${bH}px (tỷ lệ ${ratio}); chưa khai báo kích thước màn hình LED vật lý theo mét — không tự giả định kích thước.`;
-
-        const sysInstruction = [
-          'Bạn là chuyên gia phân tích brief thiết kế & tư vấn kỹ thuật cho Toàn Trung.',
-          'NGUYÊN TẮC BẮT BUỘC:',
-          '1. Trả lời tự nhiên, súc tích, bám sát brief, mục tiêu chiến dịch, thông điệp, ảnh tham chiếu (nếu có) và kích thước đầu ra.',
-          '2. KHÔNG BỊA số liệu hoặc kích thước mét chưa được đo đạc/cung cấp.',
-          `3. Ngữ cảnh kỹ thuật dự án hiện tại: ${dimContextNote}`,
-          '4. Nếu tin nhắn có đính kèm bức ảnh và người dùng hỏi về bức ảnh đó, hãy quan sát ảnh thật kỹ để phân tích bố cục, ánh sáng và gợi ý chỉnh sửa.',
-        ].join('\n');
-
-        // Build multi-turn conversation history so Gemini remembers previous messages naturally
-        const rawHistory = (currentMeta.chatMessages || [])
-          .filter((m) => m.text && !m.id.startsWith('msg-ai-welcome-'))
-          .slice(-8);
 
         // Normalize alternating user/model turns for Google generateContent API
         const historyTurns: Array<{ role: 'user' | 'model'; parts: Array<{ text: string }> }> = [];
@@ -2181,8 +2394,8 @@ export async function processChatDesignRequest(
           .map((m) => m.id.replace(/^models\//, '').trim())
           .filter(Boolean);
         const discoveredGeminiFirst = [
-          ...discoveredIds.filter((id) => id.startsWith('gemini-')),
-          ...discoveredIds.filter((id) => !id.startsWith('gemini-')),
+          ...discoveredIds.filter((id) => id.startsWith('gemini-') && !id.includes('image')),
+          ...discoveredIds.filter((id) => !id.startsWith('gemini-') && !id.includes('image') && !id.includes('imagen')),
         ];
 
         const rawRequestedModel =
@@ -2198,10 +2411,10 @@ export async function processChatDesignRequest(
           new Set(
             [
               rawRequestedModel.startsWith('gemini-') ? rawRequestedModel : '',
-              'gemini-3.8-flash',
+              'gemini-2.5-flash',
               'gemini-3-flash-preview',
-              ...discoveredGeminiFirst.filter((id) => !id.includes('2.5-flash')),
-              rawRequestedModel,
+              ...discoveredGeminiFirst,
+              'gemini-2.0-flash',
               'gemini-flash-lite-latest',
             ].filter(Boolean)
           )
@@ -2243,7 +2456,7 @@ export async function processChatDesignRequest(
               },
             ],
             generationConfig: {
-              maxOutputTokens: 800,
+              maxOutputTokens: 1400,
               temperature: 0.7,
             },
           };
@@ -2304,10 +2517,21 @@ export async function processChatDesignRequest(
             replyText = rawAiText;
           }
           consultModelUsed = usedModelName;
+          liveChatSucceeded = true;
         }
       } catch {
         // Fallback to natural conversational reply if network fails
       }
+    }
+
+    if (!liveChatSucceeded && liveGrounding?.contextText) {
+      suggestedTaoAnhPrompt = undefined;
+      replyText = [
+        `Dữ liệu thời gian thực vừa tra cứu từ Internet (${liveGrounding.sources.join(', ')}):`,
+        '',
+        liveGrounding.contextText,
+      ].join('\n');
+      consultModelUsed = `Live Web Search (${liveGrounding.sources.join(', ')})`;
     }
 
     const existingChat = currentMeta.chatMessages || [];
@@ -2371,7 +2595,9 @@ export async function processChatDesignRequest(
     };
   }
 
-  // 4. Validate Mandatory Readiness before calling Image API
+  // 4. Validate Readiness before calling Image API:
+  // If user is generating an image freely from the UI (input.chatMode === 'image_generator') without a site survey photo,
+  // automatically switch to free-form image generation (GENERATE_BANNER) instead of blocking them for missing site photo or LED specs!
   const hasSurveyPhoto = Boolean(
     photosList.length > 0 ||
       existing.sitePhotoUrl ||
@@ -2385,6 +2611,13 @@ export async function processChatDesignRequest(
     DEFAULT_PLACEMENT_QUAD;
   const hasPlacementQuad = Boolean(effectiveQuad?.topLeft && effectiveQuad?.bottomRight);
 
+  if (routeDecision.action === 'GENERATE_SCENE' && !hasSurveyPhoto && input.chatMode === 'image_generator') {
+    routeDecision.action = 'GENERATE_BANNER';
+    routeDecision.commandToken = '@taobanner';
+  }
+  const effectiveDbType: 'banner' | '3d_perspective' =
+    routeDecision.action === 'GENERATE_BANNER' ? 'banner' : dbType;
+
   const readiness = validateCommandReadiness({
     routed: routeDecision,
     hasSurveyPhoto,
@@ -2395,7 +2628,7 @@ export async function processChatDesignRequest(
     pixelPitch: effectivePitch,
     bannerWidthPx: effectiveBannerW,
     bannerHeightPx: effectiveBannerH,
-    bannerBriefFromContext: designContext.fields.bannerContent,
+    bannerBriefFromContext: designContext.fields.bannerContent || input.prompt,
   });
 
   if (!readiness.canExecuteImmediately && readiness.clarificationReply) {
@@ -2452,16 +2685,46 @@ export async function processChatDesignRequest(
     };
   }
 
-  // 5. Reject text-only / vision-only Chat Models when attempting Image Generation
-  if (input.modelId && AiDesignProviderFactory.isChatOnlyModel(input.modelId)) {
-    throw new Error(
-      `MODEL_NOT_IMAGE_CAPABLE: Model "${input.modelId}" chỉ hỗ trợ Chat/Phân tích brief & ảnh, không hỗ trợ xuất file ảnh. Vui lòng chọn IMAGE MODEL phù hợp.`
-    );
+  // 5. Resolve Image-Capable Model:
+  // If user is in interactive UI chat (input.chatMode === 'image_generator') and currently has a Chat Model selected,
+  // auto-resolve the best Image Model for their active provider instead of throwing an error!
+  let effectiveImageModelId = input.modelId;
+  if (effectiveImageModelId && AiDesignProviderFactory.isChatOnlyModel(effectiveImageModelId)) {
+    if (input.chatMode === 'image_generator') {
+      const { config: imgCfg } = AiDesignProviderFactory.getCatalog();
+      const targetPid = (input.providerId || imgCfg.defaultProviderId || 'google_imagen') as AiProviderId;
+      const imgModels = (imgCfg.providers[targetPid]?.discoveredModels || [])
+        .map((m) => m.id)
+        .filter((id) => id && !AiDesignProviderFactory.isChatOnlyModel(id));
+      const rankImageModel = (id: string): number => {
+        const l = id.toLowerCase();
+        if (l.includes('gpt-image-2.5')) return 0;
+        if (l.includes('gpt-image-2')) return 1;
+        if (l.includes('gpt-image-1')) return 2;
+        if (l.includes('gemini-2.5-flash-image') || l.includes('imagen')) return 3;
+        return 4;
+      };
+      const bestDiscoveredImg = [...imgModels].sort((a, b) => rankImageModel(a) - rankImageModel(b))[0];
+      effectiveImageModelId =
+        bestDiscoveredImg ||
+        (targetPid === 'google_imagen'
+          ? 'gemini-2.5-flash-image'
+          : targetPid === 'openai_dalle'
+            ? 'gpt-image-1'
+            : targetPid === 'custom_endpoint'
+              ? 'gpt-image-2.5'
+              : 'toantrung-studio-v3');
+    } else {
+      throw new Error(
+        `MODEL_NOT_IMAGE_CAPABLE: Model "${effectiveImageModelId}" chỉ hỗ trợ Chat/Phân tích brief & ảnh, không hỗ trợ xuất file ảnh. Vui lòng chọn IMAGE MODEL phù hợp.`
+      );
+    }
   }
 
   const effectiveTaskCode: DesignTaskCode =
-    input.taskCode ||
-    (dbType === 'banner' ? 'banner_generate' : 'perspective_compose');
+    effectiveDbType === 'banner'
+      ? 'banner_generate'
+      : input.taskCode || 'perspective_compose';
 
   if (
     effectiveTaskCode === 'design_edit' &&
@@ -2511,9 +2774,9 @@ export async function processChatDesignRequest(
   const runningJob: DesignActiveJobDto = {
     jobId: `job-${requestId}-v${nextVersionNumber}-${Date.now()}`,
     status: 'running',
-    action: dbType === 'banner' ? 'GENERATE_BANNER' : 'GENERATE_SCENE',
+    action: effectiveDbType === 'banner' ? 'GENERATE_BANNER' : 'GENERATE_SCENE',
     providerId: normalizedProviderId || 'google_imagen',
-    modelId: input.modelId || 'auto',
+    modelId: effectiveImageModelId || 'auto',
     startedAt: new Date().toISOString(),
     finishedAt: null,
     resultVersionNo: null,
@@ -2602,7 +2865,7 @@ export async function processChatDesignRequest(
     let providerResult: Awaited<ReturnType<typeof AiDesignProviderFactory.executePerspectiveWithFallback>>;
     try {
       providerResult =
-        dbType === '3d_perspective'
+        effectiveDbType === '3d_perspective'
           ? await AiDesignProviderFactory.executePerspectiveWithFallback(
               {
                 workflow: 'perspective_3d',
@@ -2634,7 +2897,7 @@ export async function processChatDesignRequest(
                   aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
                 },
                 quality: input.quality || 'draft',
-                modelId: input.modelId,
+                modelId: effectiveImageModelId,
                 idempotencyKey:
                   input.idempotencyKey ||
                   `chat-design-${requestId}-v${nextVersionNumber}-${Date.now()}`,
@@ -2649,8 +2912,10 @@ export async function processChatDesignRequest(
               {
                 workflow: 'banner',
                 prompt: cleanImagePrompt,
-                referenceImageBuffer: activePhotoFileData?.buffer,
-                referenceImageMimeType: activePhotoFileData?.mimeType,
+                referenceImageBuffer:
+                  effectiveTaskCode === 'design_edit' ? activePhotoFileData?.buffer : undefined,
+                referenceImageMimeType:
+                  effectiveTaskCode === 'design_edit' ? activePhotoFileData?.mimeType : undefined,
                 productReferenceBuffers:
                   productReferenceBuffers.length > 0 ? productReferenceBuffers : undefined,
                 sourceVersionId: requestedParentVerId,
@@ -2660,7 +2925,7 @@ export async function processChatDesignRequest(
                   aspectRatio: input.aspectRatio || existing.aspectRatio || '16:9',
                 },
                 quality: input.quality || 'draft',
-                modelId: input.modelId,
+                modelId: effectiveImageModelId,
                 idempotencyKey:
                   input.idempotencyKey ||
                   `chat-banner-${requestId}-v${nextVersionNumber}-${Date.now()}`,
@@ -2843,28 +3108,35 @@ export async function processChatDesignRequest(
 
     let layoutOverlayApplied = false;
     let layoutOverlayNote: string | null = null;
-    if (dbType === 'banner') {
-      const bannerProcessed = processBannerToTargetResolution({
-        sourceBuffer: finalBufferToSave,
-        sourceMimeType: finalMimeToSave,
-        targetWidthPx: effectiveBannerW,
-        targetHeightPx: effectiveBannerH,
-        prompt: cleanImagePrompt,
-      });
-      finalBufferToSave = bannerProcessed.imageBuffer;
-      bannerTypographyWarning = bannerProcessed.typographyWarning;
-      bannerResizeExplanation = bannerProcessed.resizeExplanation;
-      if (input.applyLayoutOverlay) {
-        const overlaid = renderBrandLayoutOverlayOnImage({
+    if (effectiveDbType === 'banner') {
+      if (providerResult.provider !== 'local_sandbox' && !input.applyLayoutOverlay) {
+        // Keep the full native Cloud AI high-resolution image without nearest/raster cropping
+        bannerTypographyWarning =
+          '⚠️ Lưu ý kiểm tra nội dung chữ trên Banner: Vui lòng kiểm tra kỹ chính tả tiếng Việt, font chữ và thông điệp trước khi bấm Phê duyệt.';
+        bannerResizeExplanation = `Giữ nguyên ảnh độ phân giải gốc từ Cloud AI (${providerResult.modelUsed || 'Cloud AI'}) cho tỷ lệ ${input.aspectRatio || existing.aspectRatio || '16:9'}.`;
+      } else {
+        const bannerProcessed = processBannerToTargetResolution({
           sourceBuffer: finalBufferToSave,
-          brandPrimaryColor: currentMeta.designBrief?.brandPrimaryColor || input.designBrief?.brandPrimaryColor,
-          headlineText: currentMeta.designBrief?.headlineText || input.designBrief?.headlineText,
-          ctaText: currentMeta.designBrief?.ctaText || input.designBrief?.ctaText,
-          websiteDomain: currentMeta.websiteDomain || input.designBrief?.websiteDomain,
+          sourceMimeType: finalMimeToSave,
+          targetWidthPx: effectiveBannerW,
+          targetHeightPx: effectiveBannerH,
+          prompt: cleanImagePrompt,
         });
-        finalBufferToSave = overlaid.imageBuffer;
-        layoutOverlayApplied = overlaid.applied;
-        layoutOverlayNote = overlaid.overlayNote;
+        finalBufferToSave = bannerProcessed.imageBuffer;
+        bannerTypographyWarning = bannerProcessed.typographyWarning;
+        bannerResizeExplanation = bannerProcessed.resizeExplanation;
+        if (input.applyLayoutOverlay) {
+          const overlaid = renderBrandLayoutOverlayOnImage({
+            sourceBuffer: finalBufferToSave,
+            brandPrimaryColor: currentMeta.designBrief?.brandPrimaryColor || input.designBrief?.brandPrimaryColor,
+            headlineText: currentMeta.designBrief?.headlineText || input.designBrief?.headlineText,
+            ctaText: currentMeta.designBrief?.ctaText || input.designBrief?.ctaText,
+            websiteDomain: currentMeta.websiteDomain || input.designBrief?.websiteDomain,
+          });
+          finalBufferToSave = overlaid.imageBuffer;
+          layoutOverlayApplied = overlaid.applied;
+          layoutOverlayNote = overlaid.overlayNote;
+        }
       }
     } else if (effectiveStyle === 'curved') {
       curvedDistortionWarning =

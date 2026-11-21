@@ -150,16 +150,15 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
         };
       }
 
-      const isGptImage2Family = /^gpt-image-2/i.test(effectiveModel);
       const isGptImageFamily = /^gpt-image|^gpt-2\.5-image/i.test(effectiveModel);
       const chosenSize =
-        isGptImage2Family || widthPx === heightPx
+        widthPx === heightPx
           ? '1024x1024'
           : isGptImageFamily
-            ? widthPx >= heightPx
+            ? widthPx > heightPx
               ? '1536x1024'
               : '1024x1536'
-            : widthPx >= heightPx
+            : widthPx > heightPx
               ? '1792x1024'
               : '1024x1792';
 
@@ -203,13 +202,19 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
           signal: AbortSignal.timeout(75000),
         });
       } else {
+        const fullBleedPrompt = `${prompt.trim()}. Full-bleed edge-to-edge composition filling 100% of the frame with no margins, no letterboxing, no borders, no rounded frame corners, ultra-sharp crisp high-resolution details.`;
         const payloadBody: Record<string, unknown> = {
           model: effectiveModel,
-          prompt,
+          prompt: fullBleedPrompt,
           n: 1,
           size: chosenSize,
         };
-        if (!isGptImageFamily) {
+        if (isGptImageFamily) {
+          payloadBody.quality = 'high';
+        } else if (/^dall-e-3/i.test(effectiveModel)) {
+          payloadBody.quality = 'hd';
+          payloadBody.response_format = 'b64_json';
+        } else {
           payloadBody.response_format = 'b64_json';
         }
 
@@ -222,6 +227,28 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
           body: JSON.stringify(payloadBody),
           signal: AbortSignal.timeout(75000),
         });
+
+        // Graceful fallback if third-party gateway rejects `quality` or non-square `size`
+        if (!response.ok && (response.status === 400 || response.status === 422)) {
+          const fallbackBody: Record<string, unknown> = {
+            model: effectiveModel,
+            prompt: fullBleedPrompt,
+            n: 1,
+            size: '1024x1024',
+          };
+          if (!isGptImageFamily) {
+            fallbackBody.response_format = 'b64_json';
+          }
+          response = await fetch(this.apiEndpoint, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${this.apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(fallbackBody),
+            signal: AbortSignal.timeout(75000),
+          });
+        }
       }
 
       const durationMs = Date.now() - started;
