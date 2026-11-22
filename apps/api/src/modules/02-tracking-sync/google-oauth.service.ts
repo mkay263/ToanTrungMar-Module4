@@ -2568,16 +2568,18 @@ function triggerBackgroundFinalUrlsRefresh(): void {
         adsCfg?.customerId ||
         normalizeDigitsId(conn?.selectedGadsCustomerId) ||
         normalizeDigitsId(conn?.detectedGadsCustomerId);
-      if (!targetCustomerId || !adsCfg?.developerToken) {
+      if (!targetCustomerId) {
         return getFinalUrlsMemCache().byCampaignId;
       }
 
       const headers: Record<string, string> = {
         Authorization: `Bearer ${token}`,
         'Content-Type': 'application/json',
-        'developer-token': adsCfg.developerToken,
       };
-      if (adsCfg.loginCustomerId) {
+      if (adsCfg?.developerToken) {
+        headers['developer-token'] = adsCfg.developerToken;
+      }
+      if (adsCfg?.loginCustomerId) {
         headers['login-customer-id'] = adsCfg.loginCustomerId;
       }
 

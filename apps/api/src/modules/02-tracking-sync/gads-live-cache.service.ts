@@ -517,7 +517,9 @@ async function fetchLiveGoogleAdsPeriod(
     resAg === null &&
     resKw === null &&
     resSt === null &&
-    resLp === null
+    resLp === null &&
+    resDev === null &&
+    resTime === null
   ) {
     return null;
   }
@@ -614,15 +616,17 @@ export async function getGoogleAdsLiveSnapshotNonBlocking(
 
   const refreshFn = async () => {
     const token = await getValidAccessToken().catch(() => null);
-    if (!token || token === 'DEMO_SANDBOX_TOKEN' || !adsCfg?.developerToken) {
+    if (!token || token === 'DEMO_SANDBOX_TOKEN') {
       return cached?.data || null;
     }
     const headers: Record<string, string> = {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'developer-token': adsCfg.developerToken,
     };
-    if (adsCfg.loginCustomerId) {
+    if (adsCfg?.developerToken) {
+      headers['developer-token'] = adsCfg.developerToken;
+    }
+    if (adsCfg?.loginCustomerId) {
       headers['login-customer-id'] = adsCfg.loginCustomerId;
     }
     return triggerGadsRefreshSingleflight(customerId, startDate, endDate, headers);

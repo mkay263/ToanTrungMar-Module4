@@ -938,6 +938,7 @@ export function ReportsWorkspace() {
         title="Báo cáo"
         scope={scope}
         availableWebsites={data?.coverage.availableWebsites || knownWebsites}
+        websiteSelectorStyle="dropdown"
         freshnessMessage={
           loading && !data
             ? UI_VOCABULARY.freshness.updating
@@ -971,7 +972,7 @@ export function ReportsWorkspace() {
               type="button"
               disabled={refreshing}
               onClick={() => void loadReports(true)}
-              className="h-9 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
+              className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               <span>{UI_VOCABULARY.actions.refresh}</span>
@@ -981,7 +982,7 @@ export function ReportsWorkspace() {
                 <button
                   type="button"
                   onClick={handleExportExcel}
-                  className="h-9 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
+                  className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
                 >
                   <FileSpreadsheet className="h-3.5 w-3.5 text-emerald-700" />
                   <span>{UI_VOCABULARY.actions.exportExcel}</span>
@@ -989,7 +990,7 @@ export function ReportsWorkspace() {
                 <button
                   type="button"
                   onClick={handleExportWord}
-                  className="h-9 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
+                  className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
                 >
                   <FileText className="h-3.5 w-3.5 text-blue-700" />
                   <span>{UI_VOCABULARY.actions.exportWord}</span>

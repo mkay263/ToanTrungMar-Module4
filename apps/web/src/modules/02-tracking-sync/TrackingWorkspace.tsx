@@ -2195,137 +2195,137 @@ export function TrackingWorkspace() {
                   </table>
                 </div>
               </section>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
+                  <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-bold text-slate-900">Thiết bị Google Ads</h3>
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      {(ads?.breakdowns.devices || []).length} loại thiết bị
+                    </span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase">
+                        <tr>
+                          <th className="px-4 py-2.5">Thiết bị</th>
+                          <th className="px-3 py-2.5 text-right">Hiển thị</th>
+                          <th className="px-3 py-2.5 text-right">Nhấp chuột</th>
+                          <th className="px-4 py-2.5 text-right">Chi phí</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs">
+                        {(ads?.breakdowns.devices || []).length === 0 ? (
+                          <tr>
+                            <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
+                              Chưa có dữ liệu thiết bị Google Ads.
+                            </td>
+                          </tr>
+                        ) : (
+                          (ads?.breakdowns.devices || []).map((dev, idx) => {
+                            const deviceLabels: Record<string, string> = {
+                              MOBILE: 'Di động',
+                              DESKTOP: 'Máy tính',
+                              TABLET: 'Máy tính bảng',
+                              CONNECTED_TV: 'TV kết nối',
+                            };
+                            const label =
+                              deviceLabels[String(dev.device || '').toUpperCase()] ||
+                              dev.device ||
+                              'Khác';
+                            return (
+                              <tr key={`${dev.device}-${idx}`} className="hover:bg-slate-50/70">
+                                <td className="px-4 py-2.5 font-semibold text-slate-800">{label}</td>
+                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
+                                  {Number(dev.impressions || 0).toLocaleString('vi-VN')}
+                                </td>
+                                <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
+                                  {Number(dev.clicks || 0).toLocaleString('vi-VN')}
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums font-bold text-slate-900">
+                                  {Math.round(Number(dev.cost || 0)).toLocaleString('vi-VN')} ₫
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
+                  <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
+                    <h3 className="text-sm font-bold text-slate-900">Khung giờ hiệu quả</h3>
+                    <span className="text-[11px] font-semibold text-slate-500">
+                      {(ads?.breakdowns.timeSchedule || []).length} khung giờ
+                    </span>
+                  </div>
+                  <div className="overflow-auto max-h-[320px]">
+                    <table className="w-full text-left border-collapse">
+                      <thead className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase sticky top-0">
+                        <tr>
+                          <th className="px-4 py-2.5">Thời điểm</th>
+                          <th className="px-3 py-2.5 text-right">Hiển thị</th>
+                          <th className="px-3 py-2.5 text-right">Nhấp chuột</th>
+                          <th className="px-3 py-2.5 text-right">Chi phí</th>
+                          <th className="px-4 py-2.5 text-right">Chuyển đổi</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 text-xs">
+                        {(ads?.breakdowns.timeSchedule || []).length === 0 ? (
+                          <tr>
+                            <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                              Chưa có dữ liệu khung giờ Google Ads.
+                            </td>
+                          </tr>
+                        ) : (
+                          (ads?.breakdowns.timeSchedule || []).map((slot, idx) => {
+                            const dayMap: Record<string, string> = {
+                              MONDAY: 'Thứ 2',
+                              TUESDAY: 'Thứ 3',
+                              WEDNESDAY: 'Thứ 4',
+                              THURSDAY: 'Thứ 5',
+                              FRIDAY: 'Thứ 6',
+                              SATURDAY: 'Thứ 7',
+                              SUNDAY: 'CN',
+                            };
+                            const dayLabel =
+                              dayMap[String(slot.dayOfWeek || '').toUpperCase()] ||
+                              slot.dayOfWeek ||
+                              '—';
+                            const conv = Number(slot.conversions || 0);
+                            return (
+                              <tr
+                                key={`${slot.dayOfWeek}-${slot.hour}-${idx}`}
+                                className="hover:bg-slate-50/70"
+                              >
+                                <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">
+                                  {dayLabel} · {String(slot.hour ?? 0).padStart(2, '0')}:00
+                                </td>
+                                <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
+                                  {Number(slot.impressions || 0).toLocaleString('vi-VN')}
+                                </td>
+                                <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
+                                  {Number(slot.clicks || 0).toLocaleString('vi-VN')}
+                                </td>
+                                <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-900">
+                                  {Math.round(Number(slot.cost || 0)).toLocaleString('vi-VN')} ₫
+                                </td>
+                                <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-emerald-700">
+                                  {Number.isInteger(conv) ? conv.toLocaleString('vi-VN') : conv.toFixed(2)}
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
             </div>
           )}
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
-                <h3 className="text-sm font-bold text-slate-900">Thiết bị Google Ads</h3>
-                <span className="text-[11px] font-semibold text-slate-500">
-                  {(ads?.breakdowns.devices || []).length} loại thiết bị
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse">
-                  <thead className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase">
-                    <tr>
-                      <th className="px-4 py-2.5">Thiết bị</th>
-                      <th className="px-3 py-2.5 text-right">Hiển thị</th>
-                      <th className="px-3 py-2.5 text-right">Nhấp chuột</th>
-                      <th className="px-4 py-2.5 text-right">Chi phí</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs">
-                    {(ads?.breakdowns.devices || []).length === 0 ? (
-                      <tr>
-                        <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
-                          Chưa có dữ liệu thiết bị Google Ads.
-                        </td>
-                      </tr>
-                    ) : (
-                      (ads?.breakdowns.devices || []).map((dev, idx) => {
-                        const deviceLabels: Record<string, string> = {
-                          MOBILE: 'Di động',
-                          DESKTOP: 'Máy tính',
-                          TABLET: 'Máy tính bảng',
-                          CONNECTED_TV: 'TV kết nối',
-                        };
-                        const label =
-                          deviceLabels[String(dev.device || '').toUpperCase()] ||
-                          dev.device ||
-                          'Khác';
-                        return (
-                          <tr key={`${dev.device}-${idx}`} className="hover:bg-slate-50/70">
-                            <td className="px-4 py-2.5 font-semibold text-slate-800">{label}</td>
-                            <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
-                              {Number(dev.impressions || 0).toLocaleString('vi-VN')}
-                            </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
-                              {Number(dev.clicks || 0).toLocaleString('vi-VN')}
-                            </td>
-                            <td className="px-4 py-2.5 text-right tabular-nums font-bold text-slate-900">
-                              {Math.round(Number(dev.cost || 0)).toLocaleString('vi-VN')} ₫
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-
-            <section className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-2xs">
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-2">
-                <h3 className="text-sm font-bold text-slate-900">Khung giờ hiệu quả</h3>
-                <span className="text-[11px] font-semibold text-slate-500">
-                  {(ads?.breakdowns.timeSchedule || []).length} khung giờ
-                </span>
-              </div>
-              <div className="overflow-auto max-h-[320px]">
-                <table className="w-full text-left border-collapse">
-                  <thead className="bg-slate-50 border-b border-slate-100 text-[11px] font-bold text-slate-500 uppercase sticky top-0">
-                    <tr>
-                      <th className="px-4 py-2.5">Thời điểm</th>
-                      <th className="px-3 py-2.5 text-right">Hiển thị</th>
-                      <th className="px-3 py-2.5 text-right">Nhấp chuột</th>
-                      <th className="px-3 py-2.5 text-right">Chi phí</th>
-                      <th className="px-4 py-2.5 text-right">Chuyển đổi</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 text-xs">
-                    {(ads?.breakdowns.timeSchedule || []).length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
-                          Chưa có dữ liệu khung giờ Google Ads.
-                        </td>
-                      </tr>
-                    ) : (
-                      (ads?.breakdowns.timeSchedule || []).map((slot, idx) => {
-                        const dayMap: Record<string, string> = {
-                          MONDAY: 'Thứ 2',
-                          TUESDAY: 'Thứ 3',
-                          WEDNESDAY: 'Thứ 4',
-                          THURSDAY: 'Thứ 5',
-                          FRIDAY: 'Thứ 6',
-                          SATURDAY: 'Thứ 7',
-                          SUNDAY: 'CN',
-                        };
-                        const dayLabel =
-                          dayMap[String(slot.dayOfWeek || '').toUpperCase()] ||
-                          slot.dayOfWeek ||
-                          '—';
-                        const conv = Number(slot.conversions || 0);
-                        return (
-                          <tr
-                            key={`${slot.dayOfWeek}-${slot.hour}-${idx}`}
-                            className="hover:bg-slate-50/70"
-                          >
-                            <td className="px-4 py-2.5 font-semibold text-slate-800 whitespace-nowrap">
-                              {dayLabel} · {String(slot.hour ?? 0).padStart(2, '0')}:00
-                            </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums text-slate-600">
-                              {Number(slot.impressions || 0).toLocaleString('vi-VN')}
-                            </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums font-medium text-slate-800">
-                              {Number(slot.clicks || 0).toLocaleString('vi-VN')}
-                            </td>
-                            <td className="px-3 py-2.5 text-right tabular-nums font-bold text-slate-900">
-                              {Math.round(Number(slot.cost || 0)).toLocaleString('vi-VN')} ₫
-                            </td>
-                            <td className="px-4 py-2.5 text-right tabular-nums font-semibold text-emerald-700">
-                              {Number.isInteger(conv) ? conv.toLocaleString('vi-VN') : conv.toFixed(2)}
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          </div>
         </div>
       </div>
 

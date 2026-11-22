@@ -1022,7 +1022,15 @@ export async function getTrackingDashboardData(
       ? latestByPlatform('search_console')
       : latestByPlatform('google_search_console');
   const adsSync = latestByPlatform('google_ads');
-  const hasAdsToken = Boolean(adsCfg?.developerToken);
+  const hasAdsConnected = Boolean(
+    adsCfg?.developerToken ||
+      (isLiveGoogle &&
+        ((Array.isArray(googleConn?.scopes) &&
+          googleConn.scopes.some((s: unknown) => String(s).includes('adwords'))) ||
+          googleConn?.selectedGadsCustomerId ||
+          googleConn?.detectedGadsCustomerId ||
+          adsSync.lastSuccess)),
+  );
 
   const sourceStatuses = [
     {
@@ -1096,21 +1104,23 @@ export async function getTrackingDashboardData(
     {
       sourceKey: 'GOOGLE_ADS',
       sourceName: 'Google Ads',
-      connectionStatus: hasAdsToken
+      connectionStatus: hasAdsConnected
         ? adsSync.lastAttempt?.status === 'failed'
           ? 'ERROR_CACHED'
           : 'CONNECTED'
         : 'UNCONFIGURED',
-      backendSchedule: hasAdsToken
+      backendSchedule: hasAdsConnected
         ? 'Lịch nền 02:00 / 11:00 / 17:00 (đối soát tăng dần)'
-        : 'Chưa bật (thiếu Developer Token)',
+        : 'Chưa kết nối Google OAuth quyền Google Ads',
       sourceLatency: 'Clicks, impressions, cost cập nhật theo giờ; search terms chậm hơn',
       lastAttemptAt: adsSync.lastAttempt?.startedAt?.toISOString() || null,
       lastSuccessAt: adsSync.lastSuccess?.completedAt?.toISOString() || null,
-      dataRangeCovered: hasAdsToken ? `${cutoffDateStr} → ${todayStr}` : 'Chưa cấu hình',
-      quotaOrLimitNote: hasAdsToken
-        ? 'Google Ads API v17+'
-        : 'Chưa cấu hình GOOGLE_ADS_DEVELOPER_TOKEN & Customer ID (không hiển thị số 0 giả).',
+      dataRangeCovered: hasAdsConnected ? `${cutoffDateStr} → ${todayStr}` : 'Chưa cấu hình',
+      quotaOrLimitNote: hasAdsConnected
+        ? adsCfg?.developerToken
+          ? 'Google Ads API v17+'
+          : 'Google Ads API v26 (OAuth 2.0)'
+        : 'Chưa kết nối tài khoản Google OAuth quyền Google Ads (không hiển thị số 0 giả).',
       isUsingCachedData: false,
     },
     {

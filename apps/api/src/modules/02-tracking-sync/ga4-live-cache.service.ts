@@ -1,5 +1,6 @@
 import { prisma } from '@toantrung/database';
 import { getValidAccessToken } from './google-oauth.service';
+import { getGoogleAdsLiveSnapshotNonBlocking } from './gads-live-cache.service';
 import { resolveDashboardScope } from '../../core/website-catalog';
 import {
   bumpDomainRevisions,
@@ -1128,7 +1129,18 @@ export async function warmAllDashboardDataInBackground(): Promise<void> {
       await Promise.all([persistMemCacheToDb(), persistRealtimeCacheToDb()]);
       bumpDomainRevisions(['tracking', 'reports', 'ads'], 'background_ga4_warmer');
     }
-    await warmGscInspectionInBackground(baseScope.availableWebsites, token);
+    await Promise.all([
+      warmGscInspectionInBackground(baseScope.availableWebsites, token),
+      (async () => {
+        try {
+          await runWithConcurrency(presetScopes, 2, async (sc) => {
+            await getGoogleAdsLiveSnapshotNonBlocking(sc.startDateStr, sc.endDateStr, true);
+          });
+        } catch {
+          // non-fatal Google Ads warm
+        }
+      })(),
+    ]);
   } catch {
     // non-fatal background warm
   } finally {
