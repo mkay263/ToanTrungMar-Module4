@@ -195,6 +195,7 @@ export function ProductCatalogModal({
           </div>
           <button
             type="button"
+            aria-label="Đóng quản lý danh mục sản phẩm"
             onClick={onClose}
             className="w-8 h-8 rounded-lg hover:bg-slate-200/70 flex items-center justify-center text-slate-500"
           >

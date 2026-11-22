@@ -21,7 +21,7 @@ export interface DataSyncEventPayload {
 export function inferDomainsFromApiPath(rawPath: string): SyncDomain[] {
   const path = rawPath.split('?')[0] || '';
   if (path.startsWith('/api/v1/leads')) {
-    return ['leads', 'reports', 'tracking', 'notifications'];
+    return ['leads', 'reports', 'tracking', 'notifications', 'design'];
   }
   if (
     path.startsWith('/api/v1/tracking') ||
@@ -48,11 +48,11 @@ export function inferDomainsFromApiPath(rawPath: string): SyncDomain[] {
   if (path.startsWith('/api/v1/notifications')) {
     return ['notifications'];
   }
-  if (path.startsWith('/api/v1/settings/branding')) {
+  if (path.startsWith('/api/v1/settings/branding') || path.startsWith('/api/v1/settings/backup')) {
     return ['branding'];
   }
   if (path.startsWith('/api/v1/users')) {
-    return ['auth'];
+    return ['auth', 'leads', 'design'];
   }
   if (path.startsWith('/api/v1/workers')) {
     return [

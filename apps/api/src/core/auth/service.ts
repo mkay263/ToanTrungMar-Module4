@@ -548,7 +548,7 @@ export async function createAdminUser(
   });
 
   invalidateAuthRuntimeCaches();
-  bumpDomainRevisions(['auth', 'leads', 'notifications'], 'admin_user_created');
+  bumpDomainRevisions(['auth', 'leads', 'design', 'notifications'], 'admin_user_created');
 
   return {
     id: created.id,
@@ -647,7 +647,7 @@ export async function updateAdminUser(
     await revokeAllUserSessionsExcept(updated.id);
   }
   invalidateAuthRuntimeCaches(updated.id);
-  bumpDomainRevisions(['auth', 'leads'], 'admin_user_updated');
+  bumpDomainRevisions(['auth', 'leads', 'design'], 'admin_user_updated');
 
   await recordAuditLog({
     actorUserId,
@@ -759,7 +759,7 @@ export async function deleteAdminUser(
   });
 
   invalidateAuthRuntimeCaches(deletedTarget.id);
-  bumpDomainRevisions(['auth', 'leads'], 'admin_user_deleted');
+  bumpDomainRevisions(['auth', 'leads', 'design'], 'admin_user_deleted');
 
   return {
     deletedId: deletedTarget.id,

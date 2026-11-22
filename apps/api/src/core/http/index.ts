@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import type { ApiErrorPayload, ApiSuccess } from '@toantrung/contracts';
+import { logServerEvent } from '../logging/logger';
 
 const globalRateStore = globalThis as unknown as {
   __toantrungRateBuckets?: Map<string, { count: number; resetAt: number }>;
@@ -93,6 +94,9 @@ export function jsonError(
   details?: unknown,
 ): NextResponse<ApiErrorPayload> {
   const requestId = crypto.randomUUID();
+  if (status >= 500) {
+    logServerEvent('error', 'http', message, { requestId, code, status });
+  }
   return NextResponse.json(
     {
       error: {

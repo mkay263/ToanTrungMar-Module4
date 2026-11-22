@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useSession } from '@/core/session/SessionContext';
 import { apiRequest } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
 import { SafeHtmlRenderer } from '@/components/common/SafeHtmlRenderer';
 
 type DepartmentScopeCode =
@@ -100,8 +101,8 @@ export default function NotificationsPage() {
   ]);
   const [loadingLiveMetrics, setLoadingLiveMetrics] = useState(false);
 
-  const loadNotificationCenter = useCallback(async () => {
-    setBusy(true);
+  const loadNotificationCenter = useCallback(async (silent = false) => {
+    if (!silent) setBusy(true);
     try {
       const data = await apiRequest<{
         items: ScopedNotificationItem[];
@@ -110,7 +111,7 @@ export default function NotificationsPage() {
         userDepartmentLabel: string;
         canSendFullReport: boolean;
         reports: DispatchedReportItem[];
-      }>('/api/v1/notifications');
+      }>('/api/v1/notifications', { skipCache: silent });
 
       setScopedItems(data.items || []);
       setUnreadCountState(data.unreadCount ?? 0);
@@ -136,12 +137,15 @@ export default function NotificationsPage() {
     } catch {
       // ignore error
     } finally {
-      setBusy(false);
+      if (!silent) setBusy(false);
     }
   }, [setUnreadCountState]);
 
   useEffect(() => {
-    void loadNotificationCenter();
+    void loadNotificationCenter(false);
+    return subscribeDataSync(['notifications', 'leads', 'design', 'reports'], () => {
+      void loadNotificationCenter(true);
+    });
   }, [loadNotificationCenter]);
 
   useEffect(() => {

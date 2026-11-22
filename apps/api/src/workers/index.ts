@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { prisma } from '@toantrung/database';
 import { AiDesignProviderFactory } from '../modules/05-ai-design/providers';
+import { logServerEvent, summarizeError } from '../core/logging/logger';
 import { upsertActionableNotification } from '../core/notifications/service';
 import { bumpDomainRevisions, getVietnamDateKey } from '../core/cache/server-data-cache';
 import {
@@ -100,8 +101,8 @@ export async function runDailyGoogleLeadFormReconciliationJob(targetDateStr?: st
       const conn = JSON.parse(setting.value);
       accountPropertyId = conn.detectedGadsCustomerId || conn.connectedEmail || accountPropertyId;
     }
-  } catch {
-    // fallback
+  } catch (err) {
+    logServerEvent('warn', 'workers', 'Failed to parse google_oauth_connection setting', summarizeError(err));
   }
 
   return prisma.leadReconciliation.upsert({
@@ -308,8 +309,8 @@ function hasLiveOAuthVaultRuntime(): { connected: boolean; hasAdsCustomer: boole
       if (parsed.ga4AccessToken === 'VAULT_PROTECTED_TOKEN') {
         return { connected: true, hasAdsCustomer: Boolean(parsed.gadsCustomerId) };
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      logServerEvent('warn', 'workers', 'Failed to read google-realtime-config.json', summarizeError(err));
     }
   }
   return { connected: false, hasAdsCustomer: false };
@@ -465,8 +466,11 @@ export async function getWorkerJobsHistory(limit = 10): Promise<WorkerJobHistory
     if (l.detailsJson) {
       try {
         parsed = JSON.parse(l.detailsJson) as { summary?: string; durationMs?: number };
-      } catch {
-        // ignore
+      } catch (err) {
+        logServerEvent('warn', 'workers', 'Malformed worker audit log JSON', {
+          logId: l.id,
+          ...summarizeError(err),
+        });
       }
     }
     return {
@@ -500,8 +504,8 @@ export function ensureInternalWorkersSchedulerStarted(): void {
     globalForInternalWorkers.__toantrungSeoPublishRunning = true;
     try {
       await runScheduledSeoPublishJob();
-    } catch {
-      // ignore scheduler error so process stays healthy
+    } catch (err) {
+      logServerEvent('error', 'workers.seo_publish', 'Scheduled SEO publish tick failed', summarizeError(err));
     } finally {
       globalForInternalWorkers.__toantrungSeoPublishRunning = false;
     }
@@ -512,8 +516,8 @@ export function ensureInternalWorkersSchedulerStarted(): void {
     globalForInternalWorkers.__toantrungGclidRetryRunning = true;
     try {
       await runHourlyGclidRetryJob();
-    } catch {
-      // ignore scheduler error so process stays healthy
+    } catch (err) {
+      logServerEvent('error', 'workers.gclid_retry', 'Hourly GCLID retry tick failed', summarizeError(err));
     } finally {
       globalForInternalWorkers.__toantrungGclidRetryRunning = false;
     }
@@ -531,8 +535,8 @@ export function ensureInternalWorkersSchedulerStarted(): void {
     globalForInternalWorkers.__toantrungLastOverdueQuoteVnDay = vnDay;
     try {
       await runDailyOverdueQuoteReminderJob();
-    } catch {
-      // ignore scheduler error
+    } catch (err) {
+      logServerEvent('error', 'workers.quote_reminder', 'Daily overdue quote reminder tick failed', summarizeError(err));
     } finally {
       globalForInternalWorkers.__toantrungQuoteReminderRunning = false;
     }

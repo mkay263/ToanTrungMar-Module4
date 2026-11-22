@@ -48,7 +48,8 @@ function readInitialScope(): DashboardScopeState {
   };
 }
 
-export function useDashboardScope() {
+export function useDashboardScope(options?: { includeWebsiteInUrl?: boolean }) {
+  const includeWebsiteInUrl = options?.includeWebsiteInUrl ?? true;
   const [scope, setScope] = useState<DashboardScopeState>(() => readInitialScope());
   const [hydrated, setHydrated] = useState<boolean>(() => typeof window !== 'undefined');
 
@@ -80,7 +81,11 @@ export function useDashboardScope() {
           // ignore
         }
         const url = new URL(window.location.href);
-        url.searchParams.set('websiteId', next.websiteId);
+        if (includeWebsiteInUrl) {
+          url.searchParams.set('websiteId', next.websiteId);
+        } else {
+          url.searchParams.delete('websiteId');
+        }
         url.searchParams.delete('website');
         url.searchParams.set('preset', next.preset);
         if (next.preset === 'CUSTOM' && next.from && next.to) {
@@ -94,7 +99,7 @@ export function useDashboardScope() {
       }
       return next;
     });
-  }, []);
+  }, [includeWebsiteInUrl]);
 
   return { scope, hydrated, updateScope };
 }

@@ -245,9 +245,16 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   const refreshSession = useCallback(async () => {
     try {
-      const res = await apiRequest<{ user: SessionUserDto }>('/api/v1/auth/me', {
+      const res = await apiRequest<{ user: SessionUserDto | null }>('/api/v1/auth/me?optional=1', {
         skipCache: true,
       });
+      if (!res?.user) {
+        setApiCacheUserScope(null);
+        setRouteStateUserScope(null);
+        clearAllApiCache();
+        setUser(null);
+        return null;
+      }
       const scope = `${res.user.id}:${res.user.roleCode}`;
       setApiCacheUserScope(scope);
       setRouteStateUserScope(scope);

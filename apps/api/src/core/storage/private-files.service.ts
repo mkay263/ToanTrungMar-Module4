@@ -205,6 +205,25 @@ export function resolvePrivateBusinessFilePath(storageObjectKeyOrPath: string): 
       return p;
     }
   }
+
+  // Fallback read-only check against legacy ./storage folder so historical uploads do not 404
+  const legacyRoot = path.resolve(rootResolved, '..', 'storage');
+  if (legacyRoot !== rootResolved && fs.existsSync(legacyRoot)) {
+    const legacyFullPath = path.resolve(legacyRoot, normalizedKey);
+    if (
+      legacyFullPath.startsWith(legacyRoot + path.sep) &&
+      fs.existsSync(legacyFullPath) &&
+      fs.statSync(legacyFullPath).isFile()
+    ) {
+      return legacyFullPath;
+    }
+    for (const b of candidateBuckets) {
+      const p = path.resolve(legacyRoot, b, base);
+      if (p.startsWith(legacyRoot + path.sep) && fs.existsSync(p) && fs.statSync(p).isFile()) {
+        return p;
+      }
+    }
+  }
   return null;
 }
 

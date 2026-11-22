@@ -282,7 +282,7 @@ export function AdminSyncCenterPanel() {
             </span>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <form autoComplete="off" onSubmit={(e) => e.preventDefault()} className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
             <label className="flex items-center justify-between rounded-xl border border-slate-200 px-3 py-2.5 cursor-pointer">
               <span className="font-medium text-slate-700">Bật tự động đồng bộ</span>
               <input
@@ -304,10 +304,12 @@ export function AdminSyncCenterPanel() {
             </label>
 
             <div>
-              <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+              <label htmlFor="admin-gmail-poll-interval" className="block text-[11px] font-semibold text-slate-600 mb-1">
                 Chu kỳ kiểm tra (giây)
               </label>
               <select
+                id="admin-gmail-poll-interval"
+                name="gmail_poll_interval_sec"
                 value={pollIntervalSec}
                 onChange={(e) => setPollIntervalSec(Number(e.target.value))}
                 className="w-full h-9 rounded-xl border border-slate-200 px-3 text-xs bg-white"
@@ -326,19 +328,21 @@ export function AdminSyncCenterPanel() {
               </label>
               <input
                 id="admin-gmail-query-filter"
-                name="admin_gmail_search_query_filter"
-                type="text"
+                name="gmail_search_expression"
+                type="search"
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
+                data-lpignore="true"
+                data-1p-ignore="true"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 placeholder="newer_than:14d -category:promotions -category:social"
                 className="w-full h-9 rounded-xl border border-slate-200 px-3 text-xs"
               />
             </div>
-          </div>
+          </form>
 
           <div className="rounded-xl bg-slate-50 border border-slate-100 px-3 py-2.5 text-[11px] text-slate-600 space-y-1">
             <div>

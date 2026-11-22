@@ -1017,11 +1017,21 @@ export async function configureAiProviders(
   return updatedStatus;
 }
 
-export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
+export async function listDesignRequestsForUser(
+  user: SessionUserDto,
+  options?: { page?: number; pageSize?: number }
+): Promise<{
   requests: DesignRequestItemDto[];
   leadOptions: Array<{ id: number; leadCode: string; label: string }>;
   productOptions: Array<{ id: number; code: string; name: string; categoryGroup: string }>;
   providerStatus: ProviderStatusInfo;
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalCount: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
 }> {
   const canAccessDesignScope =
     user.roleCode === 'ADMIN' ||
@@ -1035,8 +1045,11 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
     );
   }
 
+  const page = Math.max(1, Math.floor(options?.page || 1));
+  const pageSize = Math.min(250, Math.max(1, Math.floor(options?.pageSize || 100)));
+
   const cached = await getOrComputeScopedCache({
-    key: `design:list:${user.roleCode}:${user.roleCode === 'SALES' ? user.id : 'all'}`,
+    key: `design:list:${user.roleCode}:${user.roleCode === 'SALES' ? user.id : 'all'}:p${page}:s${pageSize}`,
     domains: ['design', 'leads'],
     ttlMs: 15_000,
     compute: async () => {
@@ -1047,17 +1060,20 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
               OR: [
                 { requestedBySalesId: user.id },
                 { lead: { assignedSalesId: user.id } },
+                { lead: { createdByUserId: user.id } },
               ],
             }
           : undefined;
 
-      const [rows, leads, products, providerStatus, modelRegistry] = await Promise.all([
+      const [rows, totalCount, leads, products, providerStatus, modelRegistry] = await Promise.all([
         prisma.designRequest.findMany({
           where: requestScopeWhere,
-          take: 100,
+          skip: (page - 1) * pageSize,
+          take: pageSize,
           include: DESIGN_REQUEST_INCLUDE,
           orderBy: { createdAt: 'desc' },
         }),
+        prisma.designRequest.count({ where: requestScopeWhere }),
         prisma.lead.findMany({
           where: {
             isSpam: false,
@@ -1097,6 +1113,7 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
         })
       );
 
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
       return {
         requests,
         leadOptions: leads.map((l) => {
@@ -1118,6 +1135,13 @@ export async function listDesignRequestsForUser(user: SessionUserDto): Promise<{
         providerStatus: {
           ...providerStatus,
           modelRegistry,
+        },
+        pagination: {
+          page,
+          pageSize,
+          totalCount,
+          totalPages,
+          hasMore: page * pageSize < totalCount,
         },
       };
     },

@@ -75,6 +75,18 @@ const {
   isValidCalendarYmd,
   getCustomCanonicalDateRange,
 } = require(path.join(V2_ROOT, 'apps/api/src/core/reporting-dates.js'));
+const { formatStructuredLogEntry } = require(
+  path.join(V2_ROOT, 'apps/api/src/core/logging/logger.ts')
+);
+const { GET: getHealthRoute } = require(
+  path.join(V2_ROOT, 'apps/api/src/app/api/v1/health/route.ts')
+);
+const { listDesignRequestsForUser } = require(
+  path.join(V2_ROOT, 'apps/api/src/modules/05-ai-design/service.ts')
+);
+const { GET: getAuthMeRoute } = require(
+  path.join(V2_ROOT, 'apps/api/src/app/api/v1/auth/me/route.ts')
+);
 
 test('UPG-20261123-01: M05 @banner, @baneer, @taobanner, @TaoAnhPoster, @taoanh routing & readiness', () => {
   const bannerAliases = [
@@ -231,4 +243,70 @@ test('UPG-20261123-06: server-data-cache invalidates multi-domain inflight keys 
     },
   });
   assert.equal(val2.data.count, 2);
+});
+
+test('UPG-20261123-07: formatStructuredLogEntry redacts sensitive secrets and preserves requestId', () => {
+  const entry = formatStructuredLogEntry('error', 'http', 'Sample failure', {
+    requestId: 'req-123',
+    apiKey: 'sk-secret-key-999',
+    nested: {
+      refreshToken: 'rt-secret',
+      password: 'my-password',
+      safeField: 'visible',
+    },
+  });
+  assert.equal(entry.requestId, 'req-123');
+  assert.equal(entry.apiKey, '[REDACTED]');
+  assert.equal(entry.nested.refreshToken, '[REDACTED]');
+  assert.equal(entry.nested.password, '[REDACTED]');
+  assert.equal(entry.nested.safeField, 'visible');
+});
+
+test('UPG-20261123-08: GET /api/v1/health returns 200 healthy without leaking filesystem paths', async () => {
+  const res = await getHealthRoute();
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.status, 'healthy');
+  assert.equal(body.checks.database, 'ok');
+  assert.equal(body.checks.storage, 'ok');
+  assert.equal(typeof body.uptimeSec, 'number');
+  const serialized = JSON.stringify(body);
+  assert.equal(serialized.includes('storage_independent_v2'), false);
+  assert.equal(serialized.includes('DATABASE_URL'), false);
+});
+
+test('UPG-20261123-09: listDesignRequestsForUser returns pagination metadata and respects pageSize', async () => {
+  const res = await listDesignRequestsForUser(
+    {
+      id: 1,
+      email: 'admin@toantrung.vn',
+      fullName: 'Admin',
+      roleCode: 'ADMIN',
+      department: 'admin',
+      csrfToken: 'test-csrf',
+      avatarUrl: null,
+      coverUrl: null,
+      isReceivingLeads: false,
+      permissions: ['AI_DESIGN', 'SYSTEM_USER_ADMIN'],
+    },
+    { page: 1, pageSize: 5 }
+  );
+  assert.ok(res.pagination);
+  assert.equal(res.pagination.page, 1);
+  assert.equal(res.pagination.pageSize, 5);
+  assert.equal(typeof res.pagination.totalCount, 'number');
+  assert.ok(res.requests.length <= 5);
+});
+
+test('UPG-20261123-10: GET /api/v1/auth/me?optional=1 returns 200 null user while strict mode keeps 401', async () => {
+  const optRes = await getAuthMeRoute(new Request('http://localhost:3000/api/v1/auth/me?optional=1'));
+  assert.equal(optRes.status, 200);
+  const optBody = await optRes.json();
+  assert.equal(optBody.ok, true);
+  assert.equal(optBody.data.user, null);
+  assert.equal(optBody.data.authenticated, false);
+
+  const strictRes = await getAuthMeRoute(new Request('http://localhost:3000/api/v1/auth/me'));
+  assert.equal(strictRes.status, 401);
 });

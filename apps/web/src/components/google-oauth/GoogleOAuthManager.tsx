@@ -585,7 +585,14 @@ export function GoogleOAuthManager({
       </div>
 
       {/* Khối Cấu hình Google Ads API */}
-      <div className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4">
+      <form
+        autoComplete="off"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handleSaveAdsConfig();
+        }}
+        className="bg-white rounded-2xl border border-slate-200/90 shadow-2xs p-5 space-y-4"
+      >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 flex-wrap">
@@ -604,13 +611,16 @@ export function GoogleOAuthManager({
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
+            <label htmlFor="gads-dev-token-input" className="block text-xs font-semibold text-slate-700 mb-1">
               Developer Token (tùy chọn)
             </label>
             <input
+              id="gads-dev-token-input"
+              name="google_ads_developer_token"
               type="password"
-              autoComplete="off"
+              autoComplete="new-password"
               spellCheck={false}
+              data-lpignore="true"
               value={devTokenInput}
               onChange={(e) => setDevTokenInput(e.target.value)}
               placeholder={
@@ -623,13 +633,16 @@ export function GoogleOAuthManager({
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
+            <label htmlFor="gads-customer-id-input" className="block text-xs font-semibold text-slate-700 mb-1">
               Customer ID (10 số)
             </label>
             <input
+              id="gads-customer-id-input"
+              name="google_ads_customer_id"
               type="text"
               autoComplete="off"
               spellCheck={false}
+              data-lpignore="true"
               value={adsCustomerIdInput}
               onChange={(e) => setAdsCustomerIdInput(e.target.value)}
               placeholder="VD: 123-456-7890"
@@ -638,13 +651,16 @@ export function GoogleOAuthManager({
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">
+            <label htmlFor="gads-mcc-id-input" className="block text-xs font-semibold text-slate-700 mb-1">
               MCC ID (tùy chọn)
             </label>
             <input
+              id="gads-mcc-id-input"
+              name="google_ads_mcc_id"
               type="text"
               autoComplete="off"
               spellCheck={false}
+              data-lpignore="true"
               value={adsMccIdInput}
               onChange={(e) => setAdsMccIdInput(e.target.value)}
               placeholder="VD: 987-654-3210"
@@ -655,21 +671,27 @@ export function GoogleOAuthManager({
 
         <div className="flex justify-end pt-1">
           <button
-            type="button"
+            type="submit"
             disabled={busy}
-            onClick={() => void handleSaveAdsConfig()}
             className="min-h-9 px-4 rounded-xl bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition disabled:opacity-50"
           >
             {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
             <span>Lưu &amp; Đồng bộ Ads</span>
           </button>
         </div>
-      </div>
+      </form>
 
       {/* Config Modal */}
       {showConfigModal && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 space-y-4">
+          <form
+            autoComplete="off"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleSaveClientConfig();
+            }}
+            className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 space-y-4"
+          >
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="font-bold text-slate-900 text-base flex items-center gap-2">
                 <Key className="w-5 h-5 text-blue-600" />
@@ -677,6 +699,7 @@ export function GoogleOAuthManager({
               </h3>
               <button
                 type="button"
+                aria-label="Đóng cấu hình OAuth Client"
                 onClick={() => setShowConfigModal(false)}
                 className="text-slate-400 hover:text-slate-600 text-sm font-bold"
               >
@@ -703,8 +726,10 @@ export function GoogleOAuthManager({
 
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Google Client ID</label>
+                <label htmlFor="oauth-client-id-input" className="block text-xs font-bold text-slate-700 mb-1">Google Client ID</label>
                 <input
+                  id="oauth-client-id-input"
+                  name="google_oauth_client_id"
                   type="text"
                   autoComplete="off"
                   spellCheck={false}
@@ -716,10 +741,12 @@ export function GoogleOAuthManager({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Google Client Secret</label>
+                <label htmlFor="oauth-client-secret-input" className="block text-xs font-bold text-slate-700 mb-1">Google Client Secret</label>
                 <input
+                  id="oauth-client-secret-input"
+                  name="google_oauth_client_secret"
                   type="password"
-                  autoComplete="off"
+                  autoComplete="new-password"
                   spellCheck={false}
                   placeholder="GOCSPX-xxxxxx"
                   value={clientSecretInput}
@@ -749,9 +776,8 @@ export function GoogleOAuthManager({
                   Đóng
                 </button>
                 <button
-                  type="button"
+                  type="submit"
                   disabled={busy}
-                  onClick={() => void handleSaveClientConfig()}
                   className="h-9 px-4 rounded-xl bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition"
                 >
                   {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
@@ -759,7 +785,7 @@ export function GoogleOAuthManager({
                 </button>
               </div>
             </div>
-          </div>
+          </form>
         </div>
       )}
     </div>

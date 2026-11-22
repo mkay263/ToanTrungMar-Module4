@@ -166,7 +166,17 @@ async function seedSyntheticModuleData(usersByEmail) {
   if (existingLeadCount > 0) return;
 
   const repoRoot = path.resolve(__dirname, '../../..');
-  const storageRoot = path.resolve(repoRoot, process.env.STORAGE_ROOT || './storage_independent_v2');
+  const rawStorageEnv = (process.env.STORAGE_ROOT || '').trim();
+  const normalizedStorageRoot =
+    !rawStorageEnv ||
+    rawStorageEnv === './storage' ||
+    rawStorageEnv === 'storage' ||
+    rawStorageEnv === '.\\storage'
+      ? './storage_independent_v2'
+      : rawStorageEnv;
+  const storageRoot = path.isAbsolute(normalizedStorageRoot)
+    ? normalizedStorageRoot
+    : path.resolve(repoRoot, normalizedStorageRoot);
   const leadsStorageDir = path.join(storageRoot, 'leads');
   const designStorageDir = path.join(storageRoot, 'design');
   fs.mkdirSync(leadsStorageDir, { recursive: true });

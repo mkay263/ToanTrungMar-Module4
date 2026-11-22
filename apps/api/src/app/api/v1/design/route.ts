@@ -35,7 +35,12 @@ export async function GET(req: Request) {
   }
 
   try {
-    const data = await listDesignRequestsForUser(auth.user);
+    const url = new URL(req.url);
+    const pageParam = url.searchParams.get('page');
+    const pageSizeParam = url.searchParams.get('pageSize');
+    const page = pageParam ? Math.max(1, Number(pageParam) || 1) : undefined;
+    const pageSize = pageSizeParam ? Math.max(1, Number(pageSizeParam) || 100) : undefined;
+    const data = await listDesignRequestsForUser(auth.user, { page, pageSize });
     return jsonSuccess(data);
   } catch (err) {
     return jsonError(

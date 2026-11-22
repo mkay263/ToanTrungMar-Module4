@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { prisma } from '@toantrung/database';
+import { APP_CONFIG } from '../../../../../core/config';
 import { getClientIp, jsonError, jsonSuccess } from '../../../../../core/http';
+import { logServerEvent, summarizeError } from '../../../../../core/logging/logger';
 import { requireAdminSession } from '../../../../../core/permissions';
 import { updateBrandingMetadata } from '../../../../../core/storage/branding.service';
 
@@ -47,11 +49,17 @@ const DEFAULT_COMPANY_PROFILE: CompanyProfileData = {
 
 function resolveWorkspaceRoot(): string {
   const cwd = process.cwd();
-  if (fs.existsSync(path.join(cwd, 'packages', 'database', 'prisma', 'independent_v2.db'))) {
+  if (
+    fs.existsSync(path.join(cwd, 'packages', 'database', 'prisma', 'independent_v2.db')) ||
+    fs.existsSync(path.join(cwd, 'packages', 'database', 'package.json'))
+  ) {
     return cwd;
   }
   const twoUp = path.resolve(cwd, '..', '..');
-  if (fs.existsSync(path.join(twoUp, 'packages', 'database', 'prisma', 'independent_v2.db'))) {
+  if (
+    fs.existsSync(path.join(twoUp, 'packages', 'database', 'prisma', 'independent_v2.db')) ||
+    fs.existsSync(path.join(twoUp, 'packages', 'database', 'package.json'))
+  ) {
     return twoUp;
   }
   return cwd;
@@ -59,12 +67,31 @@ function resolveWorkspaceRoot(): string {
 
 function resolveSqliteDbPath(): string {
   const root = resolveWorkspaceRoot();
+  const rawDbUrl = (process.env.DATABASE_URL || '').trim();
+  if (
+    rawDbUrl.startsWith('file:') &&
+    rawDbUrl !== 'file:./dev.db' &&
+    rawDbUrl !== 'file:./independent_v2.db'
+  ) {
+    let candidatePath = rawDbUrl.startsWith('file://')
+      ? rawDbUrl.slice('file://'.length)
+      : rawDbUrl.slice('file:'.length);
+    if (/^\/[a-zA-Z]:/.test(candidatePath)) {
+      candidatePath = candidatePath.slice(1);
+    }
+    candidatePath = decodeURIComponent(candidatePath.split('?')[0] || '');
+    const resolvedFromEnv = path.isAbsolute(candidatePath)
+      ? path.resolve(candidatePath)
+      : path.resolve(root, candidatePath);
+    if (fs.existsSync(resolvedFromEnv)) {
+      return resolvedFromEnv;
+    }
+  }
   return path.join(root, 'packages', 'database', 'prisma', 'independent_v2.db');
 }
 
 function resolveStorageDir(): string {
-  const root = resolveWorkspaceRoot();
-  const dir = path.join(root, 'storage_independent_v2');
+  const dir = path.resolve(APP_CONFIG.getStorageRoot());
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -107,8 +134,11 @@ function listBackups(): BackupManifest[] {
     try {
       const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as BackupManifest;
       manifests.push(parsed);
-    } catch {
-      // ignore malformed manifest
+    } catch (err) {
+      logServerEvent('warn', 'backup', 'Ignored malformed backup manifest.json', {
+        dir: entry.name,
+        ...summarizeError(err),
+      });
     }
   }
   return manifests.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -255,7 +285,8 @@ export async function POST(req: Request) {
         fs.unlinkSync(backupDbPath);
       }
       await prisma.$executeRawUnsafe(`VACUUM INTO '${escapedVacuumTarget}'`);
-    } catch {
+    } catch (err) {
+      logServerEvent('warn', 'backup', 'VACUUM INTO failed; falling back to copyFileSync', summarizeError(err));
       fs.copyFileSync(dbPath, backupDbPath);
     }
 

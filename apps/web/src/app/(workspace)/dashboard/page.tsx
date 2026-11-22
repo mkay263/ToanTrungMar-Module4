@@ -52,7 +52,7 @@ function buildDashboardApiPath(scope: {
 
 export default function DashboardPage() {
   const { user } = useSession();
-  const { scope, hydrated, updateScope } = useDashboardScope();
+  const { scope, hydrated, updateScope } = useDashboardScope({ includeWebsiteInUrl: false });
   const apiPath = useMemo(() => buildDashboardApiPath(scope), [scope]);
 
   const [reportState, setReportState] = useState<{

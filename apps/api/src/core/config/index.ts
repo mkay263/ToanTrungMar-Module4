@@ -10,7 +10,11 @@ export const APP_CONFIG = {
   defaultLogoUrl: '/brand/logo-toan-trung.png',
   defaultHeroUrl: '/brand/login-hero-led-building.jpg',
   getStorageRoot(): string {
-    const raw = process.env.STORAGE_ROOT || './storage_independent_v2';
+    const rawEnv = (process.env.STORAGE_ROOT || '').trim();
+    const raw =
+      !rawEnv || rawEnv === './storage' || rawEnv === 'storage' || rawEnv === '.\\storage'
+        ? './storage_independent_v2'
+        : rawEnv;
     if (path.isAbsolute(raw)) return raw;
     const cwd = process.cwd();
     const repoRoot =

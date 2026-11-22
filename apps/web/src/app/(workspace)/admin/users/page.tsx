@@ -32,6 +32,7 @@ import {
   type RoleCode,
 } from '@toantrung/contracts';
 import { apiRequest, ApiClientError, peekApiCache } from '@/core/http/client';
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
 import { useSession } from '@/core/session/SessionContext';
 
 const ROLE_BADGE_META: Record<
@@ -45,53 +46,53 @@ const ROLE_BADGE_META: Record<
   }
 > = {
   ADMIN: {
-    label: 'Quản trị viên Hệ thống',
+    label: ROLE_LABELS.ADMIN,
     shortCode: 'ADMIN',
     badgeClass: 'bg-slate-900 text-white border-slate-900 shadow-2xs',
     avatarClass: 'bg-gradient-to-br from-slate-800 to-slate-950 text-white',
     isLeadOrExec: true,
   },
   BOD: {
-    label: 'Ban Giám đốc',
+    label: ROLE_LABELS.BOD,
     shortCode: 'BOD',
     badgeClass: 'bg-rose-50 text-rose-700 border-rose-200',
     avatarClass: 'bg-gradient-to-br from-rose-500 to-red-600 text-white',
     isLeadOrExec: true,
   },
   SALES_LEAD: {
-    label: 'Trưởng phòng Kinh doanh',
+    label: ROLE_LABELS.SALES_LEAD,
     shortCode: 'Lead Sales',
     badgeClass: 'bg-indigo-50 text-indigo-700 border-indigo-200',
     avatarClass: 'bg-gradient-to-br from-indigo-600 to-blue-700 text-white',
     isLeadOrExec: true,
   },
   MKT_LEAD: {
-    label: 'Trưởng phòng Marketing',
+    label: ROLE_LABELS.MKT_LEAD,
     shortCode: 'Lead MKT',
     badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200',
     avatarClass: 'bg-gradient-to-br from-emerald-600 to-teal-700 text-white',
     isLeadOrExec: true,
   },
   SALES: {
-    label: 'Chuyên viên Kinh doanh',
+    label: ROLE_LABELS.SALES,
     shortCode: 'Sales',
     badgeClass: 'bg-blue-50 text-blue-700 border-blue-200',
     avatarClass: 'bg-blue-100 text-blue-800 border border-blue-200',
   },
   MKT_STAFF: {
-    label: 'Chuyên viên Marketing & SEO',
+    label: ROLE_LABELS.MKT_STAFF,
     shortCode: 'MKT',
     badgeClass: 'bg-violet-50 text-violet-700 border-violet-200',
     avatarClass: 'bg-violet-100 text-violet-800 border border-violet-200',
   },
   ADS: {
-    label: 'Chuyên viên Quảng cáo Ads',
+    label: ROLE_LABELS.ADS,
     shortCode: 'Ads',
     badgeClass: 'bg-cyan-50 text-cyan-700 border-cyan-200',
     avatarClass: 'bg-cyan-100 text-cyan-800 border border-cyan-200',
   },
   DESIGNER: {
-    label: 'Chuyên viên Thiết kế 3D',
+    label: ROLE_LABELS.DESIGNER,
     shortCode: 'Design',
     badgeClass: 'bg-amber-50 text-amber-800 border-amber-200',
     avatarClass: 'bg-amber-100 text-amber-900 border border-amber-200',
@@ -187,6 +188,9 @@ export default function AdminUsersPage() {
   useEffect(() => {
     if (user?.roleCode === 'ADMIN') {
       void loadUsers(false);
+      return subscribeDataSync(['auth'], () => {
+        void loadUsers(true);
+      });
     } else {
       setLoading(false);
     }
@@ -739,13 +743,16 @@ export default function AdminUsersPage() {
               </button>
             </div>
 
-            <form onSubmit={(e) => void handleCreateUser(e)} className="mt-5 space-y-3.5">
+            <form autoComplete="off" onSubmit={(e) => void handleCreateUser(e)} className="mt-5 space-y-3.5">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
+                <label htmlFor="create-user-fullname" className="block text-xs font-bold text-slate-700 mb-1">
                   Họ và tên nhân sự
                 </label>
                 <input
+                  id="create-user-fullname"
+                  name="create_staff_fullname"
                   type="text"
+                  autoComplete="off"
                   required
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
@@ -756,11 +763,15 @@ export default function AdminUsersPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label htmlFor="create-user-email" className="block text-xs font-bold text-slate-700 mb-1">
                     Email công việc
                   </label>
                   <input
+                    id="create-user-email"
+                    name="create_staff_work_email"
                     type="email"
+                    autoComplete="off"
+                    data-lpignore="true"
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
@@ -770,11 +781,14 @@ export default function AdminUsersPage() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label htmlFor="create-user-phone" className="block text-xs font-bold text-slate-700 mb-1">
                     Số điện thoại
                   </label>
                   <input
+                    id="create-user-phone"
+                    name="create_staff_phone"
                     type="tel"
+                    autoComplete="off"
                     value={phone}
                     onChange={(e) => setPhone(e.target.value)}
                     placeholder="0903xxxxxx"
@@ -785,10 +799,12 @@ export default function AdminUsersPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label htmlFor="create-user-role" className="block text-xs font-bold text-slate-700 mb-1">
                     Vai trò BA
                   </label>
                   <select
+                    id="create-user-role"
+                    name="create_staff_role"
                     value={roleCode}
                     onChange={(e) => handleSelectCreateRole(e.target.value as RoleCode)}
                     className="w-full h-10 px-2.5 rounded-xl border border-slate-200 bg-slate-50/40 text-xs font-semibold text-slate-900 focus:bg-white focus:border-[#2563EB] focus:outline-none"
@@ -802,10 +818,12 @@ export default function AdminUsersPage() {
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                  <label htmlFor="create-user-department" className="block text-xs font-bold text-slate-700 mb-1">
                     Phòng ban trực thuộc
                   </label>
                   <select
+                    id="create-user-department"
+                    name="create_staff_department"
                     value={department}
                     onChange={(e) => setDepartment(e.target.value as DepartmentCode)}
                     className="w-full h-10 px-2.5 rounded-xl border border-slate-200 bg-slate-50/40 text-xs font-semibold text-slate-900 focus:bg-white focus:border-[#2563EB] focus:outline-none"
@@ -820,11 +838,15 @@ export default function AdminUsersPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
+                <label htmlFor="create-user-initial-password" className="block text-xs font-bold text-slate-700 mb-1">
                   Mật khẩu khởi tạo (tối thiểu 8 ký tự)
                 </label>
                 <input
+                  id="create-user-initial-password"
+                  name="create_staff_initial_password"
                   type="password"
+                  autoComplete="new-password"
+                  data-lpignore="true"
                   required
                   value={initialPassword}
                   onChange={(e) => setInitialPassword(e.target.value)}
