@@ -119,6 +119,11 @@ test('Rehearsal 2 (Representative Existing DB Copy): upgrades intermediate 18-ta
 
   // Insert representative pre-existing records into the intermediate DB copy using raw SQL
   const rawSetup = new PrismaClient({ datasources: { db: { url: dbUrl } } });
+  await rawSetup.$executeRawUnsafe(`DELETE FROM "lead_products" WHERE "id" IN (201, 202, 203) OR "lead_id" = 101;`);
+  await rawSetup.$executeRawUnsafe(`DELETE FROM "leads" WHERE "id" = 101 OR "lead_code" = 'TT-20261106-0101';`);
+  await rawSetup.$executeRawUnsafe(`DELETE FROM "platform_daily_metrics" WHERE "id" = 401;`);
+  await rawSetup.$executeRawUnsafe(`DELETE FROM "campaigns" WHERE "id" = 301 OR "campaign_code" = 'CMP-LED-01';`);
+  await rawSetup.$executeRawUnsafe(`DELETE FROM "ai_usage_logs" WHERE "id" = 501;`);
   await rawSetup.$executeRawUnsafe(`
     INSERT INTO "leads" (
       "id", "lead_code", "company_name", "contact_name", "phone", "email",

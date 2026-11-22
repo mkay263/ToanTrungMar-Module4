@@ -115,7 +115,6 @@ export const ROLE_PERMISSION_MATRIX: Record<RoleCode, readonly BaPermissionKey[]
     'LEAD_UPDATE_PIPELINE',
     'LEAD_REASSIGN',
     'ATTACHMENT_UPLOAD_VIEW',
-    'TRACKING_ADS_OPTIMIZE',
     'DASHBOARD_VIEW',
     'EXPORT_DATA',
   ],

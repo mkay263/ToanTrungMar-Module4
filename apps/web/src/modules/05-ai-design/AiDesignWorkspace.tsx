@@ -31,7 +31,6 @@ import {
   Expand,
   Eye,
   FileArchive,
-  FileSpreadsheet,
   FolderOpen,
   Image as ImageIcon,
   Info,
@@ -75,6 +74,15 @@ const LedQuickInstallWizard = dynamic(
   () => import('./LedQuickInstallWizard').then((m) => m.LedQuickInstallWizard),
   { ssr: false, loading: () => null }
 );
+
+const STUDIO_BANNER_CMD_REGEX =
+  /^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster)\s*:?\s*/i;
+const STUDIO_ANY_CMD_REGEX =
+  /^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\s*:?\s*/i;
+const STUDIO_BANNER_CMD_BTN_REGEX =
+  /^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster)\b/i;
+const STUDIO_ANY_CMD_BTN_REGEX =
+  /^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\b/i;
 
 interface LeadOpt {
   id: number;
@@ -479,18 +487,14 @@ export function AiDesignWorkspace() {
   const [error, setError] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
 
-  // Prominent 3 Main Tabs + Settings Modal Area:
-  // 'quick_led' (Gắn LED công trình) | 'banner_prompt' (Tạo Banner / Chat AI) | 'banner_product' (Banner ghép Sản phẩm) | 'specs'
-  const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'quick_led' | 'banner_prompt' | 'banner_product' | 'specs'>('banner_prompt');
-  // Side dock tab when viewing Phối cảnh on wide desktop
-  const [sideDockTab, setSideDockTab] = useState<'assistant' | 'specs'>('assistant');
+  // Prominent Workspace Areas: 'quick_led' (Gắn LED Nhanh & MKT) | 'perspective' (Studio Thiết kế & Banner) | 'specs' (Thông số)
+  const [activeWorkspaceArea, setActiveWorkspaceArea] = useState<'quick_led' | 'perspective' | 'specs'>('perspective');
   const [photoVaultTab, setPhotoVaultTab] = useState<'site_photos' | 'company_products'>('site_photos');
 
   // MK04: 4-Task Workflow, Explicit Banner Mode Separation, Structured Brief & Server Registry Modal
-  const [activeTaskCode, setActiveTaskCode] = useState<DesignTaskCode>('banner_generate');
-  const [activeBannerMode, setActiveBannerMode] = useState<'prompt_only' | 'with_product' | null>('prompt_only');
+  const [activeTaskCode, setActiveTaskCode] = useState<DesignTaskCode>('perspective_compose');
+  const [activeBannerMode, setActiveBannerMode] = useState<'prompt_only' | 'with_product' | null>(null);
   const [activeBrief, setActiveBrief] = useState<DesignBriefDto>({});
-  const [applyLayoutOverlay, setApplyLayoutOverlay] = useState<boolean>(false);
   const [savingBrief, setSavingBrief] = useState<boolean>(false);
   const [showModelRegistryModal, setShowModelRegistryModal] = useState<boolean>(false);
   const [tabletDrawerOpen, setTabletDrawerOpen] = useState<boolean>(false);
@@ -503,17 +507,14 @@ export function AiDesignWorkspace() {
   const [chatHistorySidebarOpen, setChatHistorySidebarOpen] = useState<boolean>(true);
   const [chatHistorySearch, setChatHistorySearch] = useState<string>('');
 
-  // Canvas View Mode: 'original' (Ảnh gốc) | 'result' (Kết quả AI) | 'live_3d' (Chấm điểm & Ghép 3D $0) | 'compare' (So sánh Trước/Sau) | 'bom' (Sơ đồ Cabin & BOM)
-  const [viewMode, setViewMode] = useState<'original' | 'result' | 'live_3d' | 'compare' | 'bom'>('result');
+  // Canvas View Mode: 'original' (Ảnh gốc) | 'result' (Kết quả AI) | 'compare' (So sánh Trước/Sau)
+  const [viewMode, setViewMode] = useState<'original' | 'result' | 'compare'>('result');
   const [live3dTheme, setLive3dTheme] = useState<
     'ai_version' | 'conference_navy' | 'ocean_4k' | 'gala_stage' | 'factory_andon'
   >('conference_navy');
   const [ledScreenVisualTheme, setLedScreenVisualTheme] = useState<
     'gala_red' | 'corp_navy' | 'vivid_commercial' | 'factory_andon' | 'mapped_poster'
   >('gala_red');
-  const [includeCadOverlay, setIncludeCadOverlay] = useState<boolean>(true);
-  const [exportingBlueprint, setExportingBlueprint] = useState<boolean>(false);
-  const [savingComposite, setSavingComposite] = useState(false);
 
   // Environment Lighting & Brightness Simulator (Max-level 3D Studio controls)
   const [ambientLightingMode, setAmbientLightingMode] = useState<
@@ -535,7 +536,6 @@ export function AiDesignWorkspace() {
   // Multi-AI Provider & 2-Tab Hub States ('select_ai' vs 'setting_ai')
   const [selectedProviderId, setSelectedProviderId] = useState<AiProviderId>('google_imagen');
   const [selectedModelId, setSelectedModelId] = useState<string>('gemini-2.0-flash-exp-image-generation');
-  const [taoAnhExecStrategy, setTaoAnhExecStrategy] = useState<'smart_hybrid' | 'cloud_direct'>('smart_hybrid');
   const [showAiConfigModal, setShowAiConfigModal] = useState(false);
   const [aiModalTab, setAiModalTab] = useState<'select_ai' | 'setting_ai'>('select_ai');
   const [configModalProviderId, setConfigModalProviderId] = useState<AiProviderId>('google_imagen');
@@ -697,7 +697,7 @@ export function AiDesignWorkspace() {
     const existsCurrent = autoDiscoveredModels.some((m) => m.id === consultantModelId);
     if (!existsCurrent || consultantModelId === 'gemini-3.5-flash-lite') {
       const chatModels = autoDiscoveredModels.filter((m) => m.category === 'chat');
-      const bestChat = [...chatModels].sort(
+      const bestChat = chatModels.toSorted(
         (a, b) => rankChatPriority(a.id) - rankChatPriority(b.id)
       )[0];
       const chosen = bestChat || autoDiscoveredModels[0];
@@ -733,10 +733,6 @@ export function AiDesignWorkspace() {
           setCustomAiModels(scrubbed);
           window.localStorage.setItem('toantrung_custom_ai_models_v1', JSON.stringify(scrubbed));
         }
-      }
-      const savedStrat = window.localStorage.getItem('toantrung_taoanh_strategy_v1');
-      if (savedStrat === 'smart_hybrid' || savedStrat === 'cloud_direct') {
-        setTaoAnhExecStrategy(savedStrat);
       }
 
       // Auto-prefill Marketing Brief from Reports / Tracking / SEO AI URL query parameters
@@ -786,7 +782,7 @@ export function AiDesignWorkspace() {
       } else {
         const savedRoute = loadRouteState<{
           selectedId?: number | null;
-          activeWorkspaceArea?: 'quick_led' | 'banner_prompt' | 'banner_product' | 'specs' | 'perspective' | 'assistant';
+          activeWorkspaceArea?: 'quick_led' | 'perspective' | 'specs' | 'banner_prompt' | 'banner_product' | 'assistant';
           photoVaultTab?: 'site_photos' | 'company_products';
           searchProject?: string;
           projectListScrollTop?: number;
@@ -794,23 +790,11 @@ export function AiDesignWorkspace() {
         if (savedRoute) {
           if (savedRoute.activeWorkspaceArea) {
             const rawArea = savedRoute.activeWorkspaceArea;
-            const normalizedArea: 'quick_led' | 'banner_prompt' | 'banner_product' | 'specs' =
-              rawArea === 'quick_led' || rawArea === 'banner_product' || rawArea === 'specs'
-                ? rawArea
-                : 'banner_prompt';
+            const normalizedArea: 'quick_led' | 'perspective' | 'specs' =
+              rawArea === 'quick_led' || rawArea === 'specs' ? rawArea : 'perspective';
             setActiveWorkspaceArea(normalizedArea);
-            if (normalizedArea === 'banner_prompt') {
-              setActiveBannerMode('prompt_only');
-              setActiveTaskCode('banner_generate');
-            } else if (normalizedArea === 'banner_product') {
-              setActiveBannerMode('with_product');
-              setActiveTaskCode('banner_generate');
-              setPhotoVaultTab('company_products');
-            } else if (normalizedArea === 'quick_led') {
-              setActiveBannerMode(null);
-            }
           }
-          if (savedRoute.photoVaultTab && savedRoute.activeWorkspaceArea !== 'banner_product') {
+          if (savedRoute.photoVaultTab) {
             setPhotoVaultTab(savedRoute.photoVaultTab);
           }
           if (typeof savedRoute.searchProject === 'string') {
@@ -1105,11 +1089,11 @@ export function AiDesignWorkspace() {
       setViewMode('original');
     }
     setSelectedAssetIds([]);
-    setAttachedProductPhotoIds(
-      (project.photos || [])
-        .filter((p) => p.photoRole === 'product_reference')
-        .map((p) => p.id)
-    );
+    const initialAttachedProductIds = (project.photos || [])
+      .filter((p) => p.photoRole === 'product_reference')
+      .map((p) => p.id);
+    setAttachedProductPhotoIds(initialAttachedProductIds);
+    setActiveBannerMode(initialAttachedProductIds.length > 0 ? 'with_product' : 'prompt_only');
     setShowHandles(false);
     setTouchPoints([]);
     setParamValidationError(null);
@@ -1494,10 +1478,8 @@ export function AiDesignWorkspace() {
     () =>
       currentSitePhotos.find((p) => p.selected) ||
       currentSitePhotos[0] ||
-      currentProject?.photos.find((p) => p.selected) ||
-      currentProject?.photos[0] ||
       null,
-    [currentSitePhotos, currentProject]
+    [currentSitePhotos]
   );
 
   const activeProductPhotos = useMemo(() => {
@@ -1509,7 +1491,7 @@ export function AiDesignWorkspace() {
       }
     }
     for (const p of currentProject?.photos || []) {
-      if (idSet.has(p.id) || (combined.size === 0 && p.photoRole === 'product_reference')) {
+      if (idSet.has(p.id)) {
         combined.set(p.id, p);
       }
     }
@@ -1704,8 +1686,8 @@ export function AiDesignWorkspace() {
   const handleMouseDownHandle = (corner: keyof QuadCoordinatesDto) => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (viewMode === 'result' || viewMode === 'original') {
-      setViewMode('live_3d');
+    if (viewMode === 'result') {
+      setViewMode('original');
     }
     setDraggingHandle(corner);
   };
@@ -1902,10 +1884,7 @@ export function AiDesignWorkspace() {
 
       const cleanCaption =
         promptText
-          .replace(
-            /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\s*:?\s*/i,
-            ''
-          )
+          .replace(STUDIO_ANY_CMD_REGEX, '')
           .trim() || currentProject?.projectName || 'THIẾT KẾ PHỐI CẢNH & ẤN PHẨM AI';
 
       // Load attached Company Product Reference photo if any
@@ -2620,217 +2599,6 @@ export function AiDesignWorkspace() {
     }
   };
 
-  // Export 2D CAD Cabinet Matrix & BOM Blueprint Sheet as an official AI Version
-  const handleExportCadBlueprintVersion = async () => {
-    if (!currentProject || exportingBlueprint) return;
-    setExportingBlueprint(true);
-    setError(null);
-    try {
-      const canvas = document.createElement('canvas');
-      const W = 1280;
-      const H = 720;
-      canvas.width = W;
-      canvas.height = H;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Không thể khởi tạo Canvas bản vẽ kỹ thuật.');
-
-      // Blueprint background
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(0, 0, W, H);
-
-      // Subtle engineering grid
-      ctx.strokeStyle = 'rgba(56, 189, 248, 0.08)';
-      ctx.lineWidth = 1;
-      for (let x = 0; x < W; x += 32) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, H);
-        ctx.stroke();
-      }
-      for (let y = 0; y < H; y += 32) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(W, y);
-        ctx.stroke();
-      }
-
-      // Header Banner
-      ctx.fillStyle = '#1e3a8a';
-      ctx.fillRect(28, 24, W - 56, 68);
-      ctx.strokeStyle = '#38bdf8';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(28, 24, W - 56, 68);
-
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 20px sans-serif';
-      ctx.fillText(
-        `BẢN VẼ SƠ ĐỒ GHÉP CABINET & BÓC TÁCH VẬT TƯ LED TOÀN TRUNG — ${currentProject.projectName.toUpperCase()}`,
-        48,
-        54
-      );
-      ctx.fillStyle = '#bae6fd';
-      ctx.font = 'bold 13px monospace';
-      ctx.fillText(
-        `MÃ DỰ ÁN: DA-${String(currentProject.id).padStart(4, '0')}  |  DÒNG LED: ${paramForm.pixelPitch}  |  KÍCH THƯỚC: ${Math.round(paramForm.screenWidthM * 1000)} × ${Math.round(paramForm.screenHeightM * 1000)} mm (${computedLiveSpecs.areaM2} m²)`,
-        48,
-        76
-      );
-
-      // Left Zone: 2D Cabinet Matrix Diagram
-      const diagX = 48;
-      const diagY = 126;
-      const diagW = 700;
-      const diagH = 440;
-
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.9)';
-      ctx.fillRect(diagX, diagY, diagW, diagH);
-      ctx.strokeStyle = '#0284c7';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(diagX, diagY, diagW, diagH);
-
-      const cols = Math.min(14, Math.max(1, computedLiveSpecs.cabinetCols));
-      const rows = Math.min(10, Math.max(1, computedLiveSpecs.cabinetRows));
-      const pad = 42;
-      const gridW = diagW - pad * 2;
-      const gridH = diagH - pad * 2;
-      const cellW = gridW / cols;
-      const cellH = gridH / rows;
-
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const cx = diagX + pad + c * cellW;
-          const cy = diagY + pad + r * cellH;
-          ctx.fillStyle = (r + c) % 2 === 0 ? 'rgba(30, 58, 138, 0.65)' : 'rgba(15, 23, 42, 0.85)';
-          ctx.fillRect(cx, cy, cellW, cellH);
-          ctx.strokeStyle = '#38bdf8';
-          ctx.lineWidth = 1.2;
-          ctx.strokeRect(cx, cy, cellW, cellH);
-
-          ctx.fillStyle = '#e0f2fe';
-          ctx.font = 'bold 10px monospace';
-          ctx.textAlign = 'center';
-          ctx.fillText(`C${r + 1}-${c + 1}`, cx + cellW / 2, cy + cellH / 2 + 3);
-        }
-      }
-
-      // Dimension callouts on diagram
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 14px monospace';
-      ctx.fillText(
-        `← NGANG: ${Math.round(paramForm.screenWidthM * 1000)} mm (${computedLiveSpecs.cabinetCols} Cột × 640mm) →`,
-        diagX + diagW / 2,
-        diagY + 24
-      );
-      ctx.fillText(
-        `CAO: ${Math.round(paramForm.screenHeightM * 1000)} mm (${computedLiveSpecs.cabinetRows} Hàng × 480mm) · Tổng ${computedLiveSpecs.cabinetCount} Cabinet`,
-        diagX + diagW / 2,
-        diagY + diagH - 14
-      );
-
-      // Right Zone: Engineering BOM Table
-      const bomX = 772;
-      const bomY = 126;
-      const bomW = W - bomX - 28;
-      const bomH = 440;
-
-      ctx.fillStyle = '#1e293b';
-      ctx.fillRect(bomX, bomY, bomW, bomH);
-      ctx.strokeStyle = '#475569';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(bomX, bomY, bomW, bomH);
-
-      ctx.textAlign = 'left';
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 15px sans-serif';
-      ctx.fillText('BẢNG BÓC TÁCH KHỐI LƯỢNG VẬT TƯ (BOM)', bomX + 18, bomY + 30);
-
-      const spareModules = Math.max(2, Math.ceil(computedLiveSpecs.moduleCount * 0.02));
-      const powerSupplies = Math.max(2, computedLiveSpecs.cabinetCount * 2);
-      const bomRows = [
-        ['1. Tấm Module LED (320×160mm)', `${computedLiveSpecs.moduleCount} tấm (+${spareModules} dự phòng)`],
-        ['2. Khung Cabinet nhôm đúc (640×480)', `${computedLiveSpecs.cabinetCount} bộ (${computedLiveSpecs.cabinetCols}×${computedLiveSpecs.cabinetRows})`],
-        ['3. Card thu tín hiệu Novastar MRV328', `${computedLiveSpecs.cabinetCount} cái (1 card/cabin)`],
-        ['4. Nguồn chuyên dụng Meanwell 5V-40A', `${powerSupplies} bộ`],
-        ['5. Bộ xử lý hình ảnh trung tâm', computedLiveSpecs.resW * computedLiveSpecs.resH > 2300000 ? '01 bộ Novastar VX1000 (4K)' : '01 bộ Novastar VX600'],
-        ['6. Độ phân giải điểm ảnh thực tế', `${computedLiveSpecs.resW} × ${computedLiveSpecs.resH} px`],
-        ['7. Công suất điện (TB / Cực đại)', `${computedLiveSpecs.avgKw} kW / ${computedLiveSpecs.maxKw} kW (3 Pha)`],
-        ['8. Khung sắt mạ kẽm & Viền Alu', `${computedLiveSpecs.areaM2} m² hoàn thiện`],
-      ];
-
-      bomRows.forEach(([label, val], idx) => {
-        const ry = bomY + 64 + idx * 45;
-        ctx.fillStyle = idx % 2 === 0 ? 'rgba(15, 23, 42, 0.55)' : 'rgba(30, 41, 59, 0.55)';
-        ctx.fillRect(bomX + 12, ry - 18, bomW - 24, 38);
-        ctx.fillStyle = '#cbd5e1';
-        ctx.font = '12px sans-serif';
-        ctx.fillText(label, bomX + 20, ry + 4);
-        ctx.fillStyle = '#f8fafc';
-        ctx.font = 'bold 12px monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(val, bomX + bomW - 20, ry + 4);
-        ctx.textAlign = 'left';
-      });
-
-      // Footer Sign-off Block
-      ctx.fillStyle = '#1e293b';
-      ctx.fillRect(28, 588, W - 56, 104);
-      ctx.strokeStyle = '#334155';
-      ctx.strokeRect(28, 588, W - 56, 104);
-      ctx.fillStyle = '#f8fafc';
-      ctx.font = 'bold 14px sans-serif';
-      ctx.fillText(
-        `VỊ TRÍ LẮP ĐẶT: ${paramForm.installationInfo || 'Theo khảo sát thực tế công trình'}  |  KHÁCH HÀNG: ${paramForm.contactName || currentProject.leadProjectLabel || 'Dự án Toàn Trung'}`,
-        48,
-        618
-      );
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '13px sans-serif';
-      ctx.fillText(
-        '• Tiêu chuẩn thi công: Khung thép hộp mạ kẽm 40×40mm, ốp viền nhôm anot đen chống lóa, hệ thống tiếp địa an toàn < 4Ω, bảo hành chính hãng Toàn Trung.',
-        48,
-        646
-      );
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 13px sans-serif';
-      ctx.fillText(
-        `• Xuất tự động từ Toàn Trung AI Studio · Ngày lập: ${new Date().toLocaleDateString('vi-VN')}`,
-        48,
-        672
-      );
-
-      const b64 = canvas.toDataURL('image/png').split(',')[1] || '';
-      const saved = await apiRequest<{ versionId: number; versionNumber: number }>(
-        `/api/v1/design/${currentProject.id}`,
-        {
-          method: 'POST',
-          csrfToken: user?.csrfToken,
-          body: {
-            action: 'save_composited_version',
-            fileName: `ban-ve-so-do-cabin-bom-req-${currentProject.id}.png`,
-            mimeType: 'image/png',
-            base64Data: b64,
-            note: `@TaoAnh: Bản vẽ Sơ đồ ghép ${computedLiveSpecs.cabinetCols}×${computedLiveSpecs.cabinetRows} Cabinet (${computedLiveSpecs.cabinetCount} Cabin) & Bóc tách vật tư BOM LED ${paramForm.pixelPitch}`,
-            placementQuad: quad,
-          },
-        }
-      );
-
-      setSuccessToast(
-        `Đã xuất Bản vẽ Sơ đồ Cabin & BOM thành Phiên bản AI v${saved.versionNumber}! Bạn có thể tải về hoặc Phê duyệt bàn giao Sales.`
-      );
-      await loadData(currentProject.id);
-      if (saved.versionId) {
-        setSelectedVersionId(saved.versionId);
-        setViewMode('result');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Lỗi xuất bản vẽ kỹ thuật BOM.');
-    } finally {
-      setExportingBlueprint(false);
-    }
-  };
-
   // Auto-scroll Chat Thread whenever messages or submitting state changes
   useEffect(() => {
     if (!chatThreadRef.current) return;
@@ -2907,23 +2675,18 @@ export function AiDesignWorkspace() {
     }
   };
 
-  // Chat Submit: Conversational AI — automatically understands whether the user is chatting/consulting OR requesting a perspective/product composite/banner!
+  // Chat Submit: Unified Studio command routing (@banner / @baneer / @taobanner, @taoanh, or free chat)
   const executeChatSubmit = async (rawText: string, forceImageMode?: boolean) => {
     const trimmed = rawText.trim();
     if (!trimmed || submitting || submitLockRef.current || piiAlert) return;
 
-    const hasTaoAnhTag =
-      /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\s*:?\s*/i.test(
-        trimmed
-      );
-    const isExplicitPosterTag =
-      /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner)\s*:?\s*/i.test(
-        trimmed
-      );
+    const isExplicitPosterTag = STUDIO_BANNER_CMD_REGEX.test(trimmed);
+    const hasTaoAnhTag = STUDIO_ANY_CMD_REGEX.test(trimmed);
+    const isExplicitSceneTag = hasTaoAnhTag && !isExplicitPosterTag;
 
     // Natural conversational intent detection: user can chat freely OR ask to generate any image without needing a site photo or LED specs!
     const hasSurveyPhotoCurrently = Boolean(
-      (currentProject?.photos && currentProject.photos.length > 0) ||
+      (currentSitePhotos && currentSitePhotos.length > 0) ||
         currentProject?.sitePhotoDownloadUrl ||
         selectedPhoto
     );
@@ -2950,7 +2713,7 @@ export function AiDesignWorkspace() {
           trimmed
         ));
 
-    // Avoid triggering direct image generation if the user explicitly asks only for text consultation ("tư vấn", "phân tích", "báo giá", "hỏi") without @TaoAnh
+    // Avoid triggering direct image generation if the user explicitly asks only for text consultation ("tư vấn", "phân tích", "báo giá", "hỏi") without @banner/@taoanh
     const isPureQuestionOrConsult =
       !hasTaoAnhTag &&
       !forceImageMode &&
@@ -2959,52 +2722,40 @@ export function AiDesignWorkspace() {
     const shouldRunImageMode =
       Boolean(forceImageMode || hasTaoAnhTag) ||
       (isNaturalCompositeOrEditIntent && !isPureQuestionOrConsult);
-    // If there is no site survey photo (or user is asking for a free-form image/banner rather than compositing onto a site photo), route as free-form image generation (@TaoAnhPoster / banner_generate) so it never demands a site photo or 4 corners!
+
     const isPosterTag =
       isExplicitPosterTag ||
-      !hasSurveyPhotoCurrently ||
-      (isNaturalFreeImageIntent && !isExplicitSiteCompositeIntent);
+      (!isExplicitSceneTag &&
+        (!hasSurveyPhotoCurrently || (isNaturalFreeImageIntent && !isExplicitSiteCompositeIntent)));
 
     if (shouldRunImageMode && currentProject?.activeJob?.status === 'running') {
       setError('Dự án đang có tiến trình kết xuất ảnh AI trên máy chủ. Vui lòng đợi hoàn tất trước khi gửi lệnh tạo ảnh mới.');
       return;
     }
 
-    const isTabBannerProduct = activeWorkspaceArea === 'banner_product';
-    const isTabBannerPrompt = activeWorkspaceArea === 'banner_prompt';
     const effectiveMode = shouldRunImageMode ? 'image_generator' : 'consultant_free';
-    const effectiveBannerMode: 'prompt_only' | 'with_product' | undefined =
-      effectiveMode === 'image_generator' && (isPosterTag || isTabBannerProduct || isTabBannerPrompt)
-        ? isTabBannerProduct
-          ? 'with_product'
-          : isTabBannerPrompt
-            ? 'prompt_only'
-            : activeBannerMode || (activeProductPhotos.length > 0 ? 'with_product' : 'prompt_only')
-        : undefined;
+    const isBannerRequest = effectiveMode === 'image_generator' && isPosterTag && !isExplicitSceneTag;
+    const effectiveBannerMode: 'prompt_only' | 'with_product' | undefined = isBannerRequest
+      ? activeProductPhotos.length > 0 && activeBannerMode !== 'prompt_only'
+        ? 'with_product'
+        : 'prompt_only'
+      : undefined;
 
-    if (
-      effectiveMode === 'image_generator' &&
-      effectiveBannerMode === 'with_product' &&
-      activeProductPhotos.length === 0
-    ) {
-      setPhotoVaultTab('company_products');
-      setError(
-        'Tab "Banner ghép Sản phẩm" yêu cầu chọn ít nhất 1 ảnh ở Kho SP Cty (bên trái) trước khi gửi. Nếu muốn tạo banner thuần mô tả chữ, hãy chuyển sang tab "Tạo Banner / Chat AI".'
-      );
-      return;
-    }
-
-    const forceBannerFromTab = effectiveBannerMode === 'prompt_only' || effectiveBannerMode === 'with_product';
     const effectiveTaskCode: DesignTaskCode =
       effectiveMode === 'consultant_free'
         ? 'brief_analyze'
-        : isPosterTag || forceBannerFromTab
+        : isBannerRequest
           ? 'banner_generate'
-          : activeTaskCode;
-    const isBannerRequest = effectiveBannerMode !== undefined || isPosterTag;
+          : isExplicitSceneTag
+            ? 'perspective_compose'
+            : viewMode === 'result' && currentVersion
+              ? 'design_edit'
+              : activeTaskCode === 'design_edit'
+                ? 'design_edit'
+                : 'perspective_compose';
     const finalPrompt =
       shouldRunImageMode && !hasTaoAnhTag
-        ? `${isBannerRequest ? '@TaoAnhPoster' : '@TaoAnh'}: ${trimmed}`
+        ? `${isBannerRequest ? '@banner' : '@taoanh'}: ${trimmed}`
         : trimmed;
 
     submitLockRef.current = true;
@@ -3119,7 +2870,7 @@ export function AiDesignWorkspace() {
         clientRenderedBase64: preRenderedCompositeB64,
         parentVersionId: parentVersionIdForEdit,
         sourceVersionId: parentVersionIdForEdit,
-        applyLayoutOverlay,
+        applyLayoutOverlay: false,
         designBrief: activeBrief,
         compositingMode:
           paramForm.editActionMode === 'inpaint_keep_bg' ? 'STRICT' : 'REALISTIC',
@@ -3288,8 +3039,11 @@ export function AiDesignWorkspace() {
   };
 
   // Approve & Save Finished Version
-  const handleSaveFinished = async () => {
-    if (!currentProject || !currentVersion || savingFinal) return;
+  const handleSaveFinished = async (
+    overrideVersion?: DesignRequestItemDto['assetVersions'][number]
+  ) => {
+    const targetVer = overrideVersion || currentVersion;
+    if (!currentProject || !targetVer || savingFinal) return;
     setSavingFinal(true);
     setError(null);
     try {
@@ -3299,13 +3053,13 @@ export function AiDesignWorkspace() {
         body: {
           action: 'save_finished',
           expectedVersion: currentProject.version,
-          versionId: currentVersion.id,
-          note: `Phê duyệt bản thiết kế v${currentVersion.versionNumber} bàn giao chính thức`,
+          versionId: targetVer.id,
+          note: `Phê duyệt bản thiết kế v${targetVer.versionNumber} bàn giao chính thức`,
         },
       });
 
       setSuccessToast(
-        `Đã chốt duyệt phiên bản v${currentVersion.versionNumber} và đồng bộ sang hồ sơ Lead / NVKD.`
+        `Đã chốt duyệt phiên bản v${targetVer.versionNumber} và đồng bộ sang hồ sơ Lead / NVKD.`
       );
       await loadData(currentProject.id, true);
     } catch (err) {
@@ -3373,7 +3127,7 @@ export function AiDesignWorkspace() {
           reader.onerror = () => reject(new Error('Không thể đọc tệp ảnh sản phẩm.'));
           reader.readAsDataURL(file);
         });
-        const res = await apiRequest<{ photoId?: string }>(`/api/v1/design/${currentProject.id}`, {
+        const res = await apiRequest<{ id?: string; photoId?: string }>(`/api/v1/design/${currentProject.id}`, {
           method: 'POST',
           csrfToken: user?.csrfToken,
           body: {
@@ -3385,12 +3139,14 @@ export function AiDesignWorkspace() {
             photoRole: 'product_reference',
           },
         });
-        if (res?.photoId) {
-          uploadedIds.push(res.photoId);
+        const addedId = res?.photoId || res?.id;
+        if (addedId) {
+          uploadedIds.push(addedId);
         }
       }
       if (uploadedIds.length > 0) {
         setAttachedProductPhotoIds((prev) => Array.from(new Set([...prev, ...uploadedIds])));
+        setActiveBannerMode('with_product');
       }
       setSuccessToast(
         `Đã thêm ${files.length} ảnh Sản phẩm công ty! Bạn có thể yêu cầu AI ghép sản phẩm này vào ảnh hiện trường hoặc tạo Banner ngay trong ô Chat.`
@@ -3939,311 +3695,6 @@ export function AiDesignWorkspace() {
       window.localStorage.setItem('toantrung_custom_ai_models_v1', JSON.stringify(nextList));
     }
     setSuccessToast('Đã xoá Model AI tùy chỉnh khỏi danh sách.');
-  };
-
-  // Export & Print A4 Technical Proposal Dossier (Hồ sơ Phương án Kỹ thuật & Phối cảnh 3D LED Toàn Trung)
-  const handlePrintTechnicalDossier = () => {
-    if (!currentProject) return;
-    const win = window.open('', '_blank', 'width=1100,height=850');
-    if (!win) {
-      setError('Trình duyệt đang chặn cửa sổ bật lên (Pop-up). Vui lòng cho phép mở cửa sổ để in Hồ sơ PDF.');
-      return;
-    }
-    const spareModules = Math.max(4, Math.ceil(computedLiveSpecs.moduleCount * 0.03));
-    const powerSupplies = Math.max(2, computedLiveSpecs.cabinetCount * 2);
-    const origin = window.location.origin;
-    const beforeSrc = selectedPhoto
-      ? sitePhotoUrl.startsWith('http')
-        ? sitePhotoUrl
-        : `${origin}${sitePhotoUrl}`
-      : '';
-    const afterSrc = currentVersion
-      ? versionImageUrl.startsWith('http')
-        ? versionImageUrl
-        : `${origin}${versionImageUrl}`
-      : beforeSrc;
-
-    const html = `<!DOCTYPE html>
-<html lang="vi">
-<head>
-  <meta charset="utf-8" />
-  <title>Ho-So-Phuong-An-LED-${currentProject.projectName}</title>
-  <style>
-    * { box-sizing: border-box; font-family: 'Segoe UI', Roboto, Arial, sans-serif; }
-    body { margin: 0; padding: 24px; color: #0f172a; background: #fff; }
-    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #1553A2; padding-bottom: 12px; margin-bottom: 16px; }
-    .brand { font-size: 18px; font-weight: 800; color: #1553A2; text-transform: uppercase; }
-    .sub { font-size: 12px; color: #475569; margin-top: 2px; }
-    .badge { background: #1553A2; color: #fff; font-weight: 700; font-size: 12px; padding: 6px 12px; border-radius: 6px; }
-    .meta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; margin-bottom: 16px; font-size: 12px; }
-    .meta-item strong { display: block; color: #64748b; font-size: 10px; text-transform: uppercase; }
-    .meta-item span { font-weight: 700; color: #0f172a; font-size: 13px; }
-    .photos { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
-    .photo-box { border: 1px solid #cbd5e1; border-radius: 8px; overflow: hidden; background: #0f172a; }
-    .photo-title { background: #1e293b; color: #fff; font-size: 11px; font-weight: 700; padding: 6px 10px; text-transform: uppercase; }
-    .photo-box img { width: 100%; height: 240px; object-fit: cover; display: block; }
-    table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 16px; }
-    th, td { border: 1px solid #cbd5e1; padding: 8px 10px; text-align: left; }
-    th { background: #eff6ff; color: #1e3a8a; font-weight: 800; text-transform: uppercase; font-size: 11px; }
-    .sign-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-top: 24px; text-align: center; font-size: 12px; }
-    @media print { body { padding: 10px; } .no-print { display: none; } }
-  </style>
-</head>
-<body>
-  <div class="no-print" style="margin-bottom:14px;text-align:right;">
-    <button onclick="window.print()" style="background:#1553A2;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-weight:700;cursor:pointer;">🖨️ In Hồ Sơ / Lưu thành PDF (A4)</button>
-  </div>
-  <div class="header">
-    <div>
-      <div class="brand">CÔNG TY CỔ PHẦN ĐIỆN TỬ VIỄN THÔNG TOÀN TRUNG</div>
-      <div class="sub">Hồ sơ Phương án Phối cảnh 3D &amp; Bóc tách Khối lượng Vật tư Màn hình LED (BOM)</div>
-    </div>
-    <div class="badge">MÃ HỒ SƠ: DA-${String(currentProject.id).padStart(4, '0')}${currentProject.leadCode ? ` · ${currentProject.leadCode}` : ''}</div>
-  </div>
-  <div class="meta-grid">
-    <div class="meta-item"><strong>Tên Dự án / Công trình</strong><span>${currentProject.projectName}</span></div>
-    <div class="meta-item"><strong>Khách hàng / Liên hệ</strong><span>${paramForm.contactName || currentProject.leadProjectLabel || 'Khách hàng dự án'}</span></div>
-    <div class="meta-item"><strong>Chủng loại &amp; Kích thước LED</strong><span>${paramForm.pixelPitch} · ${Math.round(computedLiveSpecs.w * 1000)}×${Math.round(computedLiveSpecs.h * 1000)} mm (${computedLiveSpecs.areaM2} m²)</span></div>
-    <div class="meta-item"><strong>Vị trí lắp đặt</strong><span>${paramForm.installationInfo || 'Theo khảo sát thực tế'}</span></div>
-  </div>
-  <div class="photos">
-    <div class="photo-box">
-      <div class="photo-title">1. Ảnh hiện trạng khảo sát trước khi lắp đặt</div>
-      ${beforeSrc ? `<img src="${beforeSrc}" alt="Hiện trạng" />` : '<div style="height:240px;color:#fff;display:flex;align-items:center;justify-content:center;">Chưa có ảnh hiện trạng</div>'}
-    </div>
-    <div class="photo-box">
-      <div class="photo-title">2. Phối cảnh 3D LED sau khi lắp đặt (Phiên bản v${currentVersion?.versionNumber || 1})</div>
-      ${afterSrc ? `<img src="${afterSrc}" alt="Phối cảnh AI" />` : '<div style="height:240px;color:#fff;display:flex;align-items:center;justify-content:center;">Chưa có ảnh phối cảnh</div>'}
-    </div>
-  </div>
-  <table>
-    <thead>
-      <tr>
-        <th style="width:45px;">STT</th>
-        <th>Hạng mục Vật tư &amp; Thông số Kỹ thuật</th>
-        <th>Quy cách / Đơn vị</th>
-        <th>Khối lượng đề xuất</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr><td>01</td><td>Tấm Module LED ${paramForm.pixelPitch} chính hãng Toàn Trung</td><td>320 × 160 mm</td><td><strong>${computedLiveSpecs.moduleCount} tấm</strong> (+ ${spareModules} tấm dự phòng bảo hành)</td></tr>
-      <tr><td>02</td><td>Khung Cabinet nhôm đúc định hình CNC</td><td>640 × 480 mm</td><td><strong>${computedLiveSpecs.cabinetCount} Cabin</strong> (${computedLiveSpecs.cabinetCols} cột ngang × ${computedLiveSpecs.cabinetRows} hàng cao)</td></tr>
-      <tr><td>03</td><td>Độ phân giải hiển thị thực tế</td><td>Pixel (Điểm ảnh)</td><td><strong>${computedLiveSpecs.resW} × ${computedLiveSpecs.resH} px</strong> (Tỷ lệ ${paramForm.aspectRatio})</td></tr>
-      <tr><td>04</td><td>Card thu tín hiệu &amp; Bộ nguồn công nghiệp</td><td>Novastar MRV328 + 5V-40A</td><td><strong>${computedLiveSpecs.cabinetCount} Card thu · ${powerSupplies} Nguồn Meanwell/CL</strong></td></tr>
-      <tr><td>05</td><td>Bộ xử lý hình ảnh trung tâm (Video Processor)</td><td>Chuẩn HDMI / LAN</td><td><strong>01 Bộ ${computedLiveSpecs.resW * computedLiveSpecs.resH > 2300000 ? 'Novastar VX1000 (4K)' : 'Novastar VX600'}</strong></td></tr>
-      <tr><td>06</td><td>Công suất tiêu thụ điện (Trung bình / Cực đại)</td><td>Nguồn 3 Pha 380V</td><td><strong>${computedLiveSpecs.avgKw} kW / ${computedLiveSpecs.maxKw} kW</strong> (Độ sáng ~${ledBrightnessNits} nits)</td></tr>
-      <tr><td>07</td><td>Khung thép mạ kẽm 40×40mm &amp; Ốp viền Alu đen</td><td>Hoàn thiện trọn gói</td><td><strong>${computedLiveSpecs.areaM2} m²</strong> (Tiếp địa an toàn &lt; 4Ω)</td></tr>
-    </tbody>
-  </table>
-  <div class="sign-grid">
-    <div><strong>ĐẠI DIỆN KHÁCH HÀNG</strong><br/><span style="color:#64748b;font-size:11px;">(Ký duyệt phương án phối cảnh)</span><br/><br/><br/>........................................</div>
-    <div><strong>PHÒNG KỸ THUẬT &amp; THIẾT KẾ 3D</strong><br/><span style="color:#64748b;font-size:11px;">(${currentProject.assignedDesignerName || 'Designer Toàn Trung'})</span><br/><br/><br/>........................................</div>
-    <div><strong>PHÒNG KINH DOANH TOÀN TRUNG</strong><br/><span style="color:#64748b;font-size:11px;">(Ngày lập: ${new Date().toLocaleDateString('vi-VN')})</span><br/><br/><br/>........................................</div>
-  </div>
-</body>
-</html>`;
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
-  };
-
-  // Render & Save Real-Photo 4-Corner Perspective Composite as a New Version vN
-  const handleSaveLiveCompositeToVersion = async () => {
-    if (!currentProject || savingComposite) return;
-    setSavingComposite(true);
-    setError(null);
-    try {
-      const canvas = document.createElement('canvas');
-      const W = 1280;
-      const H = 720;
-      canvas.width = W;
-      canvas.height = H;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Trình duyệt không hỗ trợ HTML5 Canvas.');
-
-      // 1. Load & draw base site photo
-      const baseImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-        const img = new window.Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = () => resolve(img);
-        img.onerror = () => reject(new Error('Không thể tải ảnh hiện trạng gốc để ghép.'));
-        img.src = sitePhotoUrl;
-      });
-      ctx.drawImage(baseImg, 0, 0, W, H);
-
-      // 2. Compute 4 corners in pixel coordinates
-      const tl = { x: (quad.topLeft.x / 100) * W, y: (quad.topLeft.y / 100) * H };
-      const tr = { x: (quad.topRight.x / 100) * W, y: (quad.topRight.y / 100) * H };
-      const br = { x: (quad.bottomRight.x / 100) * W, y: (quad.bottomRight.y / 100) * H };
-      const bl = { x: (quad.bottomLeft.x / 100) * W, y: (quad.bottomLeft.y / 100) * H };
-
-      // Ambient wall backlight glow around the LED screen
-      ctx.save();
-      ctx.shadowColor =
-        live3dTheme === 'gala_stage'
-          ? 'rgba(245, 158, 11, 0.55)'
-          : live3dTheme === 'factory_andon'
-            ? 'rgba(16, 185, 129, 0.45)'
-            : 'rgba(37, 99, 235, 0.55)';
-      ctx.shadowBlur = 32;
-      ctx.beginPath();
-      ctx.moveTo(tl.x, tl.y);
-      ctx.lineTo(tr.x, tr.y);
-      ctx.lineTo(br.x, br.y);
-      ctx.lineTo(bl.x, bl.y);
-      ctx.closePath();
-      ctx.fillStyle = '#090d16';
-      ctx.fill();
-      ctx.restore();
-
-      // Clip to the 4-corner quadrilateral and render the LED screen graphic
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(tl.x, tl.y);
-      ctx.lineTo(tr.x, tr.y);
-      ctx.lineTo(br.x, br.y);
-      ctx.lineTo(bl.x, bl.y);
-      ctx.closePath();
-      ctx.clip();
-
-      const minX = Math.min(tl.x, bl.x);
-      const maxX = Math.max(tr.x, br.x);
-      const minY = Math.min(tl.y, tr.y);
-      const maxY = Math.max(bl.y, br.y);
-      const boxW = Math.max(40, maxX - minX);
-      const boxH = Math.max(30, maxY - minY);
-
-      if (live3dTheme === 'ai_version' && versionImageUrl) {
-        try {
-          const aiImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const img = new window.Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => resolve(img);
-            img.onerror = () => reject(new Error('Fallback'));
-            img.src = versionImageUrl;
-          });
-          ctx.drawImage(aiImg, minX, minY, boxW, boxH);
-        } catch {
-          const grad = ctx.createLinearGradient(minX, minY, maxX, maxY);
-          grad.addColorStop(0, '#0f172a');
-          grad.addColorStop(1, '#1d4ed8');
-          ctx.fillStyle = grad;
-          ctx.fillRect(minX, minY, boxW, boxH);
-        }
-      } else {
-        const grad = ctx.createLinearGradient(minX, minY, maxX, maxY);
-        if (live3dTheme === 'conference_navy') {
-          grad.addColorStop(0, '#0a192f');
-          grad.addColorStop(0.5, '#1e3a8a');
-          grad.addColorStop(1, '#1d4ed8');
-        } else if (live3dTheme === 'ocean_4k') {
-          grad.addColorStop(0, '#083344');
-          grad.addColorStop(0.5, '#0284c7');
-          grad.addColorStop(1, '#22d3ee');
-        } else if (live3dTheme === 'gala_stage') {
-          grad.addColorStop(0, '#31102f');
-          grad.addColorStop(0.5, '#7c2d12');
-          grad.addColorStop(1, '#f59e0b');
-        } else {
-          grad.addColorStop(0, '#064e3b');
-          grad.addColorStop(0.5, '#0f172a');
-          grad.addColorStop(1, '#047857');
-        }
-        ctx.fillStyle = grad;
-        ctx.fillRect(minX, minY, boxW, boxH);
-
-        // Render crisp presentation typography on the LED wall
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.96)';
-        ctx.font = `bold ${Math.max(14, Math.round(boxH * 0.11))}px sans-serif`;
-        ctx.textAlign = 'center';
-        const titleText =
-          live3dTheme === 'conference_navy'
-            ? 'TOÀN TRUNG LED · HỘI NGHỊ & SỰ KIỆN'
-            : live3dTheme === 'ocean_4k'
-              ? 'TOÀN TRUNG DISPLAY · ULTRA HD 4K'
-              : live3dTheme === 'gala_stage'
-                ? 'GALA STAGE LED · HIGH BRIGHTNESS'
-                : 'BẢNG ĐIỆN TỬ NĂNG SUẤT · ANDON SYSTEM';
-        ctx.fillText(titleText, minX + boxW / 2, minY + boxH * 0.46);
-
-        ctx.fillStyle = 'rgba(191, 219, 254, 0.92)';
-        ctx.font = `600 ${Math.max(11, Math.round(boxH * 0.075))}px monospace`;
-        ctx.fillText(
-          `${paramForm.pixelPitch} · ${paramForm.screenWidthM}m × ${paramForm.screenHeightM}m (${computedLiveSpecs.resW}×${computedLiveSpecs.resH}px)`,
-          minX + boxW / 2,
-          minY + boxH * 0.64
-        );
-      }
-
-      // Subtle LED cabinet grid lines inside the quadrilateral
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-      ctx.lineWidth = 1;
-      for (let i = 1; i < 6; i++) {
-        const t = i / 6;
-        ctx.beginPath();
-        ctx.moveTo(tl.x + (tr.x - tl.x) * t, tl.y + (tr.y - tl.y) * t);
-        ctx.lineTo(bl.x + (br.x - bl.x) * t, bl.y + (br.y - bl.y) * t);
-        ctx.stroke();
-      }
-      for (let j = 1; j < 4; j++) {
-        const t = j / 4;
-        ctx.beginPath();
-        ctx.moveTo(tl.x + (bl.x - tl.x) * t, tl.y + (bl.y - tl.y) * t);
-        ctx.lineTo(tr.x + (br.x - tr.x) * t, tr.y + (br.y - tr.y) * t);
-        ctx.stroke();
-      }
-      ctx.restore();
-
-      // Anodized aluminum LED frame border
-      ctx.save();
-      ctx.beginPath();
-      ctx.moveTo(tl.x, tl.y);
-      ctx.lineTo(tr.x, tr.y);
-      ctx.lineTo(br.x, br.y);
-      ctx.lineTo(bl.x, bl.y);
-      ctx.closePath();
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = '#1e293b';
-      ctx.stroke();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = 'rgba(147, 197, 253, 0.75)';
-      ctx.stroke();
-      ctx.restore();
-
-      const dataUrl = canvas.toDataURL('image/png');
-      const b64 = dataUrl.split(',')[1] || '';
-
-      const saved = await apiRequest<{ versionId: number; versionNumber: number }>(
-        `/api/v1/design/${currentProject.id}`,
-        {
-          method: 'POST',
-          csrfToken: user?.csrfToken,
-          body: {
-            action: 'save_composited_version',
-            fileName: `phoi-canh-3d-thuc-te-req-${currentProject.id}.png`,
-            mimeType: 'image/png',
-            base64Data: b64,
-            note: `Ghép phối cảnh 3D thực tế (${paramForm.pixelPitch} · ${paramForm.screenWidthM}×${paramForm.screenHeightM}m) trên ảnh hiện trạng`,
-            placementQuad: quad,
-          },
-        }
-      );
-
-      setViewMode('result');
-      setSuccessToast(
-        `Đã lưu bản ghép phối cảnh 3D thực tế thành phiên bản v${saved.versionNumber} trong Bản thiết kế!`
-      );
-      await loadData(currentProject.id);
-      if (saved.versionId) {
-        setSelectedVersionId(saved.versionId);
-      }
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Không thể xuất & lưu bản ghép phối cảnh 3D thực tế.'
-      );
-    } finally {
-      setSavingComposite(false);
-    }
   };
 
   // Open Quick Edit Modal for any project
@@ -4930,18 +4381,25 @@ export function AiDesignWorkspace() {
       });
       const ext = (imageFile.type.split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '');
       const fname = imageFile.name && imageFile.name !== 'image.png' ? imageFile.name : `pasted-${Date.now()}.${ext}`;
-      await apiRequest(`/api/v1/design/${targetProjId}`, {
+      const pasteRole: 'site_photo' | 'product_reference' =
+        photoVaultTab === 'company_products' ? 'product_reference' : 'site_photo';
+      const pastedRes = await apiRequest<{ id?: string; photoId?: string }>(`/api/v1/design/${targetProjId}`, {
         method: 'POST',
         csrfToken: user?.csrfToken,
         body: {
           action: 'add_photo',
-          photoName: fname,
+          photoName: pasteRole === 'product_reference' ? `[Sản phẩm] ${fname}` : fname,
           fileName: fname,
           mimeType: imageFile.type || 'image/png',
           base64Data: b64,
-          photoRole: 'site_photo',
+          photoRole: pasteRole,
         },
       });
+      const pastedId = pastedRes?.photoId || pastedRes?.id;
+      if (pasteRole === 'product_reference' && pastedId) {
+        setAttachedProductPhotoIds((prev) => Array.from(new Set([...prev, pastedId])));
+        setActiveBannerMode('with_product');
+      }
       await loadData(targetProjId, true);
       setSuccessToast(`Đã đính kèm ảnh "${fname}" từ clipboard — bạn có thể hỏi ToanTrung phân tích hoặc chỉnh sửa ảnh này.`);
     } catch (err) {
@@ -4978,12 +4436,11 @@ export function AiDesignWorkspace() {
         onChange={handleUploadProductPhotos}
       />
 
-      {/* 1. TOP MODULE HEADER BAR: 3 SEPARATE WORKFLOW TABS + UTILITIES */}
+      {/* 1. TOP MODULE HEADER BAR: UNIFIED STUDIO WORKSPACE + UTILITIES */}
       <div className="flex min-h-13 w-full shrink-0 flex-wrap items-center justify-between gap-2.5 border-b border-[#D8E2F0] bg-white px-4 py-1.5 shadow-2xs">
-        {/* 3 Clear Distinct Primary Tabs */}
         <div
           role="tablist"
-          aria-label="3 chế độ thiết kế AI"
+          aria-label="Khu vực làm việc Studio"
           className="flex flex-wrap items-center gap-1.5 rounded-xl bg-slate-100 p-1"
         >
           <button
@@ -4993,8 +4450,6 @@ export function AiDesignWorkspace() {
             aria-selected={activeWorkspaceArea === 'quick_led'}
             onClick={() => {
               setChatFocusMode(false);
-              setActiveBannerMode(null);
-              setPhotoVaultTab('site_photos');
               setActiveWorkspaceArea('quick_led');
               setMobilePane('canvas');
             }}
@@ -5003,77 +4458,56 @@ export function AiDesignWorkspace() {
                 ? 'bg-gradient-to-r from-[#0BAF7C] to-[#1553A2] text-white shadow-2xs'
                 : 'text-slate-700 hover:bg-white/80'
             }`}
-            title="Chấm 1 điểm trên ảnh công trình để gắn 12 kiểu màn LED & xuất bộ ảnh Marketing"
+            title="Chế độ 3 bước siêu dễ: 12 kiểu màn LED công trình & Xuất bộ Marketing"
           >
-            <span>🎯 1. Gắn LED công trình</span>
+            <Sparkles className="h-3.5 w-3.5" />
+            <span>Gắn LED Nhanh &amp; MKT</span>
           </button>
 
           <button
             type="button"
             role="tab"
             data-testid="workspace-tab-perspective"
-            aria-selected={activeWorkspaceArea === 'banner_prompt'}
+            aria-selected={activeWorkspaceArea === 'perspective' && !chatFocusMode}
             onClick={() => {
+              setActiveWorkspaceArea('perspective');
               setChatFocusMode(false);
-              setShowHandles(false);
-              setActiveBannerMode('prompt_only');
-              setActiveTaskCode('banner_generate');
-              setActiveWorkspaceArea('banner_prompt');
-              if (viewMode === 'bom') {
-                setViewMode(currentVersion ? 'result' : 'original');
-              }
               setMobilePane('canvas');
             }}
             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
-              activeWorkspaceArea === 'banner_prompt'
+              activeWorkspaceArea === 'perspective' && !chatFocusMode
                 ? 'bg-[#1553A2] text-white shadow-2xs'
                 : 'text-slate-700 hover:bg-white/80'
             }`}
-            title="Trò chuyện với ToanTrung AI & sinh Banner/Poster sáng tạo trực tiếp từ câu Prompt (không lẫn ảnh Kho SP)"
+            title="Studio thống nhất: Tạo Banner (@banner / @taobanner), Phối cảnh (@taoanh) và Ghép sản phẩm công ty"
           >
-            <span>🎨 2. Tạo Banner / Chat AI</span>
+            <Monitor className="h-3.5 w-3.5" />
+            <span>Studio Thiết kế &amp; Banner</span>
           </button>
 
           <button
             type="button"
             role="tab"
-            data-testid="workspace-tab-banner-product"
-            aria-selected={activeWorkspaceArea === 'banner_product'}
+            data-testid="workspace-tab-chat-focus"
+            aria-selected={activeWorkspaceArea === 'perspective' && chatFocusMode}
             onClick={() => {
-              setChatFocusMode(false);
-              setShowHandles(false);
-              setActiveBannerMode('with_product');
-              setActiveTaskCode('banner_generate');
-              setPhotoVaultTab('company_products');
-              setActiveWorkspaceArea('banner_product');
-              if (viewMode === 'bom') {
-                setViewMode(currentVersion ? 'result' : 'original');
-              }
-              setMobilePane('canvas');
+              setActiveWorkspaceArea('perspective');
+              setChatFocusMode((prev) => !prev);
+              setMobilePane('assistant');
             }}
             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
-              activeWorkspaceArea === 'banner_product'
-                ? 'bg-[#7846FF] text-white shadow-2xs'
+              activeWorkspaceArea === 'perspective' && chatFocusMode
+                ? 'bg-[#0BAF7C] text-white shadow-2xs'
                 : 'text-slate-700 hover:bg-white/80'
             }`}
-            title="Chọn ảnh Sản phẩm từ Kho SP Cty làm nhân vật chính và tạo nền Banner quảng cáo theo mô tả Prompt"
+            title="Mở rộng ToanTrung AI toàn màn hình hoặc quay lại Studio Thiết kế"
           >
-            <span>🛍️ 3. Banner ghép Sản phẩm</span>
-            {activeProductPhotos.length > 0 && (
-              <span
-                className={`rounded-full px-1.5 py-0.5 text-[10px] leading-none font-black ${
-                  activeWorkspaceArea === 'banner_product'
-                    ? 'bg-white/25 text-white'
-                    : 'bg-purple-100 text-[#6D28D9]'
-                }`}
-              >
-                {activeProductPhotos.length}
-              </span>
-            )}
+            <MessageSquare className="h-3.5 w-3.5" />
+            <span>{chatFocusMode ? '🎨 Về Studio 2 cột' : '✨ ToanTrung AI'}</span>
           </button>
         </div>
 
-        {/* Right Utility Actions: Thông số · Mở rộng · Lead · Upload Final · ZIP · Bàn giao */}
+        {/* Right Utility Actions: Thông số · Model Registry · Mở rộng · Lead · Upload Final · ZIP · Bàn giao */}
         <div className="flex flex-wrap items-center gap-1.5">
           <button
             type="button"
@@ -5082,7 +4516,7 @@ export function AiDesignWorkspace() {
             aria-selected={activeWorkspaceArea === 'specs'}
             onClick={() => {
               setChatFocusMode(false);
-              setActiveWorkspaceArea((prev) => (prev === 'specs' ? 'banner_prompt' : 'specs'));
+              setActiveWorkspaceArea((prev) => (prev === 'specs' ? 'perspective' : 'specs'));
             }}
             className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-bold transition ${
               activeWorkspaceArea === 'specs'
@@ -5093,6 +4527,17 @@ export function AiDesignWorkspace() {
           >
             <Settings2 className="h-3.5 w-3.5" />
             <span>Thông số</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="open-model-registry-btn"
+            onClick={() => setShowModelRegistryModal(true)}
+            className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-purple-200 bg-purple-50/70 px-2.5 py-1.5 text-xs font-bold text-[#6D28D9] hover:bg-purple-100 transition"
+            title="Quản lý & kiểm tra trạng thái Model Registry (Multi-AI)"
+          >
+            <Cpu className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Model Registry</span>
           </button>
 
           <button
@@ -5166,7 +4611,7 @@ export function AiDesignWorkspace() {
           {canUseAiDesign && (
             <button
               type="button"
-              onClick={handleSaveFinished}
+              onClick={() => void handleSaveFinished()}
               disabled={!currentProject || !currentVersion || savingFinal}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#0BAF7C] px-3.5 py-1.5 text-xs font-bold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50"
               title="Phê duyệt phiên bản đang chọn và tự động bàn giao sang hồ sơ Lead cho Sales"
@@ -5811,7 +5256,7 @@ export function AiDesignWorkspace() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setActiveWorkspaceArea('banner_prompt')}
+                    onClick={() => setActiveWorkspaceArea('perspective')}
                     className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                   >
                     Quay lại màn hình ảnh
@@ -5846,9 +5291,7 @@ export function AiDesignWorkspace() {
                     <h2 className="text-[13px] font-extrabold uppercase tracking-wide text-[#17253F] truncate">
                       {viewMode === 'compare'
                         ? 'SO SÁNH TRƯỚC & SAU KHI AI XỬ LÝ'
-                        : activeWorkspaceArea === 'banner_product'
-                          ? 'BANNER GHÉP SẢN PHẨM CÔNG TY'
-                          : 'BANNER & ẢNH SÁNG TẠO AI (THUẦN PROMPT)'}
+                        : 'KHUNG HÌNH THIẾT KẾ PHỐI CẢNH & BANNER AI'}
                     </h2>
                     <div className="inline-flex flex-wrap items-center rounded-xl border border-slate-200 bg-slate-100 p-0.5 text-[11px] font-bold">
                       <button
@@ -5858,7 +5301,7 @@ export function AiDesignWorkspace() {
                           setViewMode('original');
                         }}
                         className={`rounded-lg px-2.5 py-1 transition ${
-                          (viewMode === 'original' || showHandles) && viewMode !== 'bom'
+                          viewMode === 'original' || showHandles
                             ? 'bg-white text-[#1553A2] shadow-2xs'
                             : 'text-slate-600 hover:text-slate-900'
                         }`}
@@ -5916,7 +5359,6 @@ export function AiDesignWorkspace() {
                         <span>{canvasFitMode === 'fill' ? '⛶ Lấp đầy khung' : '⊡ Tỷ lệ gốc'}</span>
                       </button>
                     )}
-                    {viewMode !== 'bom' && (
                       <div className="hidden sm:inline-flex items-center rounded-xl border border-slate-200 bg-slate-50 px-1 py-0.5 text-[11px] font-bold text-slate-700">
                         <button
                           type="button"
@@ -5943,7 +5385,6 @@ export function AiDesignWorkspace() {
                           <Plus className="h-3 w-3" />
                         </button>
                       </div>
-                    )}
 
                     {showHandles && (
                       <>
@@ -5985,7 +5426,7 @@ export function AiDesignWorkspace() {
                       </>
                     )}
 
-                    {(selectedPhoto || currentVersion) && viewMode !== 'bom' && (
+                    {(selectedPhoto || currentVersion) && (
                       !showHandles && viewMode !== 'original' && currentVersion && currentVersion.fileAvailable === false ? (
                         <button
                           type="button"
@@ -6048,200 +5489,39 @@ export function AiDesignWorkspace() {
 
                 {/* MAIN VIEWPORT: SHOWS 2D CABINET BOM, BEFORE/AFTER SPLIT, AI-EDITED IMAGE, SITE PHOTO, OR UPLOAD DROPZONE */}
                 <div className="relative flex-1 min-h-0 overflow-hidden rounded-xl bg-slate-900 flex items-center justify-center [container-type:size]">
-                  {viewMode === 'bom' ? (
-                    /* INTERACTIVE 2D CAD CABINET MATRIX & BILL OF MATERIALS (BOM) VIEW */
-                    <div className="flex h-full w-full flex-col overflow-y-auto bg-slate-950 p-4 text-white">
-                      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/90 px-4 py-2.5">
-                        <div>
-                          <div className="text-xs font-extrabold uppercase tracking-wider text-amber-400">
-                            BẢN VẼ KỸ THUẬT SƠ ĐỒ GHÉP CABIN &amp; BÓC TÁCH VẬT TƯ LED TOÀN TRUNG
-                          </div>
-                          <div className="mt-0.5 text-xs text-slate-300">
-                            Dự án: <strong className="text-white">{currentProject?.projectName}</strong> · Chủng loại:{' '}
-                            <strong className="text-cyan-300">{paramForm.pixelPitch}</strong> · Kích thước:{' '}
-                            <strong className="text-emerald-300">
-                              {Math.round(computedLiveSpecs.w * 1000)} × {Math.round(computedLiveSpecs.h * 1000)} mm (
-                              {computedLiveSpecs.areaM2} m²)
-                            </strong>
-                          </div>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            disabled={exportingBlueprint || !currentProject}
-                            onClick={handleExportCadBlueprintVersion}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-[#0BAF7C] px-3.5 py-2 text-xs font-extrabold text-white shadow-md hover:bg-emerald-700 disabled:opacity-50 transition"
-                            title="Kết xuất sơ đồ Cabin 2D & Bảng vật tư BOM thành 1 Phiên bản Ảnh kỹ thuật để đính kèm báo giá và bàn giao Sales"
-                          >
-                            <FileSpreadsheet className="h-4 w-4" />
-                            <span>
-                              {exportingBlueprint
-                                ? 'Đang xuất bản vẽ...'
-                                : '📸 Xuất Bản Vẽ Sơ Đồ Cabin & BOM thành Phiên bản AI'}
-                            </span>
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-12 gap-4">
-                        {/* Left 7 cols: Interactive 2D Cabinet Grid Matrix */}
-                        <div className="lg:col-span-7 flex flex-col items-center justify-center rounded-xl border border-slate-800 bg-[#0B1528] p-4 relative">
-                          <div className="mb-2 text-center">
-                            <span className="inline-flex items-center gap-1.5 rounded-full border border-cyan-400/40 bg-cyan-950/70 px-3 py-0.5 text-[11px] font-extrabold text-cyan-300">
-                              <span>
-                                NGANG: {Math.round(computedLiveSpecs.w * 1000)} mm ({computedLiveSpecs.cabinetCols} Cột Cabin × 640mm)
-                              </span>
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-3 w-full justify-center">
-                            <div className="hidden sm:flex flex-col items-center justify-center rounded-lg border border-cyan-400/30 bg-cyan-950/50 px-2 py-3 text-[11px] font-extrabold text-cyan-300 [writing-mode:vertical-rl] rotate-180">
-                              CAO: {Math.round(computedLiveSpecs.h * 1000)} mm ({computedLiveSpecs.cabinetRows} Hàng × 480mm)
-                            </div>
-
-                            <div
-                              className="grid gap-1 rounded-lg border-2 border-amber-400/80 bg-slate-950 p-2 shadow-xl max-w-full overflow-auto"
-                              style={{
-                                gridTemplateColumns: `repeat(${Math.min(14, computedLiveSpecs.cabinetCols)}, minmax(34px, 1fr))`,
-                              }}
-                            >
-                              {Array.from({
-                                length:
-                                  Math.min(14, computedLiveSpecs.cabinetCols) *
-                                  Math.min(10, computedLiveSpecs.cabinetRows),
-                              }).map((_, idx) => {
-                                const c = (idx % Math.min(14, computedLiveSpecs.cabinetCols)) + 1;
-                                const r = Math.floor(idx / Math.min(14, computedLiveSpecs.cabinetCols)) + 1;
-                                return (
-                                  <div
-                                    key={`cab-${r}-${c}`}
-                                    className="flex flex-col items-center justify-center rounded border border-cyan-500/40 bg-gradient-to-br from-blue-950/90 to-slate-900 px-1.5 py-2 text-center hover:border-amber-400 transition"
-                                    title={`Cabin C${r}-${c} (640×480mm · 6 Module 320×160mm)`}
-                                  >
-                                    <span className="text-[10px] font-extrabold text-cyan-200">
-                                      C{r}-{c}
-                                    </span>
-                                    <span className="text-[8px] font-semibold text-slate-400">
-                                      640×480
-                                    </span>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          <div className="mt-3 flex flex-wrap items-center justify-center gap-2 text-[11px] text-slate-300">
-                            <span className="rounded-md bg-slate-800 px-2.5 py-1 font-bold text-amber-300">
-                              Tổng: {computedLiveSpecs.cabinetCount} Cabin nhôm đúc (640×480mm)
-                            </span>
-                            <span className="rounded-md bg-slate-800 px-2.5 py-1 font-bold text-emerald-300">
-                              Tổng Module: {computedLiveSpecs.moduleCount} tấm (320×160mm)
-                            </span>
-                            <span className="rounded-md bg-slate-800 px-2.5 py-1 font-bold text-cyan-300">
-                              Độ phân giải: {computedLiveSpecs.resW} × {computedLiveSpecs.resH} px
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Right 5 cols: Bill of Materials (BOM) Table */}
-                        <div className="lg:col-span-5 flex flex-col justify-between rounded-xl border border-slate-800 bg-slate-900/90 p-4">
-                          <div>
-                            <h4 className="text-xs font-extrabold uppercase tracking-wider text-amber-400 mb-2.5">
-                              BẢNG BÓC TÁCH KHỐI LƯỢNG VẬT TƯ CHÍNH (BOM)
-                            </h4>
-                            <div className="divide-y divide-slate-800 text-xs">
-                              {[
-                                {
-                                  label: '1. Chủng loại Module LED',
-                                  val: `${paramForm.pixelPitch} (${paramForm.screenStyle === 'curved' ? 'Màn cong' : paramForm.screenStyle === 'corner_90' ? 'Góc 90°' : 'Màn phẳng'})`,
-                                },
-                                {
-                                  label: '2. Kích thước hiển thị (W×H)',
-                                  val: `${Math.round(computedLiveSpecs.w * 1000)} × ${Math.round(computedLiveSpecs.h * 1000)} mm (${computedLiveSpecs.areaM2} m²)`,
-                                },
-                                {
-                                  label: '3. Số lượng Cabin (640×480mm)',
-                                  val: `${computedLiveSpecs.cabinetCols} cột × ${computedLiveSpecs.cabinetRows} hàng = ${computedLiveSpecs.cabinetCount} Cabin`,
-                                },
-                                {
-                                  label: '4. Số lượng Module (320×160mm)',
-                                  val: `${computedLiveSpecs.moduleCount} Module (+ ${Math.max(4, Math.ceil(computedLiveSpecs.moduleCount * 0.03))} Module dự phòng)`,
-                                },
-                                {
-                                  label: '5. Độ phân giải điểm ảnh',
-                                  val: `${computedLiveSpecs.resW} × ${computedLiveSpecs.resH} px (${((computedLiveSpecs.resW * computedLiveSpecs.resH) / 1_000_000).toFixed(2)} MP)`,
-                                },
-                                {
-                                  label: '6. Bộ nguồn 5V-60A & Card thu',
-                                  val: `${computedLiveSpecs.cabinetCount} Nguồn CL · ${computedLiveSpecs.cabinetCount} Card thu Novastar`,
-                                },
-                                {
-                                  label: '7. Công suất điện (TB / Max)',
-                                  val: `${computedLiveSpecs.avgKw} kW / ${computedLiveSpecs.maxKw} kW (Tủ điện 3 pha)`,
-                                },
-                              ].map((item) => (
-                                <div key={item.label} className="flex items-center justify-between gap-2 py-2">
-                                  <span className="text-slate-400 font-medium">{item.label}</span>
-                                  <span className="font-extrabold text-white text-right">{item.val}</span>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="mt-3 rounded-lg border border-emerald-500/30 bg-emerald-950/40 p-2.5 text-[11px] text-emerald-200">
-                            💡 <strong>Mẹo kỹ thuật:</strong> Bấm nút{' '}
-                            <strong className="text-white">&ldquo;📸 Xuất Bản Vẽ Sơ Đồ Cabin &amp; BOM&rdquo;</strong>{' '}
-                            ở góc trên để lưu sơ đồ này vào danh sách Phiên bản của dự án và tự động gửi kèm sang Hồ sơ Lead cho Sales báo giá!
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ) : !selectedPhoto && !currentVersion ? (
+                  {!selectedPhoto && !currentVersion ? (
                     <div className="flex max-w-lg flex-col items-center justify-center p-8 text-center text-white">
-                      <div className={`mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border ${
-                        activeWorkspaceArea === 'banner_product'
-                          ? 'bg-purple-500/20 border-purple-400/30 text-purple-300'
-                          : 'bg-blue-500/20 border-blue-400/30 text-cyan-300'
-                      }`}>
-                        <Sparkles className="h-7 w-7" />
+                      <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-500/20 border border-blue-400/30 text-cyan-300">
+                        <Upload className="h-7 w-7" />
                       </div>
                       <h3 className="text-base font-extrabold text-white">
-                        {activeWorkspaceArea === 'banner_product'
-                          ? 'Chế độ 3: Tạo Banner ghép Sản phẩm công ty'
-                          : 'Chế độ 2: Tạo Banner / Ảnh sáng tạo thuần Prompt'}
+                        Dự án &ldquo;{currentProject?.projectName}&rdquo; chưa có ảnh khảo sát
                       </h3>
                       <p className="mt-1.5 text-xs text-slate-300 leading-relaxed">
-                        {activeWorkspaceArea === 'banner_product'
-                          ? 'Chọn ảnh sản phẩm trong Kho SP Cty bên trái (hoặc bấm Tải ảnh SP ở khung chat), mô tả bố cục nền & thông điệp rồi nhấn Gửi.'
-                          : 'Gõ trực tiếp yêu cầu thiết kế Banner, Poster hoặc trò chuyện hỏi ToanTrung ở khung bên phải — không cần ảnh công trình hay ảnh sản phẩm.'}
+                        Hãy tải ảnh hiện trường công trình lên để ghép phối cảnh LED, hoặc bấm tạo nhanh Banner / Poster quảng cáo độc lập bằng lệnh <strong className="text-pink-300">@banner</strong> ở khung chat bên phải.
                       </p>
                       <div className="mt-4 flex flex-wrap items-center justify-center gap-2.5">
-                        {activeWorkspaceArea === 'banner_product' ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setPhotoVaultTab('company_products');
-                              uploadProductPhotoInputRef.current?.click();
-                            }}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-[#7846FF] px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-[#6D28D9] transition"
-                          >
-                            <Upload className="h-4 w-4" />
-                            <span>Tải ảnh Sản phẩm lên Kho SP</span>
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              handlePromptChange(
-                                `@TaoAnhPoster: Thiết kế Banner quảng cáo tỷ lệ ${paramForm.aspectRatio} (${computedLiveSpecs.resW}×${computedLiveSpecs.resH}px), phong cách hiện đại, nổi bật thương hiệu Toàn Trung`
-                              );
-                            }}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-pink-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-pink-700 transition"
-                          >
-                            <Sparkles className="h-4 w-4" />
-                            <span>Điền nhanh mẫu Banner</span>
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => uploadPhotoInputRef.current?.click()}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-[#1553A2] px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-[#1E3A8A] transition"
+                        >
+                          <Upload className="h-4 w-4" />
+                          <span>Tải ảnh công trình lên</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setActiveBannerMode(activeProductPhotos.length > 0 ? 'with_product' : 'prompt_only');
+                            handlePromptChange(
+                              `@banner: Thiết kế Banner quảng cáo tỷ lệ ${paramForm.aspectRatio} (${computedLiveSpecs.resW}×${computedLiveSpecs.resH}px), phong cách hiện đại, nổi bật thương hiệu Toàn Trung`
+                            );
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-xl bg-pink-600 px-4 py-2.5 text-xs font-extrabold text-white shadow-md hover:bg-pink-700 transition"
+                        >
+                          <Sparkles className="h-4 w-4" />
+                          <span>Tạo Banner / Poster (@banner)</span>
+                        </button>
                       </div>
                     </div>
                   ) : (
@@ -6574,7 +5854,7 @@ export function AiDesignWorkspace() {
                           >
                             ·{' '}
                             {currentVersion.effectivePrompt
-                              .replace(/^\s*@(?:taoanhposter|taoposter|tao[j]?anh)\s*:?\s*/i, '')
+                              .replace(STUDIO_ANY_CMD_REGEX, '')
                               .trim()}
                           </span>
                         )}
@@ -6645,14 +5925,13 @@ export function AiDesignWorkspace() {
                     {(currentProject?.assetVersions || []).map((ver) => {
                       const isSelectedVer =
                         !showHandles &&
-                        viewMode !== 'bom' &&
                         (selectedVersionId === ver.id || currentVersion?.id === ver.id);
                       const isPosterVer =
-                        /poster|banner/i.test(ver.promptUsed || '') ||
+                        /poster|banner|baneer/i.test(ver.promptUsed || '') ||
                         currentProject?.designType === 'banner';
                       const isCadBlueprintVer = /Sơ đồ ghép Cabin|BOM/i.test(ver.promptUsed || '');
                       const rawCleanPrompt = (ver.promptUsed || '')
-                        .replace(/^\s*@(?:taoanhposter|taoposter|tao[j]?anh)\s*:?\s*/i, '')
+                        .replace(STUDIO_ANY_CMD_REGEX, '')
                         .trim();
                       const shortLabel = isCadBlueprintVer
                         ? 'Sơ đồ BOM'
@@ -6841,11 +6120,11 @@ export function AiDesignWorkspace() {
                     .map((r) => {
                       const isActive = r.id === selectedId;
                       const msgList = r.chatMessages || [];
-                      const lastNonWelcome = [...msgList]
-                        .reverse()
-                        .find((m) => !m.id.startsWith('msg-ai-welcome-'));
+                      const lastNonWelcome = msgList.findLast(
+                        (m) => !m.id.startsWith('msg-ai-welcome-')
+                      );
                       const rawPreview = (lastNonWelcome?.text || msgList[msgList.length - 1]?.text || 'Chưa có tin nhắn')
-                        .replace(/^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|tao[j]?anh)\s*:?\s*/i, '')
+                        .replace(STUDIO_ANY_CMD_REGEX, '')
                         .replace(/[*_`#]/g, '')
                         .trim();
                       const msgCount = msgList.filter((m) => !m.id.startsWith('msg-ai-welcome-')).length;
@@ -7161,12 +6440,9 @@ export function AiDesignWorkspace() {
 
                 {currentProject?.chatMessages.map((msg) => {
                   const isUser = msg.role === 'user';
-                  const isTaoAnhPosterCmd =
-                    /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner)\b/i.test(
-                      msg.text
-                    );
+                  const isTaoAnhPosterCmd = STUDIO_BANNER_CMD_BTN_REGEX.test(msg.text);
                   const isTaoAnhCmd =
-                    !isTaoAnhPosterCmd && /^\s*@tao[j]?anh\b/i.test(msg.text);
+                    !isTaoAnhPosterCmd && STUDIO_ANY_CMD_BTN_REGEX.test(msg.text);
                   const isImageReply =
                     !isUser &&
                     (msg.chatMode === 'image_generator' || Boolean(msg.versionNumber));
@@ -7178,13 +6454,10 @@ export function AiDesignWorkspace() {
                           {isTaoAnhPosterCmd ? (
                             <div className="flex flex-wrap items-baseline gap-1.5">
                               <span className="inline-flex items-center rounded-md bg-pink-100 px-1.5 py-0.5 text-[10.5px] font-bold text-pink-700">
-                                🎨 Tạo ảnh
+                                🎨 Banner
                               </span>
                               <span>
-                                {msg.text.replace(
-                                  /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner)\s*:?\s*/i,
-                                  ''
-                                )}
+                                {msg.text.replace(STUDIO_BANNER_CMD_REGEX, '')}
                               </span>
                             </div>
                           ) : isTaoAnhCmd ? (
@@ -7193,7 +6466,7 @@ export function AiDesignWorkspace() {
                                 ✨ Phối cảnh
                               </span>
                               <span>
-                                {msg.text.replace(/^\s*@tao[j]?anh\s*:?\s*/i, '')}
+                                {msg.text.replace(STUDIO_ANY_CMD_REGEX, '')}
                               </span>
                             </div>
                           ) : (
@@ -7265,7 +6538,7 @@ export function AiDesignWorkspace() {
                                 type="button"
                                 onClick={() => {
                                   if (matchedVer) setSelectedVersionId(matchedVer.id);
-                                  handleSaveFinished();
+                                  void handleSaveFinished(matchedVer || undefined);
                                 }}
                                 className="flex-1 rounded-lg bg-[#0BAF7C] px-3 py-1.5 text-center text-xs font-extrabold text-white shadow-md hover:bg-emerald-700"
                               >
@@ -7280,7 +6553,7 @@ export function AiDesignWorkspace() {
 
                   // Conversational ToanTrung Reply ($0)
                   const suggestedCmd = msg.suggestedTaoAnhPrompt?.trim() || '';
-                  const isSuggestedPoster = /^\s*@taoanhposter/i.test(suggestedCmd);
+                  const isSuggestedPoster = STUDIO_BANNER_CMD_BTN_REGEX.test(suggestedCmd);
 
                   return (
                     <div key={msg.id} className="group space-y-1.5">
@@ -7330,10 +6603,7 @@ export function AiDesignWorkspace() {
                                 Gợi ý tạo ảnh:
                               </div>
                               <span>
-                                {suggestedCmd.replace(
-                                  /^\s*@(?:taoanhposter|tao[j]?anh)\s*:?\s*/i,
-                                  ''
-                                )}
+                                {suggestedCmd.replace(STUDIO_ANY_CMD_REGEX, '')}
                               </span>
                             </div>
 
@@ -7383,79 +6653,169 @@ export function AiDesignWorkspace() {
                 </div>
               )}
 
-              {/* Ultra-Clean Tab-Specific Composer */}
+              {/* Slim, Clean Unified Studio Composer */}
               <div className="shrink-0 border-t border-slate-100 p-3 space-y-2 bg-white">
-                {!chatFocusMode && activeWorkspaceArea === 'banner_product' && (
-                  <div className="rounded-xl border border-purple-200 bg-purple-50/70 p-2.5 space-y-1.5 text-[11px]">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-extrabold text-[#6D28D9]">
-                        🛍️ Sản phẩm ghép vào Banner ({activeProductPhotos.length})
-                      </span>
+                {!chatFocusMode && (
+                  <>
+                    {/* Compact Context Bar: Site Photo + Attached Company Product Chips + Pure-Prompt vs With-Product toggle */}
+                    <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-slate-200/90 bg-slate-50/80 px-2.5 py-1.5 text-[11px]">
+                      <span className="font-bold text-slate-600">Đang dùng:</span>
+                      {selectedPhoto ? (
+                        <span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-0.5 font-bold text-[#1553A2] border border-blue-200">
+                          📷 Nền: {selectedPhoto.name.slice(0, 18)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-400">Không cần ảnh nền khi tạo @banner</span>
+                      )}
+
+                      {activeProductPhotos.map((prod) => (
+                        <span
+                          key={prod.id}
+                          className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-extrabold border ${
+                            activeBannerMode === 'prompt_only'
+                              ? 'bg-slate-100 text-slate-500 border-slate-300 line-through'
+                              : 'bg-purple-100 text-[#6D28D9] border-purple-300'
+                          }`}
+                          title={
+                            activeBannerMode === 'prompt_only'
+                              ? 'Đang bật chế độ Thuần Prompt (SP sẽ tạm ẩn khi sinh @banner)'
+                              : `Ảnh sản phẩm công ty sẽ được ghép vào hiện trường / @banner: ${prod.name}`
+                          }
+                        >
+                          <span>📦 SP: {prod.name.replace(/^\[Sản phẩm\]\s*/i, '').slice(0, 18)}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextIds = attachedProductPhotoIds.filter((id) => id !== prod.id);
+                              setAttachedProductPhotoIds(nextIds);
+                              if (nextIds.length === 0) {
+                                setActiveBannerMode('prompt_only');
+                              }
+                            }}
+                            className="ml-0.5 text-purple-700 hover:text-red-600 font-bold"
+                            title="Bỏ đính kèm ảnh sản phẩm này"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+
+                      {activeProductPhotos.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setActiveBannerMode((prev) =>
+                              prev === 'prompt_only' ? 'with_product' : 'prompt_only'
+                            )
+                          }
+                          className={`rounded-md border px-2 py-0.5 text-[10.5px] font-bold transition ${
+                            activeBannerMode === 'prompt_only'
+                              ? 'border-pink-300 bg-pink-50 text-pink-700'
+                              : 'border-purple-300 bg-purple-50 text-[#6D28D9]'
+                          }`}
+                          title="Chuyển nhanh giữa tạo Banner thuần Prompt (bỏ qua ảnh SP) và Banner kèm ảnh SP"
+                        >
+                          {activeBannerMode === 'prompt_only' ? 'Banner: Thuần Prompt' : 'Banner: Kèm ảnh SP'}
+                        </button>
+                      )}
+
                       <button
                         type="button"
                         onClick={() => {
                           setPhotoVaultTab('company_products');
                           uploadProductPhotoInputRef.current?.click();
                         }}
-                        className="inline-flex items-center gap-1 rounded-lg border border-purple-300 bg-white px-2 py-0.5 text-[11px] font-bold text-[#6D28D9] hover:bg-purple-100 transition"
+                        className="ml-auto inline-flex items-center gap-1 rounded-lg border border-purple-300 bg-white px-2 py-0.5 text-[11px] font-extrabold text-[#6D28D9] hover:bg-purple-50 transition"
+                        title="Tải thêm ảnh sản phẩm công ty để ghép vào @banner hoặc @taoanh"
                       >
                         <Plus className="h-3 w-3" />
-                        <span>Tải ảnh SP</span>
+                        <span>Ảnh SP</span>
                       </button>
                     </div>
-                    {activeProductPhotos.length === 0 ? (
-                      <div className="text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2 py-1">
-                        Chưa chọn ảnh sản phẩm. Hãy bấm vào ảnh ở <strong>Kho SP Cty</strong> bên trái hoặc bấm <strong>+ Tải ảnh SP</strong>.
-                      </div>
-                    ) : (
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {activeProductPhotos.map((prod) => (
-                          <span
-                            key={prod.id}
-                            className="inline-flex items-center gap-1 rounded-md bg-white px-2 py-0.5 font-bold text-[#6D28D9] border border-purple-300 shadow-2xs"
-                          >
-                            <span>📦 {prod.name.replace(/^\[Sản phẩm\]\s*/i, '').slice(0, 22)}</span>
-                            <button
-                              type="button"
-                              onClick={() => void handleToggleProductPhotoRole(prod)}
-                              className="ml-0.5 text-purple-600 hover:text-red-600 font-bold"
-                              title="Bỏ ảnh sản phẩm này"
-                            >
-                              ×
-                            </button>
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+
+                    {/* 1-Row Quick Action Pills */}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={submitting}
+                        onClick={() => {
+                          const pointsNote =
+                            touchPoints.length > 0
+                              ? ` tại ${touchPoints.length} điểm chạm (${touchPoints.map((p) => p.label).join(' → ')}) đã chấm trên ảnh`
+                              : '';
+                          const prodNote =
+                            activeProductPhotos.length > 0
+                              ? ` kết hợp với ảnh sản phẩm "${activeProductPhotos[0]?.name}"`
+                              : '';
+                          void executeChatSubmit(
+                            `Phân tích bức ảnh hiện tại${pointsNote}${prodNote} và gợi ý phương án phối cảnh / thiết kế đẹp nhất giúp mình`
+                          );
+                        }}
+                        className="rounded-lg bg-[#0BAF7C] px-2.5 py-1 text-[11px] font-extrabold text-white shadow-2xs hover:bg-emerald-700 disabled:opacity-50 transition"
+                      >
+                        🔍 Tư vấn ($0)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const clean = chatPrompt.replace(STUDIO_ANY_CMD_REGEX, '').trim();
+                          setActiveTaskCode('banner_generate');
+                          setActiveBannerMode(activeProductPhotos.length > 0 ? 'with_product' : 'prompt_only');
+                          const defaultBanner =
+                            activeProductPhotos.length > 0 && activeBannerMode !== 'prompt_only'
+                              ? `@banner: Thiết kế banner nổi bật kèm ảnh sản phẩm "${activeProductPhotos[0]?.name.replace(/^\[Sản phẩm\]\s*/i, '')}" tỷ lệ ${paramForm.aspectRatio}`
+                              : `@banner: Thiết kế banner quảng cáo LED tỷ lệ ${paramForm.aspectRatio} (${computedLiveSpecs.resW}×${computedLiveSpecs.resH}px), phong cách hiện đại`;
+                          handlePromptChange(clean ? `@banner: ${clean}` : defaultBanner);
+                        }}
+                        className="rounded-lg bg-pink-600 px-2.5 py-1 text-[11px] font-bold text-white shadow-2xs hover:bg-pink-700 transition"
+                        title="Điền nhanh lệnh @banner vào ô nhập"
+                      >
+                        🎨 @banner
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const clean = chatPrompt.replace(STUDIO_ANY_CMD_REGEX, '').trim();
+                          setActiveTaskCode('perspective_compose');
+                          const defaultScene =
+                            activeProductPhotos.length > 0
+                              ? `@taoanh: Ghép màn LED và sản phẩm "${activeProductPhotos[0]?.name.replace(/^\[Sản phẩm\]\s*/i, '')}" vào đúng vị trí đã chấm trên ảnh hiện trường`
+                              : `@taoanh: Ghép phối cảnh màn hình LED ${paramForm.pixelPitch} (${paramForm.screenWidthM}m × ${paramForm.screenHeightM}m) chân thực lên công trình`;
+                          handlePromptChange(clean ? `@taoanh: ${clean}` : defaultScene);
+                        }}
+                        className="rounded-lg bg-[#7846FF] px-2.5 py-1 text-[11px] font-bold text-white shadow-2xs hover:bg-[#6D28D9] transition"
+                        title="Điền nhanh lệnh @taoanh phối cảnh công trình"
+                      >
+                        🏢 @taoanh
+                      </button>
+                      <button
+                        type="button"
+                        data-testid="open-prompt-library-btn"
+                        onClick={() => {
+                          setEditingPromptId(null);
+                          setNewSavedPromptTitle('');
+                          setNewSavedPromptText(chatPrompt.trim());
+                          setShowPromptLibraryModal(true);
+                        }}
+                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-bold text-indigo-800 hover:bg-indigo-100 transition"
+                      >
+                        📚 Mẫu lệnh ({promptLibrary.length})
+                      </button>
+                    </div>
+                  </>
                 )}
 
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
                   <div className="flex flex-wrap items-center gap-1.5">
-                    {activeWorkspaceArea !== 'banner_product' && (
-                      <button
-                        type="button"
-                        disabled={uploadingPhoto}
-                        onClick={() => uploadPhotoInputRef.current?.click()}
-                        className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                        title="Đính kèm ảnh tham khảo hoặc dán ảnh trực tiếp (Ctrl+V) vào khung chat"
-                      >
-                        <Paperclip className="h-3 w-3 text-[#1553A2]" />
-                        <span>{uploadingPhoto ? 'Đang tải...' : 'Đính kèm ảnh'}</span>
-                      </button>
-                    )}
                     <button
                       type="button"
-                      data-testid="open-prompt-library-btn"
-                      onClick={() => {
-                        setEditingPromptId(null);
-                        setNewSavedPromptTitle('');
-                        setNewSavedPromptText(chatPrompt.trim());
-                        setShowPromptLibraryModal(true);
-                      }}
-                      className="inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2 py-1 text-[11px] font-bold text-indigo-800 hover:bg-indigo-100 transition"
+                      disabled={uploadingPhoto}
+                      onClick={() => uploadPhotoInputRef.current?.click()}
+                      className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                      title="Đính kèm ảnh hoặc dán ảnh trực tiếp (Ctrl+V) vào khung chat"
                     >
-                      <span>📚 Mẫu lệnh ({promptLibrary.length})</span>
+                      <Paperclip className="h-3 w-3 text-[#1553A2]" />
+                      <span>{uploadingPhoto ? 'Đang tải...' : 'Đính kèm ảnh'}</span>
                     </button>
                   </div>
 
@@ -7496,11 +6856,7 @@ export function AiDesignWorkspace() {
                         void executeChatSubmit(chatPrompt);
                       }
                     }}
-                    placeholder={
-                      activeWorkspaceArea === 'banner_product'
-                        ? 'Mô tả nền, màu sắc, thông điệp quảng cáo quanh sản phẩm đã chọn...'
-                        : "Mô tả Banner / ảnh cần tạo (VD: 'Tạo ảnh ...') hoặc nhắn hỏi ToanTrung tự do..."
-                    }
+                    placeholder="Gõ '@banner ...' tạo Banner, '@taoanh ...' ghép phối cảnh LED, hoặc nhắn trò chuyện tự do (Ctrl+V dán ảnh)..."
                     className="w-full resize-none rounded-xl border border-slate-300 bg-slate-50/70 p-2.5 pr-20 text-[13px] text-slate-900 placeholder-slate-400 focus:border-[#7846FF] focus:bg-white focus:outline-none"
                   />
                   <button
@@ -7511,14 +6867,12 @@ export function AiDesignWorkspace() {
                       submitting ||
                       Boolean(piiAlert) ||
                       (currentProject?.activeJob?.status === 'running' &&
-                        /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\b/i.test(
-                          chatPrompt
-                        ))
+                        STUDIO_ANY_CMD_BTN_REGEX.test(chatPrompt))
                     }
                     className={`absolute bottom-2.5 right-2 inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-extrabold text-white shadow-xs transition disabled:opacity-50 ${
-                      /^\s*@taoanhposter\b/i.test(chatPrompt)
+                      STUDIO_BANNER_CMD_BTN_REGEX.test(chatPrompt)
                         ? 'bg-pink-600 hover:bg-pink-700'
-                        : /^\s*@tao[j]?anh\b/i.test(chatPrompt)
+                        : STUDIO_ANY_CMD_BTN_REGEX.test(chatPrompt)
                           ? 'bg-[#7846FF] hover:bg-[#6D28D9]'
                           : 'bg-[#1553A2] hover:bg-[#1E40AF]'
                     }`}
@@ -8474,7 +7828,7 @@ export function AiDesignWorkspace() {
                     const title =
                       newSavedPromptTitle.trim() ||
                       text
-                        .replace(/^\s*@(?:taoanhposter|taoposter|tao[j]?anh)\s*:?\s*/i, '')
+                        .replace(STUDIO_ANY_CMD_REGEX, '')
                         .slice(0, 48) ||
                       'Lệnh Prompt mới';
                     if (editingPromptId) {

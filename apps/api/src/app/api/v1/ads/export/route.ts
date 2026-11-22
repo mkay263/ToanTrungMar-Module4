@@ -5,7 +5,7 @@ import { prisma } from '@toantrung/database';
 import { hasBaPermission, isL2Valid, isL3Effective } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
 import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
-import { encryptSecret } from '../../../../../core/security/vault';
+import { decryptSecret, encryptSecret } from '../../../../../core/security/vault';
 import { refreshKeywordDerivedCacheFromCanonicalMetrics } from '../../../../../modules/03-keywords-ads/service';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { buildStandardXlsxBuffer } from '../../../../../core/export/xlsx-builder';
@@ -95,23 +95,59 @@ function letterToColIndex(letters: string): number {
   return col - 1;
 }
 
+const MAX_ZIP_ENTRIES = 200;
+const MAX_ZIP_ENTRY_INFLATED_BYTES = 10 * 1024 * 1024;
+const MAX_ZIP_TOTAL_INFLATED_BYTES = 25 * 1024 * 1024;
+
+function extractAllowedGoogleSheetExportUrl(rawUrl: string): string | null {
+  const trimmed = (rawUrl || '').trim();
+  const match = trimmed.match(
+    /^https:\/\/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9-_]+)(?:[/?#].*)?$/i,
+  );
+  if (!match || !match[1]) return null;
+  return `https://docs.google.com/spreadsheets/d/${match[1]}/export?format=xlsx`;
+}
+
+function resolveStoredBearerToken(storedToken?: string | null): string {
+  if (!storedToken) return '';
+  const trimmed = storedToken.trim();
+  if (!trimmed || trimmed === 'VAULT_PROTECTED_TOKEN' || trimmed === 'DEMO_SANDBOX_TOKEN') {
+    return '';
+  }
+  const decrypted = decryptSecret(trimmed);
+  return (decrypted || trimmed).trim();
+}
+
 function extractZipEntries(buf: Buffer): Map<string, string> {
   const entries = new Map<string, string>();
   let offset = 0;
-  while (offset + 30 <= buf.length) {
+  let totalInflatedBytes = 0;
+  while (offset + 30 <= buf.length && entries.size < MAX_ZIP_ENTRIES) {
     if (buf.readUInt32LE(offset) !== 0x04034b50) break;
     const flags = buf.readUInt16LE(offset + 6);
     const method = buf.readUInt16LE(offset + 8);
     const compSize = buf.readUInt32LE(offset + 18);
+    const uncompSize = buf.readUInt32LE(offset + 22);
     const nameLen = buf.readUInt16LE(offset + 26);
     const extraLen = buf.readUInt16LE(offset + 28);
     const name = buf.subarray(offset + 30, offset + 30 + nameLen).toString('utf8');
     const dataStart = offset + 30 + nameLen + extraLen;
     if ((flags & 0x08) !== 0 && compSize === 0) break;
+    if (uncompSize > MAX_ZIP_ENTRY_INFLATED_BYTES) {
+      throw new Error('Tệp Excel giải nén vượt quá giới hạn an toàn (ZIP bomb protection).');
+    }
     const compData = buf.subarray(dataStart, dataStart + compSize);
     try {
-      if (method === 0) entries.set(name, compData.toString('utf8'));
-      else if (method === 8) entries.set(name, zlib.inflateRawSync(compData).toString('utf8'));
+      if (method === 0) {
+        totalInflatedBytes += compData.length;
+        if (totalInflatedBytes > MAX_ZIP_TOTAL_INFLATED_BYTES) break;
+        entries.set(name, compData.toString('utf8'));
+      } else if (method === 8) {
+        const inflated = zlib.inflateRawSync(compData, { maxOutputLength: MAX_ZIP_ENTRY_INFLATED_BYTES });
+        totalInflatedBytes += inflated.length;
+        if (totalInflatedBytes > MAX_ZIP_TOTAL_INFLATED_BYTES) break;
+        entries.set(name, inflated.toString('utf8'));
+      }
     } catch {
       // ignore
     }
@@ -120,25 +156,38 @@ function extractZipEntries(buf: Buffer): Map<string, string> {
   if (entries.size === 0) {
     for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
       if (buf.readUInt32LE(i) === 0x06054b50) {
-        const total = buf.readUInt16LE(i + 10);
+        const total = Math.min(MAX_ZIP_ENTRIES, buf.readUInt16LE(i + 10));
         let cdOffset = buf.readUInt32LE(i + 16);
         for (let e = 0; e < total && cdOffset + 46 <= buf.length; e++) {
           if (buf.readUInt32LE(cdOffset) !== 0x02014b50) break;
           const method = buf.readUInt16LE(cdOffset + 10);
           const compSize = buf.readUInt32LE(cdOffset + 20);
+          const uncompSize = buf.readUInt32LE(cdOffset + 24);
           const nameLen = buf.readUInt16LE(cdOffset + 28);
           const extraLen = buf.readUInt16LE(cdOffset + 30);
           const commentLen = buf.readUInt16LE(cdOffset + 32);
           const lfhOffset = buf.readUInt32LE(cdOffset + 42);
           const name = buf.subarray(cdOffset + 46, cdOffset + 46 + nameLen).toString('utf8');
-          if (lfhOffset + 30 <= buf.length && buf.readUInt32LE(lfhOffset) === 0x04034b50) {
+          if (
+            uncompSize <= MAX_ZIP_ENTRY_INFLATED_BYTES &&
+            lfhOffset + 30 <= buf.length &&
+            buf.readUInt32LE(lfhOffset) === 0x04034b50
+          ) {
             const lfhNameLen = buf.readUInt16LE(lfhOffset + 26);
             const lfhExtraLen = buf.readUInt16LE(lfhOffset + 28);
             const dataStart = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
             const compData = buf.subarray(dataStart, dataStart + compSize);
             try {
-              if (method === 0) entries.set(name, compData.toString('utf8'));
-              else if (method === 8) entries.set(name, zlib.inflateRawSync(compData).toString('utf8'));
+              if (method === 0) {
+                totalInflatedBytes += compData.length;
+                if (totalInflatedBytes > MAX_ZIP_TOTAL_INFLATED_BYTES) break;
+                entries.set(name, compData.toString('utf8'));
+              } else if (method === 8) {
+                const inflated = zlib.inflateRawSync(compData, { maxOutputLength: MAX_ZIP_ENTRY_INFLATED_BYTES });
+                totalInflatedBytes += inflated.length;
+                if (totalInflatedBytes > MAX_ZIP_TOTAL_INFLATED_BYTES) break;
+                entries.set(name, inflated.toString('utf8'));
+              }
             } catch {
               // ignore
             }
@@ -491,40 +540,44 @@ export async function GET(request: Request) {
           publishWindow: '',
         },
       },
-      {
-        name: '03_BaiViet_SEO',
-        title: 'DANH SÁCH BÀI VIẾT CHUẨN SEO & TRẠNG THÁI XUẤT BẢN WEBSITE VỆ TINH',
-        metadata: [
-          { label: 'Tổng số bài viết SEO', value: String(articles.length) },
-        ],
-        columns: [
-          { header: 'STT', key: 'stt', width: 8, type: 'number' },
-          { header: 'Tiêu Đề Bài Viết', key: 'title', width: 38, type: 'string' },
-          { header: 'Từ Khóa Chính', key: 'keyword', width: 26, type: 'string' },
-          { header: 'Website Đích', key: 'targetSite', width: 24, type: 'string' },
-          { header: 'Điểm Chuẩn SEO (/100)', key: 'seoScore', width: 20, type: 'number' },
-          { header: 'Trạng Thái Xuất Bản', key: 'status', width: 22, type: 'string' },
-          { header: 'Tác Giả / Phụ Trách', key: 'author', width: 22, type: 'string' },
-          { header: 'Ngày Tạo', key: 'createdAt', width: 18, type: 'string' },
-        ],
-        rows: articles.map((a, idx) => ({
-          stt: idx + 1,
-          title: a.title,
-          keyword: a.keyword?.keyword || a.topic || '—',
-          targetSite: a.targetWebsite || 'toantrung.vn',
-          seoScore: a.needsOptimization ? 72 : 90,
-          status:
-            a.status === 'published'
-              ? 'Đã đăng (Mô phỏng/CMS)'
-              : a.status === 'approved_scheduled'
-                ? a.lastPublishError
-                  ? 'Lỗi xuất bản'
-                  : 'Đã duyệt & hẹn giờ đăng'
-                : 'Bản nháp',
-          author: a.createdBy?.fullName || 'Chuyên viên Marketing',
-          createdAt: a.createdAt.toISOString().slice(0, 16).replace('T', ' '),
-        })),
-      },
+      ...(auth.user.roleCode === 'ADS'
+        ? []
+        : [
+            {
+              name: '03_BaiViet_SEO',
+              title: 'DANH SÁCH BÀI VIẾT CHUẨN SEO & TRẠNG THÁI XUẤT BẢN WEBSITE VỆ TINH',
+              metadata: [
+                { label: 'Tổng số bài viết SEO', value: String(articles.length) },
+              ],
+              columns: [
+                { header: 'STT', key: 'stt', width: 8, type: 'number' as const },
+                { header: 'Tiêu Đề Bài Viết', key: 'title', width: 38, type: 'string' as const },
+                { header: 'Từ Khóa Chính', key: 'keyword', width: 26, type: 'string' as const },
+                { header: 'Website Đích', key: 'targetSite', width: 24, type: 'string' as const },
+                { header: 'Đánh Giá Tối Ưu SEO', key: 'optimizationState', width: 22, type: 'string' as const },
+                { header: 'Trạng Thái Xuất Bản', key: 'status', width: 22, type: 'string' as const },
+                { header: 'Tác Giả / Phụ Trách', key: 'author', width: 22, type: 'string' as const },
+                { header: 'Ngày Tạo', key: 'createdAt', width: 18, type: 'string' as const },
+              ],
+              rows: articles.map((a, idx) => ({
+                stt: idx + 1,
+                title: a.title,
+                keyword: a.keyword?.keyword || a.topic || '—',
+                targetSite: a.targetWebsite || 'toantrung.vn',
+                optimizationState: a.needsOptimization ? 'Cần tối ưu SEO' : 'Đạt kiểm tra nội dung',
+                status:
+                  a.status === 'published'
+                    ? 'Đã đăng CMS'
+                    : a.status === 'approved_scheduled'
+                      ? a.lastPublishError
+                        ? 'Lỗi xuất bản'
+                        : 'Đã duyệt & hẹn giờ đăng'
+                      : 'Bản nháp',
+                author: a.createdBy?.fullName || 'Chuyên viên Marketing',
+                createdAt: a.createdAt.toISOString().slice(0, 16).replace('T', ' '),
+              })),
+            },
+          ]),
     ]);
 
     await prisma.auditLog.create({
@@ -849,7 +902,7 @@ async function ingestGridsIntoAdsDatabase(grids: string[][][]): Promise<{
 }
 
 export async function POST(request: Request) {
-  const auth = await requirePermissionSession(request, 'EXPORT_DATA');
+  const auth = await requirePermissionSession(request, 'TRACKING_ADS_OPTIMIZE');
   if (!auth.ok) return auth.response;
 
   try {
@@ -909,9 +962,16 @@ export async function POST(request: Request) {
       }
 
       if (body.mode === 'poll_realtime') {
+        if (body.sheetUrl && !extractAllowedGoogleSheetExportUrl(body.sheetUrl)) {
+          return jsonError(
+            'INVALID_GSHEET_URL',
+            'Chỉ cho phép đường dẫn Google Sheets chính thức (https://docs.google.com/spreadsheets/d/...).',
+            400,
+          );
+        }
         const saved = writeRealtimeConfig({
           ...(body.propertyId ? { ga4PropertyId: body.propertyId.replace(/\D/g, '') } : {}),
-          ...(body.accessToken ? { ga4AccessToken: body.accessToken.trim() } : {}),
+          ...(body.accessToken ? { ga4AccessToken: encryptSecret(body.accessToken.trim()) } : {}),
           ...(body.sheetUrl ? { gsheetUrl: body.sheetUrl.trim() } : {}),
           ...(typeof body.autoRealtimeEnabled === 'boolean'
             ? { autoRealtimeEnabled: body.autoRealtimeEnabled }
@@ -929,14 +989,15 @@ export async function POST(request: Request) {
         // 1. Poll Google Sheets Live Link (if configured)
         if (saved.gsheetUrl) {
           try {
-            const sheetIdMatch = saved.gsheetUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-            const exportUrl = sheetIdMatch
-              ? `https://docs.google.com/spreadsheets/d/${sheetIdMatch[1]}/export?format=xlsx`
-              : saved.gsheetUrl;
+            const exportUrl = extractAllowedGoogleSheetExportUrl(saved.gsheetUrl);
+            if (!exportUrl) {
+              throw new Error('Đường dẫn Google Sheets không hợp lệ (bắt buộc https://docs.google.com/spreadsheets/d/...).');
+            }
             const resp = await fetch(exportUrl, {
               headers: { Accept: '*/*' },
-              redirect: 'follow',
+              redirect: 'error',
               cache: 'no-store',
+              signal: AbortSignal.timeout(15000),
             });
             if (resp.ok) {
               const arrBuf = await resp.arrayBuffer();
@@ -967,8 +1028,8 @@ export async function POST(request: Request) {
               process.env.GA4_PROPERTY_ID ||
               '';
         const cleanPropId = rawPropId.replace(/\D/g, '');
-        let bearer = (saved.ga4AccessToken || '').trim();
-        if (!bearer || bearer === 'VAULT_PROTECTED_TOKEN' || bearer === 'DEMO_SANDBOX_TOKEN') {
+        let bearer = resolveStoredBearerToken(saved.ga4AccessToken);
+        if (!bearer) {
           bearer = (await getValidAccessToken()) || '';
         }
         if (!bearer && saved.ga4RefreshToken && saved.ga4ClientId && saved.ga4ClientSecret) {
@@ -1536,15 +1597,20 @@ export async function POST(request: Request) {
           return jsonError('EMPTY_URL', 'Vui lòng dán đường dẫn Google Sheets của báo cáo Google Ads.', 400);
         }
 
-        const sheetIdMatch = rawUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
-        const exportUrl = sheetIdMatch
-          ? `https://docs.google.com/spreadsheets/d/${sheetIdMatch[1]}/export?format=xlsx`
-          : rawUrl;
+        const exportUrl = extractAllowedGoogleSheetExportUrl(rawUrl);
+        if (!exportUrl) {
+          return jsonError(
+            'INVALID_GSHEET_URL',
+            'Chỉ cho phép đường dẫn Google Sheets chính thức (https://docs.google.com/spreadsheets/d/<ID>).',
+            400,
+          );
+        }
 
         const resp = await fetch(exportUrl, {
           headers: { Accept: '*/*' },
           redirect: 'follow',
           cache: 'no-store',
+          signal: AbortSignal.timeout(15000),
         });
 
         if (!resp.ok) {
@@ -1622,85 +1688,6 @@ export async function POST(request: Request) {
         }
 
         let bearerToken = (body.accessToken || '').trim();
-        if (cleanCustomerId === '8891024451' || bearerToken === 'DEMO_SANDBOX_TOKEN') {
-          const sandboxGrid: string[][] = [
-            [
-              'Mã Chiến Dịch',
-              'Tên Chiến Dịch',
-              'Trạng Thái',
-              'Ngân Sách',
-              'Lượt Hiển Thị',
-              'Lượt Nhấp',
-              'Chi Phí',
-              'Lượt Chuyển Đổi',
-            ],
-            [
-              'gads_test_p25',
-              '[Test Ads 889-102-4451] Search - Màn hình LED Hội trường P2.5',
-              'Đang chạy',
-              '1500000',
-              '14520',
-              '668',
-              '8016000',
-              '21',
-            ],
-            [
-              'gads_test_outdoor',
-              '[Test Ads 889-102-4451] Search - Màn hình LED Ngoài trời P3/P4',
-              'Đang chạy',
-              '2000000',
-              '19240',
-              '842',
-              '10104000',
-              '26',
-            ],
-            [
-              'ga4_test_organic',
-              '[Test GA4 213025502] Google Organic Search (3 Website)',
-              'Đang chạy',
-              '0',
-              '26850',
-              '1320',
-              '0',
-              '34',
-            ],
-          ];
-          const kwGrid: string[][] = [
-            ['Từ khóa mục tiêu', 'Lượt tìm kiếm', 'Click quảng cáo', 'Click tự nhiên'],
-            ['màn hình led hội trường p2.5 [Test GA4/Ads]', '3200', '245', '190'],
-            ['báo giá màn hình led ngoài trời p4 [Test GA4/Ads]', '2850', '198', '165'],
-          ];
-          const { importedCampaigns, importedKeywords } = await ingestGridsIntoAdsDatabase([
-            sandboxGrid,
-            kwGrid,
-          ]);
-          const nowIso = new Date().toISOString();
-          writeRealtimeConfig({
-            ga4PropertyId: '213025502',
-            ga4AccessToken: 'DEMO_SANDBOX_TOKEN',
-            gadsCustomerId: '889-102-4451',
-            autoRealtimeEnabled: true,
-            lastRealtimeSyncAt: nowIso,
-            lastActiveUsers30m: 34,
-            lastActivePages: [
-              { page: '/man-hinh-led-hoi-truong-p2-5', users: 14 },
-              { page: '/bang-gia-man-hinh-led-ngoai-troi-p3-p4', users: 10 },
-              { page: '/du-an-man-hinh-led-sanh-tiec-cuoi', users: 6 },
-              { page: '/lien-he-nhan-bao-gia-toan-trung', users: 4 },
-            ],
-            lastActiveEvents: [
-              { event: 'page_view', count: 148 },
-              { event: 'user_engagement', count: 82 },
-              { event: 'click_zalo_hotline', count: 14 },
-              { event: 'generate_lead', count: 5 },
-            ],
-          });
-          return jsonSuccess({
-            importedCampaigns,
-            importedKeywords,
-            source: 'Tài khoản Test Mẫu (GA4 213025502 & Google Ads 889-102-4451)',
-          });
-        }
 
         if (!bearerToken) {
           if (!clientId || !clientSecret || !refreshToken) {

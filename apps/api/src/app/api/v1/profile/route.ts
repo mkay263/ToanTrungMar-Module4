@@ -1,3 +1,4 @@
+import { prisma } from '@toantrung/database';
 import { ChangePasswordSchema, UpdateProfileSchema } from '@toantrung/contracts';
 import { getClientIp, jsonError, jsonSuccess } from '../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../core/permissions';
@@ -16,7 +17,33 @@ const FORBIDDEN_PROFILE_FIELDS = ['id', 'userId', 'roleCode', 'roleId', 'departm
 export async function GET(req: Request) {
   const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
   if (!auth.ok) return auth.response;
-  return jsonSuccess({ user: auth.user });
+  const sessions = await prisma.userSession.findMany({
+    where: {
+      userId: auth.user.id,
+      revokedAt: null,
+      expiresAt: { gt: new Date() },
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 5,
+    select: {
+      id: true,
+      ipAddress: true,
+      userAgent: true,
+      createdAt: true,
+      expiresAt: true,
+    },
+  });
+  return jsonSuccess({
+    user: auth.user,
+    activeSessions: sessions.map((s) => ({
+      id: s.id,
+      isCurrent: s.id === auth.sessionId,
+      ipAddress: s.ipAddress || 'IP Nội bộ Toàn Trung',
+      userAgent: s.userAgent || 'Trình duyệt Web',
+      createdAt: s.createdAt.toISOString(),
+      expiresAt: s.expiresAt.toISOString(),
+    })),
+  });
 }
 
 export async function PATCH(req: Request) {

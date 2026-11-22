@@ -1165,13 +1165,7 @@ async function main() {
     for (const acc of devAccounts) {
       const user = await prisma.user.upsert({
         where: { email: acc.email },
-        update: {
-          // Preserve user-customized fullName, phone, avatarUrl, and passwordHash across builds/seeds!
-          roleId: acc.roleId,
-          department: acc.department,
-          specialtyGroup: acc.specialtyGroup,
-          isActive: true,
-        },
+        update: {},
         create: {
           ...acc,
           passwordHash,
@@ -1213,7 +1207,7 @@ async function main() {
             category: 'Phòng Marketing & SEO',
             actionLabel: 'Mở Quảng cáo & SEO',
             actionUrl: '/ads',
-            requiredPermission: 'SEO_KEYWORD_MANAGE',
+            requiredPermission: 'AI_MARKETING_SEO',
             isRead: false,
           });
         }
@@ -1226,7 +1220,7 @@ async function main() {
             category: 'Bộ phận Quảng cáo Ads',
             actionLabel: 'Xem Chiến dịch Ads',
             actionUrl: '/ads',
-            requiredPermission: 'ADS_CAMPAIGN_VIEW',
+            requiredPermission: 'TRACKING_ADS_OPTIMIZE',
             isRead: false,
           });
         }
@@ -1239,7 +1233,7 @@ async function main() {
             category: 'Bộ phận Thiết kế',
             actionLabel: 'Mở Thiết kế AI',
             actionUrl: '/design',
-            requiredPermission: 'DESIGN_REQUEST_CREATE_VIEW',
+            requiredPermission: 'AI_DESIGN',
             isRead: false,
           });
         }

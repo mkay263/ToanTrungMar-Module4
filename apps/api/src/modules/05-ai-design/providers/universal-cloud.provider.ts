@@ -181,11 +181,16 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
             form.append('quality', 'high');
           }
 
+          const totalImageInputs =
+            (hasSitePhoto && referenceImageBuffer ? 1 : 0) +
+            (hasProductPhotos && productReferenceBuffers ? productReferenceBuffers.length : 0);
+          const imageFieldName = totalImageInputs > 1 ? 'image[]' : 'image';
+
           if (hasSitePhoto && referenceImageBuffer) {
             const blob = new Blob([new Uint8Array(referenceImageBuffer)], {
               type: referenceImageMimeType || 'image/png',
             });
-            form.append('image', blob, 'site-photo.png');
+            form.append(imageFieldName, blob, 'site-photo.png');
           }
           if (includeMask && maskImageBuffer && maskImageBuffer.length > 0) {
             const maskBlob = new Blob([new Uint8Array(maskImageBuffer)], {
@@ -199,7 +204,7 @@ export class UniversalCloudAiProvider implements AiDesignProvider {
                 type: prod.mimeType || 'image/png',
               });
               form.append(
-                hasSitePhoto || idx > 0 ? 'image[]' : 'image',
+                imageFieldName,
                 blob,
                 prod.name || `product-${idx + 1}.png`
               );

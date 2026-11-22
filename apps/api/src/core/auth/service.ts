@@ -291,7 +291,7 @@ export async function updateOwnProfile(
     where: { id: userId },
     data: {
       fullName: input.fullName.trim(),
-      phone: input.phone ? input.phone.trim() : null,
+      ...(input.phone !== undefined ? { phone: input.phone ? input.phone.trim() : null } : {}),
       ...(input.removeAvatar ? { avatarUrl: null } : {}),
     },
     include: { role: true },
@@ -592,29 +592,6 @@ export async function updateAdminUser(
     );
   }
 
-  // Prevent locking or demoting the last active Admin
-  if (
-    target.role.roleCode === 'ADMIN' &&
-    target.isActive &&
-    (input.isActive === false || (input.roleCode && input.roleCode !== 'ADMIN'))
-  ) {
-    const otherActiveAdmins = await prisma.user.count({
-      where: {
-        deletedAt: null,
-        isActive: true,
-        role: { roleCode: 'ADMIN' },
-        id: { not: target.id },
-      },
-    });
-    if (otherActiveAdmins < 1) {
-      throw new AuthServiceError(
-        'CANNOT_REMOVE_LAST_ADMIN',
-        'Hệ thống phải có ít nhất một Quản trị viên đang hoạt động.',
-        400,
-      );
-    }
-  }
-
   let roleId = target.roleId;
   if (input.roleCode) {
     const role = await prisma.role.findUnique({ where: { roleCode: input.roleCode } });
@@ -624,17 +601,42 @@ export async function updateAdminUser(
     roleId = role.id;
   }
 
-  const updated = await prisma.user.update({
-    where: { id: input.userId },
-    data: {
-      ...(input.fullName !== undefined ? { fullName: input.fullName.trim() } : {}),
-      ...(input.phone !== undefined ? { phone: input.phone ? input.phone.trim() : null } : {}),
-      ...(input.department !== undefined ? { department: input.department } : {}),
-      ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
-      ...(input.resetPassword ? { passwordHash: hashPassword(input.resetPassword) } : {}),
-      roleId,
-    },
-    include: { role: true },
+  const updated = await prisma.$transaction(async (tx) => {
+    // Prevent locking or demoting the last active Admin atomically inside transaction
+    if (
+      target.role.roleCode === 'ADMIN' &&
+      target.isActive &&
+      (input.isActive === false || (input.roleCode && input.roleCode !== 'ADMIN'))
+    ) {
+      const otherActiveAdmins = await tx.user.count({
+        where: {
+          deletedAt: null,
+          isActive: true,
+          role: { roleCode: 'ADMIN' },
+          id: { not: target.id },
+        },
+      });
+      if (otherActiveAdmins < 1) {
+        throw new AuthServiceError(
+          'CANNOT_REMOVE_LAST_ADMIN',
+          'Hệ thống phải có ít nhất một Quản trị viên đang hoạt động.',
+          400,
+        );
+      }
+    }
+
+    return tx.user.update({
+      where: { id: input.userId },
+      data: {
+        ...(input.fullName !== undefined ? { fullName: input.fullName.trim() } : {}),
+        ...(input.phone !== undefined ? { phone: input.phone ? input.phone.trim() : null } : {}),
+        ...(input.department !== undefined ? { department: input.department } : {}),
+        ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
+        ...(input.resetPassword ? { passwordHash: hashPassword(input.resetPassword) } : {}),
+        roleId,
+      },
+      include: { role: true },
+    });
   });
 
   if (
@@ -723,10 +725,12 @@ export async function deleteAdminUser(
     }
 
     const now = new Date();
-    // Soft-delete account: preserves all related Leads, ownership references, uploaded assets, and audit logs
+    const deletedEmailSuffix = `${target.email}__deleted_${target.id}_${now.getTime()}`;
+    // Soft-delete account: preserves all related Leads, ownership references, uploaded assets, and audit logs while freeing unique email
     await tx.user.update({
       where: { id: target.id },
       data: {
+        email: deletedEmailSuffix,
         deletedAt: now,
         isActive: false,
       },

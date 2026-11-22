@@ -132,6 +132,15 @@ textarea,
   animation: liveSweepProgress 15s linear infinite;
 }
 
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-equalizer-1,
   .animate-equalizer-2,

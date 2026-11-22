@@ -39,11 +39,17 @@ export async function GET(req: Request) {
     return jsonError('NOT_FOUND', 'Không tìm thấy tệp trong kho bảo mật.', 404);
   }
 
+  const safeFileName = (file.fileName || 'design-asset.png').replace(/["\r\n\\]/g, '_');
+  const isSafeInlineRaster = /^image\/(?:png|jpeg|webp|gif)$/i.test(file.mimeType);
+  const disposition = isSafeInlineRaster ? 'inline' : 'attachment';
+
   return new Response(new Uint8Array(file.buffer), {
     status: 200,
     headers: {
-      'Content-Type': file.mimeType,
-      'Content-Disposition': `inline; filename="${file.fileName}"`,
+      'Content-Type': isSafeInlineRaster ? file.mimeType : 'application/octet-stream',
+      'Content-Disposition': `${disposition}; filename="${safeFileName}"`,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
       'Cache-Control': 'private, max-age=3600',
     },
   });

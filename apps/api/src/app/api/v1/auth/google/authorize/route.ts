@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
-import { buildGoogleAuthorizeUrl } from '../../../../../../modules/02-tracking-sync/google-oauth.service';
+import {
+  buildGoogleAuthorizeUrl,
+  sanitizeOAuthReturnPath,
+} from '../../../../../../modules/02-tracking-sync/google-oauth.service';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +21,7 @@ export async function GET(req: Request) {
     }
 
     const url = new URL(req.url);
-    const returnPath = url.searchParams.get('returnPath') || '/tracking';
+    const returnPath = sanitizeOAuthReturnPath(url.searchParams.get('returnPath'));
     const redirectMode = url.searchParams.get('redirect') === 'true';
     const origin = url.origin;
 

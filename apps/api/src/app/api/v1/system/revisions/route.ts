@@ -9,7 +9,7 @@ export async function GET(req: Request) {
 
   const [snapshot, unreadCount] = await Promise.all([
     Promise.resolve(getDomainRevisionsSnapshot()),
-    countUnreadNotificationsFast(auth.user.id),
+    countUnreadNotificationsFast(auth.user.id, auth.user.roleCode),
   ]);
 
   return jsonSuccess({

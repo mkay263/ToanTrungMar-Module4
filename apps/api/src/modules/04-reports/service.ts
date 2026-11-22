@@ -276,7 +276,11 @@ export async function getScopedReportsDashboard(
     bypassCache: options?.bypassCache,
     compute: async () => {
       const roleLeadWhere: Record<string, unknown> =
-        user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
+        user.roleCode === 'SALES'
+          ? { assignedSalesId: user.id }
+          : user.roleCode === 'DESIGNER'
+            ? { designRequests: { some: {} } }
+            : {};
       const allGa4PropIds = scope.availableWebsites
         .map((w) => w.ga4PropertyId)
         .filter((id): id is string => Boolean(id));
@@ -1115,7 +1119,9 @@ export async function getScopedReportsDashboard(
       pipelineStatusLabel: lead.isSpam
         ? 'Nghi spam (đã loại trừ)'
         : PIPELINE_STATUS_LABELS[lead.pipelineStatus as PipelineStatus] ?? lead.pipelineStatus,
-      noteOrReason: lead.lostReason || lead.spamReason || cleanProject || '—',
+      noteOrReason: anonymized
+        ? lead.lostReason || (lead.isSpam ? 'Đã loại trừ spam' : '—')
+        : lead.lostReason || lead.spamReason || cleanProject || '—',
       isAnonymized: anonymized,
     };
   });

@@ -1229,7 +1229,7 @@ export async function getTrackingDashboardData(
         pipelineStatus: l.pipelineStatus,
         touchpointsCount: linkedTouchpoints.length,
         recentActions:
-          l.activities?.map((a) => a.note || a.actionType).filter(Boolean) || [],
+          l.activities?.map((a) => a.actionType).filter(Boolean) || [],
         createdAt: l.createdAt.toISOString(),
       };
     }),

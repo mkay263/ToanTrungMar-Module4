@@ -272,10 +272,10 @@ export class LocalSandboxAiProvider implements AiDesignProvider {
       };
     }
 
-    const promptTokens = Math.max(120, Math.round(input.prompt.length * 1.8));
-    const completionTokens = 2100;
-    const totalTokens = promptTokens + completionTokens;
-    const costMicros = input.quality === 'high_quality' ? 40_000n : 30_000n;
+    const promptTokens = 0;
+    const completionTokens = 0;
+    const totalTokens = 0;
+    const costMicros = 0n;
 
     const imageBuffer =
       input.referenceImageBuffer && input.referenceImageBuffer.length > 0
@@ -310,7 +310,7 @@ export class LocalSandboxAiProvider implements AiDesignProvider {
       totalTokens,
       costMicros,
       costCurrency: 'USD',
-      isCostEstimated: true,
+      isCostEstimated: false,
       status: 'success',
     };
   }
@@ -338,10 +338,10 @@ export class LocalSandboxAiProvider implements AiDesignProvider {
       };
     }
 
-    const promptTokens = Math.max(100, Math.round(input.prompt.length * 1.6));
-    const completionTokens = 1600;
-    const totalTokens = promptTokens + completionTokens;
-    const costMicros = 24_000n;
+    const promptTokens = 0;
+    const completionTokens = 0;
+    const totalTokens = 0;
+    const costMicros = 0n;
 
     const imageBuffer = renderSyntheticLedPngBuffer({
       mode: 'banner',
@@ -360,6 +360,7 @@ export class LocalSandboxAiProvider implements AiDesignProvider {
       totalTokens,
       costMicros,
       costCurrency: 'USD',
+      isCostEstimated: false,
       status: 'success',
     };
   }

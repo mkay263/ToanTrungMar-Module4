@@ -60,9 +60,9 @@ export async function runHourlyGclidRetryJob() {
  */
 export async function runDailyGoogleLeadFormReconciliationJob(targetDateStr?: string) {
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const reconcileDate = targetDateStr || yesterday.toISOString().slice(0, 10);
-  const dayStart = new Date(`${reconcileDate}T00:00:00.000Z`);
-  const dayEnd = new Date(`${reconcileDate}T23:59:59.999Z`);
+  const reconcileDate = targetDateStr || getVietnamDateKey(yesterday);
+  const dayStart = new Date(`${reconcileDate}T00:00:00.000+07:00`);
+  const dayEnd = new Date(`${reconcileDate}T23:59:59.999+07:00`);
 
   const [crmLeadCount, crmErrorLogCount, metrics] = await Promise.all([
     prisma.lead.count({
@@ -91,7 +91,7 @@ export async function runDailyGoogleLeadFormReconciliationJob(targetDateStr?: st
   const discrepancy = Math.abs(platformReportedCount - crmLeadCount);
   const status = discrepancy > 0 ? 'alert_open' : 'ok';
 
-  let accountPropertyId = 'truongvanlong.19052005@gmail.com';
+  let accountPropertyId = 'GADS-UNCONFIGURED';
   try {
     const setting = await prisma.systemSetting.findUnique({
       where: { key: 'google_oauth_connection' },
@@ -252,6 +252,20 @@ export async function runGmailLeadSyncJob(force = false) {
   };
 }
 
+export async function runSessionCleanupJob() {
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const now = new Date();
+  const res = await prisma.userSession.deleteMany({
+    where: {
+      OR: [
+        { expiresAt: { lt: now } },
+        { revokedAt: { lt: cutoff } },
+      ],
+    },
+  });
+  return { deletedCount: res.count };
+}
+
 export type WorkerJobCode =
   | 'D3_SYNC_FULL'
   | 'GCLID_HOURLY_RETRY'
@@ -259,6 +273,7 @@ export type WorkerJobCode =
   | 'SEO_SCHEDULED_PUBLISH'
   | 'OVERDUE_QUOTE_REMINDER'
   | 'GMAIL_LEAD_SYNC'
+  | 'SESSION_CLEANUP'
   | 'ALL_JOBS';
 
 export interface AdapterConnectionStatusItem {
@@ -399,6 +414,9 @@ export async function executeWorkerJobByCode(
   } else if (jobCode === 'GMAIL_LEAD_SYNC') {
     const res = await runGmailLeadSyncJob(true);
     summary = res.message || `Quét ${res.scanned} thư Gmail -> Tạo ${res.created} Lead mới.`;
+  } else if (jobCode === 'SESSION_CLEANUP') {
+    const res = await runSessionCleanupJob();
+    summary = `Dọn dẹp phiên đăng nhập hết hạn/đã thu hồi -> Đã xóa ${res.deletedCount} bản ghi phiên cũ.`;
   } else {
     const [syncRes, gclidRes, seoRes, quoteRes] = await Promise.all([
       runScheduledD3SyncJob('LIGHT_1100'),

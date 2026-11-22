@@ -45,7 +45,7 @@ export async function GET(request: Request) {
         },
         { compact },
       ),
-      compact ? Promise.resolve([]) : listDispatchedExecutiveReports(25, auth.user.id),
+      compact ? Promise.resolve([]) : listDispatchedExecutiveReports(25, auth.user.id, auth.user.roleCode),
     ]);
     return jsonSuccess({
       ...data,

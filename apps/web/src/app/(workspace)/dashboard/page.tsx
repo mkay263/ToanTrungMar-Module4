@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   UI_VOCABULARY,
@@ -299,7 +299,17 @@ export default function DashboardPage() {
   }, [chartPoints]);
 
   const dq = report?.dataQualitySummary;
+  const pulseGradId = useId();
   const canViewLeads = user ? hasBaPermission(user.roleCode, 'LEAD_VIEW_OWN') : false;
+  const canViewSeo = user
+    ? hasBaPermission(user.roleCode, 'AI_MARKETING_SEO') ||
+      hasBaPermission(user.roleCode, 'TRACKING_ADS_OPTIMIZE')
+    : false;
+  const canViewTracking = user
+    ? hasBaPermission(user.roleCode, 'TRACKING_ADS_OPTIMIZE') || user.roleCode === 'BOD'
+    : false;
+  const canViewDesign = user ? hasBaPermission(user.roleCode, 'AI_DESIGN') : false;
+  const canViewSettings = user ? hasBaPermission(user.roleCode, 'SYSTEM_USER_ADMIN') : false;
 
   return (
     <div className="space-y-4">
@@ -406,7 +416,7 @@ export default function DashboardPage() {
                 Thiếu website: <strong className="tabular-nums">{dq.missingWebsiteCount}</strong>
               </Link>
               <Link
-                href="/settings?tab=sync"
+                href={canViewSettings ? '/settings?tab=sync' : `/reports?${scopeQueryForLinks}`}
                 className={`px-2.5 py-1 rounded-lg border font-semibold transition ${
                   dq.failingConnectionsCount > 0
                     ? 'bg-rose-50 border-rose-200 text-rose-700'
@@ -538,7 +548,7 @@ export default function DashboardPage() {
 
         {/* Mảng 2: Lưu lượng & SEO */}
         <Link
-          href={`/ads?${scopeQueryForLinks}`}
+          href={canViewSeo ? `/ads?${scopeQueryForLinks}` : `/reports?${scopeQueryForLinks}`}
           className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
         >
           <div className="flex items-center justify-between gap-2">
@@ -569,7 +579,7 @@ export default function DashboardPage() {
 
         {/* Mảng 3: Chiến dịch & Kênh thu hút */}
         <Link
-          href={`/tracking?${scopeQueryForLinks}`}
+          href={canViewTracking ? `/tracking?${scopeQueryForLinks}` : `/reports?${scopeQueryForLinks}`}
           className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
         >
           <div className="flex items-center justify-between gap-2">
@@ -605,7 +615,7 @@ export default function DashboardPage() {
 
         {/* Mảng 4: Thiết kế AI & Phối cảnh 3D */}
         <Link
-          href="/design"
+          href={canViewDesign ? '/design' : `/reports?${scopeQueryForLinks}`}
           className="group rounded-2xl bg-white border border-slate-200/90 hover:border-[#1E3A8A]/50 p-4 shadow-2xs flex flex-col justify-between gap-2 transition-all"
         >
           <div className="flex items-center justify-between gap-2">
@@ -794,7 +804,7 @@ export default function DashboardPage() {
                   aria-label="Biểu đồ Lead mới theo ngày"
                 >
                   <defs>
-                    <linearGradient id="dashPulseGrad" x1="0" y1="0" x2="0" y2="1">
+                    <linearGradient id={pulseGradId} x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="#2563EB" stopOpacity="0.28" />
                       <stop offset="100%" stopColor="#2563EB" stopOpacity="0.01" />
                     </linearGradient>
@@ -807,7 +817,7 @@ export default function DashboardPage() {
                     stroke="#E2E8F0"
                     strokeWidth="1"
                   />
-                  <path d={sparklineGeometry.areaPath} fill="url(#dashPulseGrad)" />
+                  <path d={sparklineGeometry.areaPath} fill={`url(#${pulseGradId})`} />
                   <path
                     d={sparklineGeometry.linePath}
                     fill="none"

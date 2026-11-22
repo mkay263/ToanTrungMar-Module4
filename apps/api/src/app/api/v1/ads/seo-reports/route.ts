@@ -26,6 +26,13 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requirePermissionSession(req, 'AI_MARKETING_SEO');
   if (!auth.ok) return auth.response;
+  if (auth.user.roleCode === 'ADS') {
+    return jsonError(
+      'FORBIDDEN_ADS_READONLY_SEO',
+      'Theo quy định UC05 A4, nhân sự Ads chỉ có quyền xem báo cáo từ khóa/SEO, không được tạo mới báo cáo SEO AI.',
+      403,
+    );
+  }
 
   try {
     const body = (await req.json()) as {
@@ -52,6 +59,13 @@ export async function POST(req: Request) {
 export async function PATCH(req: Request) {
   const auth = await requirePermissionSession(req, 'AI_MARKETING_SEO');
   if (!auth.ok) return auth.response;
+  if (auth.user.roleCode === 'ADS') {
+    return jsonError(
+      'FORBIDDEN_ADS_READONLY_SEO',
+      'Theo quy định UC05 A4, nhân sự Ads chỉ có quyền xem báo cáo SEO AI, không được chỉnh sửa nội dung SEO.',
+      403,
+    );
+  }
 
   try {
     const body = (await req.json()) as {

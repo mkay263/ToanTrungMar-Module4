@@ -223,6 +223,18 @@ export function applyHomographyPoint(H: number[], x: number, y: number): Point2D
   };
 }
 
+export function computeQuadToUnitHomography(quad: QuadCoordinatesDto): number[] | null {
+  return computeHomography3x3(
+    [quad.topLeft, quad.topRight, quad.bottomRight, quad.bottomLeft],
+    [
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      { x: 1, y: 1 },
+      { x: 0, y: 1 },
+    ]
+  );
+}
+
 /**
  * Exact 3x3 Projective Homography UV mapper for quadrilateral (px, py) in [0..100] space.
  * Replaces bilinear distortion under strong camera skew while keeping identical interface.
@@ -230,7 +242,8 @@ export function applyHomographyPoint(H: number[], x: number, y: number): Point2D
 export function mapPointToQuadHomographyUV(
   px: number,
   py: number,
-  quad: QuadCoordinatesDto
+  quad: QuadCoordinatesDto,
+  precomputedHinv?: number[] | null
 ): { inside: boolean; u: number; v: number; edgeDist: number } {
   const p00 = quad.topLeft;
   const p10 = quad.topRight;
@@ -246,15 +259,8 @@ export function mapPointToQuadHomographyUV(
   const allNegative = c0 <= 0.05 && c1 <= 0.05 && c2 <= 0.05 && c3 <= 0.05;
   const inside = allPositive || allNegative;
 
-  const Hinv = computeHomography3x3(
-    [p00, p10, p11, p01],
-    [
-      { x: 0, y: 0 },
-      { x: 1, y: 0 },
-      { x: 1, y: 1 },
-      { x: 0, y: 1 },
-    ]
-  );
+  const Hinv =
+    precomputedHinv !== undefined ? precomputedHinv : computeQuadToUnitHomography(quad);
 
   let u = 0.5;
   let v = 0.5;
@@ -452,6 +458,7 @@ export function generateFeatheredAlphaMaskPng(params: {
   const usePolygon =
     params.shapeType === 'free_polygon' && params.polygonPoints && params.polygonPoints.length >= 3;
   const featherU = featherPx / Math.max(16, Math.min(width, height));
+  const Hinv = computeQuadToUnitHomography(params.quad);
 
   for (let y = 0; y < height; y++) {
     const py = (y / Math.max(1, height - 1)) * 100;
@@ -468,24 +475,9 @@ export function generateFeatheredAlphaMaskPng(params: {
         continue;
       }
 
-      const mapped = mapPointToQuadHomographyUV(px, py, params.quad);
+      const mapped = mapPointToQuadHomographyUV(px, py, params.quad, Hinv);
+      const uv = Hinv ? applyHomographyPoint(Hinv, px, py) : { x: mapped.u, y: mapped.v };
       if (isCircle) {
-        // Compute UV via homography directly even slightly outside quad for feathering
-        const Hinv = computeHomography3x3(
-          [
-            params.quad.topLeft,
-            params.quad.topRight,
-            params.quad.bottomRight,
-            params.quad.bottomLeft,
-          ],
-          [
-            { x: 0, y: 0 },
-            { x: 1, y: 0 },
-            { x: 1, y: 1 },
-            { x: 0, y: 1 },
-          ]
-        );
-        const uv = Hinv ? applyHomographyPoint(Hinv, px, py) : { x: mapped.u, y: mapped.v };
         const distCenter = Math.hypot(uv.x - 0.5, uv.y - 0.5);
         if (distCenter <= 0.5) {
           rgba[idx + 3] = 0;
@@ -499,21 +491,6 @@ export function generateFeatheredAlphaMaskPng(params: {
       }
 
       // Compute signed UV distance from potentially rounded rectangle in UV space
-      const Hinv = computeHomography3x3(
-        [
-          params.quad.topLeft,
-          params.quad.topRight,
-          params.quad.bottomRight,
-          params.quad.bottomLeft,
-        ],
-        [
-          { x: 0, y: 0 },
-          { x: 1, y: 0 },
-          { x: 1, y: 1 },
-          { x: 0, y: 1 },
-        ]
-      );
-      const uv = Hinv ? applyHomographyPoint(Hinv, px, py) : { x: mapped.u, y: mapped.v };
       const qx = Math.abs(uv.x - 0.5) - (0.5 - cornerR);
       const qy = Math.abs(uv.y - 0.5) - (0.5 - cornerR);
       const signedDist =

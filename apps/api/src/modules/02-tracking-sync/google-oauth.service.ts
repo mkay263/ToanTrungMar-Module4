@@ -10,6 +10,7 @@ import type {
   SelectGoogleResourcesDto,
 } from '@toantrung/contracts';
 import { encryptSecret, decryptSecret, maskSecret } from '../../core/security/vault';
+import { safeSecretEquals } from '../../core/http';
 import { getCanonicalDateRange, countInclusiveCalendarDays } from '../../core/reporting-dates';
 import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
 import { invalidateConfiguredWebsitesCache } from '../../core/website-catalog';
@@ -744,8 +745,95 @@ export async function saveSelectedResources(input: {
   return getGoogleOAuthStatusDto();
 }
 
+const OAUTH_STATE_MAX_AGE_MS = 15 * 60 * 1000;
+
+function getOAuthStateHmacSecret(): string {
+  return (
+    process.env.SESSION_SECRET ||
+    process.env.VAULT_MASTER_KEY ||
+    'tt-v2-google-oauth-state-hmac-2026'
+  );
+}
+
+export function sanitizeOAuthReturnPath(rawPath?: string | null): string {
+  if (!rawPath || typeof rawPath !== 'string') return '/tracking';
+  const trimmed = rawPath.trim();
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//') || /[\r\n\0\\]/.test(trimmed)) {
+    return '/tracking';
+  }
+  const pathOnly = trimmed.split('?')[0].split('#')[0];
+  if (!/^\/[a-zA-Z0-9/_-]*$/.test(pathOnly)) {
+    return '/tracking';
+  }
+  return pathOnly || '/tracking';
+}
+
+export function signOAuthStatePayload(returnPath: string): string {
+  const safePath = sanitizeOAuthReturnPath(returnPath);
+  const payloadB64 = Buffer.from(
+    JSON.stringify({
+      returnPath: safePath,
+      nonce: crypto.randomBytes(12).toString('hex'),
+      time: Date.now(),
+    }),
+  ).toString('base64url');
+  const sigB64 = crypto
+    .createHmac('sha256', getOAuthStateHmacSecret())
+    .update(payloadB64)
+    .digest('base64url');
+  return `${payloadB64}.${sigB64}`;
+}
+
+export function verifySignedOAuthState(
+  stateStr?: string | null,
+): { valid: boolean; returnPath: string; reason?: string } {
+  if (!stateStr || typeof stateStr !== 'string') {
+    return { valid: false, returnPath: '/tracking', reason: 'MISSING_OAUTH_STATE' };
+  }
+  const parts = stateStr.split('.');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return { valid: false, returnPath: '/tracking', reason: 'UNSIGNED_OAUTH_STATE' };
+  }
+  const [payloadB64, providedSig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', getOAuthStateHmacSecret())
+    .update(payloadB64)
+    .digest('base64url');
+  if (!safeSecretEquals(providedSig, expectedSig)) {
+    return { valid: false, returnPath: '/tracking', reason: 'INVALID_OAUTH_STATE_SIGNATURE' };
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as {
+      returnPath?: string;
+      time?: number;
+    };
+    const safeReturnPath = sanitizeOAuthReturnPath(parsed.returnPath);
+    if (
+      typeof parsed.time !== 'number' ||
+      !Number.isFinite(parsed.time) ||
+      Math.abs(Date.now() - parsed.time) > OAUTH_STATE_MAX_AGE_MS
+    ) {
+      return { valid: false, returnPath: safeReturnPath, reason: 'EXPIRED_OAUTH_STATE' };
+    }
+    return { valid: true, returnPath: safeReturnPath };
+  } catch {
+    return { valid: false, returnPath: '/tracking', reason: 'MALFORMED_OAUTH_STATE' };
+  }
+}
+
+export function redactGoogleSecretsFromText(message: string): string {
+  if (!message) return '';
+  return message
+    .replace(/ya29\.[a-zA-Z0-9_-]+/g, '[REDACTED_ACCESS_TOKEN]')
+    .replace(/1\/\/[a-zA-Z0-9_-]+/g, '[REDACTED_REFRESH_TOKEN]')
+    .replace(/GOCSPX-[a-zA-Z0-9_-]+/g, '[REDACTED_CLIENT_SECRET]')
+    .replace(/(Bearer\s+)[a-zA-Z0-9._-]+/gi, '$1[REDACTED]')
+    .replace(/((?:access_token|refresh_token|client_secret|developer_token)["'=:\s]+)[^\s"&,}]+/gi, '$1[REDACTED]');
+}
+
 export async function buildGoogleAuthorizeUrl(origin: string, returnPath = '/tracking') {
   const cfg = await getGoogleClientConfig();
+  const safePath = sanitizeOAuthReturnPath(returnPath);
   if (!cfg) {
     return {
       needsConfig: true,
@@ -755,13 +843,7 @@ export async function buildGoogleAuthorizeUrl(origin: string, returnPath = '/tra
   }
 
   const redirectUri = `${origin}/api/v1/auth/google/callback`;
-  const statePayload = Buffer.from(
-    JSON.stringify({
-      returnPath: returnPath.startsWith('/') ? returnPath : '/tracking',
-      nonce: crypto.randomBytes(8).toString('hex'),
-      time: Date.now(),
-    }),
-  ).toString('base64url');
+  const statePayload = signOAuthStatePayload(safePath);
 
   const scopes = [
     'openid',
@@ -792,6 +874,10 @@ export async function buildGoogleAuthorizeUrl(origin: string, returnPath = '/tra
 }
 
 export async function handleGoogleOAuthCallback(code: string, origin: string, stateStr?: string | null) {
+  const verifiedState = verifySignedOAuthState(stateStr);
+  if (!verifiedState.valid) {
+    throw new Error(`Phiên ủy quyền Google OAuth không hợp lệ hoặc đã hết hạn (${verifiedState.reason}). Vui lòng thực hiện kết nối lại.`);
+  }
   const cfg = await getGoogleClientConfig();
   if (!cfg) {
     throw new Error('Chưa cấu hình Google Client ID & Secret trên hệ thống.');
@@ -813,7 +899,7 @@ export async function handleGoogleOAuthCallback(code: string, origin: string, st
   });
 
   if (!tokenResp.ok) {
-    const errTxt = await tokenResp.text();
+    const errTxt = redactGoogleSecretsFromText(await tokenResp.text());
     throw new Error(`Google từ chối cấp mã truy cập: ${errTxt.slice(0, 200)}`);
   }
 
@@ -893,18 +979,7 @@ export async function handleGoogleOAuthCallback(code: string, origin: string, st
     // non-fatal
   }
 
-  // Parse state returnPath
-  let returnPath = '/tracking';
-  if (stateStr) {
-    try {
-      const parsed = JSON.parse(Buffer.from(stateStr, 'base64url').toString('utf8'));
-      if (parsed.returnPath && typeof parsed.returnPath === 'string' && parsed.returnPath.startsWith('/')) {
-        returnPath = parsed.returnPath;
-      }
-    } catch {
-      // ignore
-    }
-  }
+  const returnPath = verifiedState.returnPath;
 
   return { email, name, returnPath };
 }

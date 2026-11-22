@@ -52,8 +52,12 @@ export async function getM04ResultsReportSpec(
   const scope = await resolveDashboardScope(params);
   const anonymized = shouldAnonymizeLeadForRole(user.roleCode) || user.roleCode === 'DESIGNER';
 
-  const roleLeadFilter =
-    user.roleCode === 'SALES' ? { assignedSalesId: user.id } : {};
+  const roleLeadFilter: Record<string, unknown> =
+    user.roleCode === 'SALES'
+      ? { assignedSalesId: user.id }
+      : user.roleCode === 'DESIGNER'
+        ? { designRequests: { some: {} } }
+        : {};
 
   const cacheResult = await getOrComputeScopedCache<M04ResultsReportDto>({
     key: `m04-spec:${user.roleCode === 'SALES' ? user.id : user.roleCode}:${anonymized ? 'anon' : 'full'}:${scope.websiteId}:${scope.preset}:${scope.startDateStr}:${scope.endDateStr}:${params?.page || 1}:${params?.pageSize || 20}:${params?.detailPage || 1}:${params?.detailPageSize || 25}`,

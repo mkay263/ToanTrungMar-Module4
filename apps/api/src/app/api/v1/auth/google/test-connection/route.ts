@@ -1,7 +1,10 @@
 import { hasBaPermission } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
-import { testGoogleConnection } from '../../../../../../modules/02-tracking-sync/google-oauth.service';
+import {
+  redactGoogleSecretsFromText,
+  testGoogleConnection,
+} from '../../../../../../modules/02-tracking-sync/google-oauth.service';
 
 export const dynamic = 'force-dynamic';
 
@@ -27,7 +30,9 @@ export async function POST(req: Request) {
   } catch (err) {
     return jsonError(
       'GOOGLE_TEST_CONNECTION_ERROR',
-      err instanceof Error ? err.message : 'Lỗi khi kiểm tra kết nối Google API.',
+      redactGoogleSecretsFromText(
+        err instanceof Error ? err.message : 'Lỗi khi kiểm tra kết nối Google API.',
+      ),
       500,
     );
   }

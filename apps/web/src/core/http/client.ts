@@ -277,6 +277,15 @@ async function performNetworkFetch<T>(
     | null;
 
   if (!res.ok || !payload || 'error' in payload) {
+    if (
+      res.status === 401 &&
+      typeof window !== 'undefined' &&
+      path !== '/api/v1/auth/login' &&
+      path !== '/api/v1/auth/me'
+    ) {
+      clearAllApiCache();
+      window.dispatchEvent(new CustomEvent('tt-session-unauthorized'));
+    }
     const errObj = payload && 'error' in payload ? payload.error : null;
     throw new ApiClientError(
       errObj?.code || 'HTTP_ERROR',

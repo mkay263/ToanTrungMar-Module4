@@ -2136,9 +2136,7 @@ export function LeadsWorkspace() {
 
       const suspectTag = editTickSuspect
         ? '[NGHI VẤN: Đánh dấu kiểm tra dò giá / trùng]'
-        : selectedLead.isPriceCheckSuspect
-          ? '[BỎ NGHI VẤN]'
-          : '';
+        : '';
 
       await apiRequest(`/api/v1/leads/${selectedLead.id}`, {
         method: 'PATCH',
@@ -2627,7 +2625,7 @@ export function LeadsWorkspace() {
           reason: null,
           noteContent: noteText,
           markQuoteResponded: toStatus === 'won',
-          bypassPriceCheckConfirmed: true,
+          bypassPriceCheckConfirmed: false,
         },
       });
       setFeedbackMsg(
@@ -4877,7 +4875,7 @@ export function LeadsWorkspace() {
                                     reason: 'Trùng Lead',
                                     noteContent: `Đóng nhanh theo Kịch bản 1 (UC01 1.5) do trùng với ${evalResult.matchedCustomerLead?.leadCode || investigativeLead.duplicateOfLeadCode || 'Lead đang mở'}`,
                                     markQuoteResponded: false,
-                                    bypassPriceCheckConfirmed: true,
+                                    bypassPriceCheckConfirmed: false,
                                   },
                                 });
                                 setFeedbackMsg(

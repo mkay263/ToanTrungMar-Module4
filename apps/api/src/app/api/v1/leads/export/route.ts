@@ -37,20 +37,26 @@ function letterToColIndex(letters: string): number {
   return col - 1;
 }
 
+const MAX_LEAD_XLSX_ZIP_ENTRIES = 200;
+const MAX_LEAD_XLSX_ENTRY_BYTES = 10 * 1024 * 1024;
+const MAX_LEAD_XLSX_TOTAL_BYTES = 25 * 1024 * 1024;
+
 /**
- * Pure Node.js PKZip extractor for .xlsx workbooks (zero external dependencies)
+ * Pure Node.js PKZip extractor for .xlsx workbooks (zero external dependencies, with ZIP bomb protection)
  */
 function extractZipEntries(buf: Buffer): Map<string, string> {
   const entries = new Map<string, string>();
   let offset = 0;
+  let totalInflatedBytes = 0;
 
-  while (offset + 30 <= buf.length) {
+  while (offset + 30 <= buf.length && entries.size < MAX_LEAD_XLSX_ZIP_ENTRIES) {
     const sig = buf.readUInt32LE(offset);
     if (sig !== 0x04034b50) break; // Local file header signature
 
     const flags = buf.readUInt16LE(offset + 6);
     const method = buf.readUInt16LE(offset + 8);
     const compressedSize = buf.readUInt32LE(offset + 18);
+    const uncompressedSize = buf.readUInt32LE(offset + 22);
     const nameLen = buf.readUInt16LE(offset + 26);
     const extraLen = buf.readUInt16LE(offset + 28);
     const name = buf.subarray(offset + 30, offset + 30 + nameLen).toString('utf8');
@@ -60,13 +66,22 @@ function extractZipEntries(buf: Buffer): Map<string, string> {
     if ((flags & 0x08) !== 0 && compressedSize === 0) {
       break;
     }
+    if (uncompressedSize > MAX_LEAD_XLSX_ENTRY_BYTES) {
+      throw new Error('Tệp Excel tải lên vượt quá giới hạn giải nén an toàn (ZIP bomb protection).');
+    }
 
     const compressedData = buf.subarray(dataStart, dataStart + compressedSize);
     try {
       if (method === 0) {
+        totalInflatedBytes += compressedData.length;
+        if (totalInflatedBytes > MAX_LEAD_XLSX_TOTAL_BYTES) break;
         entries.set(name, compressedData.toString('utf8'));
       } else if (method === 8) {
-        const inflated = zlib.inflateRawSync(compressedData);
+        const inflated = zlib.inflateRawSync(compressedData, {
+          maxOutputLength: MAX_LEAD_XLSX_ENTRY_BYTES,
+        });
+        totalInflatedBytes += inflated.length;
+        if (totalInflatedBytes > MAX_LEAD_XLSX_TOTAL_BYTES) break;
         entries.set(name, inflated.toString('utf8'));
       }
     } catch {
@@ -80,26 +95,41 @@ function extractZipEntries(buf: Buffer): Map<string, string> {
   if (entries.size === 0) {
     for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
       if (buf.readUInt32LE(i) === 0x06054b50) {
-        const totalEntries = buf.readUInt16LE(i + 10);
+        const totalEntries = Math.min(MAX_LEAD_XLSX_ZIP_ENTRIES, buf.readUInt16LE(i + 10));
         let cdOffset = buf.readUInt32LE(i + 16);
         for (let e = 0; e < totalEntries && cdOffset + 46 <= buf.length; e++) {
           if (buf.readUInt32LE(cdOffset) !== 0x02014b50) break;
           const method = buf.readUInt16LE(cdOffset + 10);
           const compSize = buf.readUInt32LE(cdOffset + 20);
+          const uncompSize = buf.readUInt32LE(cdOffset + 24);
           const nameLen = buf.readUInt16LE(cdOffset + 28);
           const extraLen = buf.readUInt16LE(cdOffset + 30);
           const commentLen = buf.readUInt16LE(cdOffset + 32);
           const lfhOffset = buf.readUInt32LE(cdOffset + 42);
           const name = buf.subarray(cdOffset + 46, cdOffset + 46 + nameLen).toString('utf8');
 
-          if (lfhOffset + 30 <= buf.length && buf.readUInt32LE(lfhOffset) === 0x04034b50) {
+          if (
+            uncompSize <= MAX_LEAD_XLSX_ENTRY_BYTES &&
+            lfhOffset + 30 <= buf.length &&
+            buf.readUInt32LE(lfhOffset) === 0x04034b50
+          ) {
             const lfhNameLen = buf.readUInt16LE(lfhOffset + 26);
             const lfhExtraLen = buf.readUInt16LE(lfhOffset + 28);
             const dataStart = lfhOffset + 30 + lfhNameLen + lfhExtraLen;
             const compData = buf.subarray(dataStart, dataStart + compSize);
             try {
-              if (method === 0) entries.set(name, compData.toString('utf8'));
-              else if (method === 8) entries.set(name, zlib.inflateRawSync(compData).toString('utf8'));
+              if (method === 0) {
+                totalInflatedBytes += compData.length;
+                if (totalInflatedBytes > MAX_LEAD_XLSX_TOTAL_BYTES) break;
+                entries.set(name, compData.toString('utf8'));
+              } else if (method === 8) {
+                const inflated = zlib.inflateRawSync(compData, {
+                  maxOutputLength: MAX_LEAD_XLSX_ENTRY_BYTES,
+                });
+                totalInflatedBytes += inflated.length;
+                if (totalInflatedBytes > MAX_LEAD_XLSX_TOTAL_BYTES) break;
+                entries.set(name, inflated.toString('utf8'));
+              }
             } catch {
               // ignore
             }
@@ -600,10 +630,11 @@ export async function GET(request: Request) {
               l.spamStatus !== 'NONE'
                 ? `Spam (${l.spamReason || ''})`
                 : (PIPELINE_STATUS_LABELS as Record<string, string>)[l.pipelineStatus] ||
-                  l.pipelineStatus,
+                l.pipelineStatus,
             duplicateBadge: classifyDuplicateForExport(l),
-            noteOrReason:
-              l.lostReason ||
+            noteOrReason: isAnonymized
+              ? l.lostReason || (l.spamStatus !== 'NONE' ? 'Đã loại trừ spam' : '—')
+              : l.lostReason ||
               l.reopenReason ||
               l.spamReason ||
               l.customProductNote ||

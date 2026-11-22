@@ -4,6 +4,7 @@ import { requireAuthenticatedSession } from '../../../../../../core/permissions'
 import {
   syncAllGoogleDataAcrossModules,
   getGoogleOAuthStatusDto,
+  redactGoogleSecretsFromText,
 } from '../../../../../../modules/02-tracking-sync/google-oauth.service';
 
 export const dynamic = 'force-dynamic';
@@ -41,7 +42,9 @@ export async function POST(req: Request) {
   } catch (err) {
     return jsonError(
       'GOOGLE_SYNC_ERROR',
-      err instanceof Error ? err.message : 'Không thể thực hiện đồng bộ dữ liệu Google.',
+      redactGoogleSecretsFromText(
+        err instanceof Error ? err.message : 'Không thể thực hiện đồng bộ dữ liệu Google.',
+      ),
       500,
     );
   }

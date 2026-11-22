@@ -735,6 +735,7 @@ export function GoogleAdsDateRangePicker({
                       onChange={(e) => setStartInputText(e.target.value)}
                       onBlur={() => commitTextInputs('start', startInputText)}
                       onKeyDown={(e) => {
+                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                         if (e.key === 'Enter') commitTextInputs('start', startInputText);
                       }}
                       placeholder="dd/mm/yyyy"
@@ -752,6 +753,7 @@ export function GoogleAdsDateRangePicker({
                       onChange={(e) => setEndInputText(e.target.value)}
                       onBlur={() => commitTextInputs('end', endInputText)}
                       onKeyDown={(e) => {
+                        if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                         if (e.key === 'Enter') commitTextInputs('end', endInputText);
                       }}
                       placeholder="dd/mm/yyyy"

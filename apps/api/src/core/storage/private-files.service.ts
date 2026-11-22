@@ -77,6 +77,45 @@ function detectMimeType(buffer: Buffer, declared: string, ext: string): string {
   return declared || 'application/octet-stream';
 }
 
+const BLOCKED_UPLOAD_EXTENSIONS = new Set([
+  '.html',
+  '.htm',
+  '.xhtml',
+  '.svg',
+  '.svgz',
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.jsx',
+  '.ts',
+  '.tsx',
+  '.php',
+  '.sh',
+  '.bat',
+  '.cmd',
+  '.ps1',
+  '.exe',
+  '.dll',
+  '.msi',
+  '.vbs',
+  '.jar',
+]);
+
+function hasDisguisedExecutableMarkup(buffer: Buffer): boolean {
+  const head = buffer
+    .subarray(0, Math.min(buffer.length, 512))
+    .toString('utf8')
+    .replace(/\0/g, '')
+    .toLowerCase();
+  return (
+    head.includes('<svg') ||
+    head.includes('<script') ||
+    head.includes('<!doctype html') ||
+    head.includes('<html') ||
+    head.includes('javascript:')
+  );
+}
+
 export function savePrivateBusinessFile(input: SavePrivateFileInput): SavedPrivateFile {
   if (!input.fileBuffer || input.fileBuffer.length === 0) {
     throw new Error('Tệp tải lên không được rỗng.');
@@ -89,6 +128,19 @@ export function savePrivateBusinessFile(input: SavePrivateFileInput): SavedPriva
   const rawExt = input.originalFileName ? path.extname(input.originalFileName) : '.png';
   const baseName = input.originalFileName ? path.basename(input.originalFileName, rawExt) : 'file';
   const cleanExt = rawExt.toLowerCase() || '.bin';
+
+  if (
+    BLOCKED_UPLOAD_EXTENSIONS.has(cleanExt) ||
+    /image\/svg\+xml|text\/html|application\/javascript|text\/javascript/i.test(
+      input.declaredMimeType || '',
+    ) ||
+    hasDisguisedExecutableMarkup(input.fileBuffer)
+  ) {
+    throw new Error(
+      'Định dạng tệp không được phép tải lên vì lý do bảo mật (chặn SVG/HTML/Script thực thi).',
+    );
+  }
+
   const cleanBase = sanitizeFileName(baseName);
   const sanitizedFileName = `${cleanBase}${cleanExt}`;
 
@@ -118,24 +170,38 @@ export function savePrivateBusinessFile(input: SavePrivateFileInput): SavedPriva
 }
 
 export function resolvePrivateBusinessFilePath(storageObjectKeyOrPath: string): string | null {
-  if (!storageObjectKeyOrPath) return null;
+  if (!storageObjectKeyOrPath || typeof storageObjectKeyOrPath !== 'string') return null;
 
-  // Prevent path traversal
-  const normalizedKey = storageObjectKeyOrPath.replace(/\\/g, '/');
-  if (normalizedKey.includes('../') || normalizedKey.includes('/..')) {
+  const normalizedKey = storageObjectKeyOrPath.replace(/\\/g, '/').trim();
+  if (
+    !normalizedKey ||
+    normalizedKey.includes('\0') ||
+    normalizedKey.startsWith('/') ||
+    /^[a-zA-Z]:/.test(normalizedKey) ||
+    normalizedKey.split('/').includes('..') ||
+    normalizedKey.split('/').includes('.')
+  ) {
     return null;
   }
 
-  const fullPath = path.resolve(APP_CONFIG.getStorageRoot(), normalizedKey);
-  if (fs.existsSync(fullPath)) {
+  const rootResolved = path.resolve(APP_CONFIG.getStorageRoot());
+  const fullPath = path.resolve(rootResolved, normalizedKey);
+  if (!fullPath.startsWith(rootResolved + path.sep)) {
+    return null;
+  }
+
+  if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
     return fullPath;
   }
 
   const base = path.basename(normalizedKey);
+  if (!base || base === '.' || base === '..' || !/^[a-zA-Z0-9._-]+$/.test(base)) {
+    return null;
+  }
   const candidateBuckets = ['leads', 'design', 'avatars', 'branding'];
   for (const b of candidateBuckets) {
-    const p = path.join(APP_CONFIG.getStorageRoot(), b, base);
-    if (fs.existsSync(p)) {
+    const p = path.resolve(rootResolved, b, base);
+    if (p.startsWith(rootResolved + path.sep) && fs.existsSync(p) && fs.statSync(p).isFile()) {
       return p;
     }
   }
@@ -162,12 +228,22 @@ export function readPrivateBusinessFile(storageObjectKeyOrPath: string): ReadPri
 }
 
 export function deletePrivateBusinessFile(storageObjectKeyOrPath: string): void {
-  if (!storageObjectKeyOrPath) return;
-  const normalizedKey = storageObjectKeyOrPath.replace(/\\/g, '/');
-  if (normalizedKey.includes('../') || normalizedKey.includes('/..')) return;
+  if (!storageObjectKeyOrPath || typeof storageObjectKeyOrPath !== 'string') return;
+  const normalizedKey = storageObjectKeyOrPath.replace(/\\/g, '/').trim();
+  if (
+    !normalizedKey ||
+    normalizedKey.includes('\0') ||
+    normalizedKey.startsWith('/') ||
+    /^[a-zA-Z]:/.test(normalizedKey) ||
+    normalizedKey.split('/').includes('..')
+  ) {
+    return;
+  }
   try {
-    const fullPath = path.resolve(APP_CONFIG.getStorageRoot(), normalizedKey);
-    if (fs.existsSync(fullPath)) {
+    const rootResolved = path.resolve(APP_CONFIG.getStorageRoot());
+    const fullPath = path.resolve(rootResolved, normalizedKey);
+    if (!fullPath.startsWith(rootResolved + path.sep)) return;
+    if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
       fs.unlinkSync(fullPath);
     }
   } catch {

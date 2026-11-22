@@ -55,12 +55,16 @@ async function handleGenerateDocx(
       },
     });
 
+    const safeWebsiteSlug = websiteId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'all';
+    const safeDateStamp = String(dateStamp || '').replace(/[^a-zA-Z0-9._-]/g, '_');
+
     return new Response(new Uint8Array(docxBuffer), {
       status: 200,
       headers: {
         'Content-Type':
           'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        'Content-Disposition': `attachment; filename="BaoCao_ToanTrung_${websiteId}_${dateStamp}.docx"`,
+        'Content-Disposition': `attachment; filename="BaoCao_ToanTrung_${safeWebsiteSlug}_${safeDateStamp}.docx"`,
+        'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       },
     });

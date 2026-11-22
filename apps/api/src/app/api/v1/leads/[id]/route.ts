@@ -91,6 +91,13 @@ export async function PATCH(
     }
 
     if (action === 'review_spam') {
+      if (!['ADMIN', 'BOD', 'SALES_LEAD', 'MKT_LEAD'].includes(auth.user.roleCode)) {
+        return jsonError(
+          'FORBIDDEN_SPAM_REVIEW',
+          'Chỉ Quản lý Kinh doanh, Trưởng phòng Marketing, Ban Giám đốc hoặc Quản trị viên mới có quyền duyệt thẩm tra Spam.',
+          403,
+        );
+      }
       const decision = raw.decision === 'restore_lead' ? 'RESTORE_VALID' : 'CONFIRM_SPAM';
       const updated = await reviewPendingSpamLead(
         auth.user,
@@ -148,6 +155,7 @@ export async function PATCH(
       if (!existing) {
         return jsonError('NOT_FOUND', 'Không tìm thấy hồ sơ Lead.', 404);
       }
+      assertLeadMutationScope(auth.user, existing);
       const reminderLabel = String(raw.reminderLabel || 'Nhắc xử lý hồ sơ Lead').trim();
       const customMessage = String(raw.message || '').trim();
       const noteText = customMessage

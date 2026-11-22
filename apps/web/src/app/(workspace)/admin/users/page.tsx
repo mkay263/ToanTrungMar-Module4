@@ -152,12 +152,14 @@ export default function AdminUsersPage() {
   const [department, setDepartment] = useState<DepartmentCode>('sales');
   const [initialPassword, setInitialPassword] = useState('');
   const [creating, setCreating] = useState(false);
+  const [createDialogError, setCreateDialogError] = useState<string | null>(null);
 
   // Edit user modal state
   const [userToEdit, setUserToEdit] = useState<AdminUserDto | null>(null);
   const [editRoleCode, setEditRoleCode] = useState<RoleCode>('SALES');
   const [editDepartment, setEditDepartment] = useState<DepartmentCode>('sales');
   const [savingEdit, setSavingEdit] = useState(false);
+  const [editDialogError, setEditDialogError] = useState<string | null>(null);
 
   // Delete confirmation modal state
   const [userToDelete, setUserToDelete] = useState<AdminUserDto | null>(null);
@@ -249,6 +251,7 @@ export default function AdminUsersPage() {
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setFeedback(null);
+    setCreateDialogError(null);
     setCreating(true);
     try {
       await apiRequest('/api/v1/users', {
@@ -274,9 +277,11 @@ export default function AdminUsersPage() {
       });
       await loadUsers(true);
     } catch (err) {
+      const msg = err instanceof ApiClientError ? err.message : 'Không thể tạo tài khoản.';
+      setCreateDialogError(msg);
       setFeedback({
         type: 'err',
-        text: err instanceof ApiClientError ? err.message : 'Không thể tạo tài khoản.',
+        text: msg,
       });
     } finally {
       setCreating(false);
@@ -828,6 +833,15 @@ export default function AdminUsersPage() {
                 />
               </div>
 
+              {createDialogError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold"
+                >
+                  {createDialogError}
+                </div>
+              )}
+
               <div className="pt-2 flex items-center justify-end gap-2.5">
                 <button
                   type="button"
@@ -919,13 +933,24 @@ export default function AdminUsersPage() {
                   ))}
                 </select>
               </div>
+              {editDialogError && (
+                <div
+                  role="alert"
+                  className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-semibold"
+                >
+                  {editDialogError}
+                </div>
+              )}
             </div>
 
             <div className="pt-2 flex items-center justify-end gap-2.5 text-xs">
               <button
                 type="button"
                 disabled={savingEdit}
-                onClick={() => setUserToEdit(null)}
+                onClick={() => {
+                  setEditDialogError(null);
+                  setUserToEdit(null);
+                }}
                 className="h-9 px-4 rounded-xl border border-slate-200 font-bold text-slate-600 hover:bg-slate-50"
               >
                 Hủy
@@ -935,6 +960,7 @@ export default function AdminUsersPage() {
                 disabled={savingEdit}
                 onClick={async () => {
                   setSavingEdit(true);
+                  setEditDialogError(null);
                   try {
                     await apiRequest('/api/v1/users', {
                       method: 'PATCH',
@@ -952,12 +978,14 @@ export default function AdminUsersPage() {
                     setUserToEdit(null);
                     await loadUsers(true);
                   } catch (err) {
+                    const msg =
+                      err instanceof ApiClientError
+                        ? err.message
+                        : 'Lỗi cập nhật thông tin nhân sự.';
+                    setEditDialogError(msg);
                     setFeedback({
                       type: 'err',
-                      text:
-                        err instanceof ApiClientError
-                          ? err.message
-                          : 'Lỗi cập nhật thông tin nhân sự.',
+                      text: msg,
                     });
                   } finally {
                     setSavingEdit(false);

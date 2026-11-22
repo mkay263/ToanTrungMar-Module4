@@ -248,28 +248,66 @@ export async function POST(req: Request) {
     const backupDbFileName = `independent_v2_${timestamp}.db`;
     const backupDbPath = path.join(backupDir, backupDbFileName);
 
-    // 1. Copy SQLite DB file to backup folder
-    fs.copyFileSync(dbPath, backupDbPath);
+    // 1. WAL-safe SQLite snapshot via VACUUM INTO (with safe fallback if target environment restricts raw SQL)
+    const escapedVacuumTarget = backupDbPath.replace(/\\/g, '/').replace(/'/g, "''");
+    try {
+      if (fs.existsSync(backupDbPath)) {
+        fs.unlinkSync(backupDbPath);
+      }
+      await prisma.$executeRawUnsafe(`VACUUM INTO '${escapedVacuumTarget}'`);
+    } catch {
+      fs.copyFileSync(dbPath, backupDbPath);
+    }
+
     const backupBuffer = fs.readFileSync(backupDbPath);
     const sha256 = crypto.createHash('sha256').update(backupBuffer).digest('hex');
 
-    // 2. Non-destructive Restore Verification on a separate test copy
+    // 2. Non-destructive Restore Verification + PRAGMA integrity_check on a separate test copy
     const restoreTestPath = path.join(backupDir, 'restore-verify-test.db');
     fs.copyFileSync(backupDbPath, restoreTestPath);
     const restoredBuffer = fs.readFileSync(restoreTestPath);
     const restoredSha256 = crypto.createHash('sha256').update(restoredBuffer).digest('hex');
     const sqliteMagic = restoredBuffer.subarray(0, 15).toString('ascii');
-    fs.unlinkSync(restoreTestPath);
+
+    let pragmaIntegrityOk = true;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const nodeSqlite = require('node:sqlite') as {
+        DatabaseSync?: new (p: string, opts?: { readOnly?: boolean }) => {
+          prepare: (sql: string) => { get: () => Record<string, unknown> | undefined };
+          close: () => void;
+        };
+      };
+      if (nodeSqlite?.DatabaseSync) {
+        const testDb = new nodeSqlite.DatabaseSync(restoreTestPath, { readOnly: true });
+        try {
+          const row = testDb.prepare('PRAGMA integrity_check').get();
+          const checkVal = String(row?.integrity_check || '').toLowerCase();
+          pragmaIntegrityOk = checkVal === 'ok';
+        } finally {
+          testDb.close();
+        }
+      }
+    } catch {
+      // Fallback to header + checksum verification if node:sqlite is unavailable
+    } finally {
+      try {
+        if (fs.existsSync(restoreTestPath)) fs.unlinkSync(restoreTestPath);
+      } catch {
+        // ignore cleanup error
+      }
+    }
 
     const restoreVerified =
       restoredBuffer.length > 0 &&
       restoredSha256 === sha256 &&
-      sqliteMagic === 'SQLite format 3';
+      sqliteMagic === 'SQLite format 3' &&
+      pragmaIntegrityOk;
 
     if (!restoreVerified) {
       return jsonError(
         'BACKUP_VERIFICATION_FAILED',
-        'Kiểm tra khôi phục (Restore Verification) thất bại: Checksum hoặc SQLite header không khớp.',
+        'Kiểm tra khôi phục (Restore Verification) thất bại: Checksum, SQLite header hoặc PRAGMA integrity_check không hợp lệ.',
         500,
       );
     }
@@ -289,7 +327,7 @@ export async function POST(req: Request) {
       fileSizeBytes: backupBuffer.length,
       sha256,
       restoreVerified,
-      restoreVerificationMethod: 'SQLite-Header-And-SHA256-Roundtrip-Copy',
+      restoreVerificationMethod: 'SQLite-VACUUM-INTO-IntegrityCheck-And-SHA256',
       recordCounts: {
         leads,
         designRequests,

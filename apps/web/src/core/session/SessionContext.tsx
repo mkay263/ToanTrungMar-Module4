@@ -144,6 +144,9 @@ function playGentleNotificationChime() {
     gain2.connect(ctx.destination);
     osc2.start(now + 0.09);
     osc2.stop(now + 0.28);
+    window.setTimeout(() => {
+      void ctx.close().catch(() => {});
+    }, 450);
   } catch {
     // Ignore autoplay restriction or missing Web Audio support
   }
@@ -287,7 +290,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const surfaceNewNotifications = async () => {
       try {
         const res = await apiRequest<{ items: NotificationDto[]; unreadCount: number }>(
-          '/api/v1/notifications',
+          '/api/v1/notifications?summary=1',
           { skipCache: true },
         );
         if (cancelled) return;
@@ -298,8 +301,9 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         for (const item of items) {
           seenNotificationIdsRef.current.add(item.id);
         }
-        setUnreadCount(res.unreadCount ?? 0);
-        prevUnreadCountRef.current = res.unreadCount ?? 0;
+        const nextCount = res.unreadCount ?? 0;
+        setUnreadCount((prev) => (prev === nextCount ? prev : nextCount));
+        prevUnreadCountRef.current = nextCount;
 
         if (!notifBaselineLoadedRef.current) {
           notifBaselineLoadedRef.current = true;
@@ -363,7 +367,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         const unreadIncreased =
           typeof nextUnread === 'number' && nextUnread > prevUnreadCountRef.current;
         if (typeof nextUnread === 'number') {
-          setUnreadCount(nextUnread);
+          setUnreadCount((prev) => (prev === nextUnread ? prev : nextUnread));
           prevUnreadCountRef.current = nextUnread;
         }
 
@@ -436,12 +440,27 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       document.addEventListener('visibilitychange', onVisibilityChange);
     }
 
+    const onUnauthorized = () => {
+      setApiCacheUserScope(null);
+      setRouteStateUserScope(null);
+      clearAllApiCache();
+      setUser(null);
+      setUnreadCount(0);
+      setLatestAlertNotification(null);
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('tt-session-unauthorized', onUnauthorized);
+    }
+
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
       unsubNotif();
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', onVisibilityChange);
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('tt-session-unauthorized', onUnauthorized);
       }
     };
   }, [user, router, refreshBranding, refreshUnreadCount]);

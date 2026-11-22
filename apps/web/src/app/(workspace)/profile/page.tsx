@@ -77,16 +77,41 @@ export default function ProfilePage() {
   const [twoFactorEnabled, setTwoFactorEnabled] = useState(true);
   const [isPasswordDialogOpen, setIsPasswordDialogOpen] = useState(false);
   const [toastNotice, setToastNotice] = useState<string | null>(null);
+  const [activeSessions, setActiveSessions] = useState<
+    Array<{
+      id: string;
+      isCurrent: boolean;
+      ipAddress: string;
+      userAgent: string;
+      createdAt: string;
+      expiresAt: string;
+    }>
+  >([]);
 
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadTeamDirectory = async (force = false) => {
     try {
-      const res = await apiRequest<{ members: TeamDirectoryMemberDto[] }>(
-        '/api/v1/users?scope=directory',
-        { skipCache: force },
-      );
+      const [res, profileRes] = await Promise.all([
+        apiRequest<{ members: TeamDirectoryMemberDto[] }>(
+          '/api/v1/users?scope=directory',
+          { skipCache: force },
+        ),
+        apiRequest<{
+          activeSessions?: Array<{
+            id: string;
+            isCurrent: boolean;
+            ipAddress: string;
+            userAgent: string;
+            createdAt: string;
+            expiresAt: string;
+          }>;
+        }>('/api/v1/profile', { skipCache: force }),
+      ]);
       setTeamMembers(res.members || []);
+      if (profileRes.activeSessions) {
+        setActiveSessions(profileRes.activeSessions);
+      }
     } catch {
       // ignore
     }
@@ -124,6 +149,9 @@ export default function ProfilePage() {
   const handleSelectAvatar = (file: File | undefined) => {
     if (!file) return;
     setProfileMsg(null);
+    if (pendingAvatarPreview) {
+      URL.revokeObjectURL(pendingAvatarPreview);
+    }
     const previewUrl = URL.createObjectURL(file);
     setPendingAvatarFile(file);
     setPendingAvatarPreview(previewUrl);
@@ -132,6 +160,9 @@ export default function ProfilePage() {
 
   const handleMarkRemoveAvatar = () => {
     setProfileMsg(null);
+    if (pendingAvatarPreview) {
+      URL.revokeObjectURL(pendingAvatarPreview);
+    }
     setPendingAvatarFile(null);
     setPendingAvatarPreview(null);
     setRemoveAvatarFlag(true);
@@ -143,6 +174,9 @@ export default function ProfilePage() {
   const handleCancelProfileDraft = () => {
     setFullName(user.fullName);
     setPhone(user.phone || '');
+    if (pendingAvatarPreview) {
+      URL.revokeObjectURL(pendingAvatarPreview);
+    }
     setPendingAvatarFile(null);
     setPendingAvatarPreview(null);
     setRemoveAvatarFlag(false);
@@ -683,47 +717,73 @@ export default function ProfilePage() {
                 <strong className="text-xs font-bold text-slate-900">
                   Phiên đăng nhập đang hoạt động
                 </strong>
-                <span className="text-[11px] font-semibold text-emerald-700">2 thiết bị</span>
+                <span className="text-[11px] font-semibold text-emerald-700">
+                  {activeSessions.length || 1} thiết bị
+                </span>
               </div>
 
               <div className="space-y-2 text-xs">
-                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-8 h-8 rounded-lg bg-blue-50 text-blue-700 grid place-items-center shrink-0">
-                      <Laptop className="w-4 h-4" />
+                {(activeSessions.length > 0
+                  ? activeSessions
+                  : [
+                      {
+                        id: 'current',
+                        isCurrent: true,
+                        ipAddress: 'IP Nội bộ Toàn Trung',
+                        userAgent: 'Windows Workstation · Trình duyệt Web',
+                        createdAt: new Date().toISOString(),
+                        expiresAt: new Date().toISOString(),
+                      },
+                    ]
+                ).map((sess) => {
+                  const isMobile = /mobile|iphone|ipad|android/i.test(sess.userAgent);
+                  return (
+                    <div
+                      key={sess.id}
+                      className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                        sess.isCurrent
+                          ? 'bg-slate-50 border-slate-200/80'
+                          : 'bg-white border-slate-200/70'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div
+                          className={`w-8 h-8 rounded-lg grid place-items-center shrink-0 ${
+                            sess.isCurrent
+                              ? 'bg-blue-50 text-blue-700'
+                              : 'bg-slate-100 text-slate-600'
+                          }`}
+                        >
+                          {isMobile ? (
+                            <Smartphone className="w-4 h-4" />
+                          ) : (
+                            <Laptop className="w-4 h-4" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <p className="font-bold text-slate-900 truncate">
+                            {sess.userAgent.length > 52
+                              ? `${sess.userAgent.slice(0, 52)}…`
+                              : sess.userAgent}
+                          </p>
+                          <p className="text-[11px] text-slate-500 truncate">
+                            {sess.ipAddress} · Đăng nhập:{' '}
+                            {new Date(sess.createdAt).toLocaleString('vi-VN')}
+                          </p>
+                        </div>
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
+                          sess.isCurrent
+                            ? 'bg-emerald-50 border border-emerald-200 text-emerald-700'
+                            : 'bg-slate-100 text-slate-600'
+                        }`}
+                      >
+                        {sess.isCurrent ? 'Phiên hiện tại' : 'Đã xác thực'}
+                      </span>
                     </div>
-                    <div className="min-w-0">
-                      <p className="font-bold text-slate-900 truncate">
-                        Windows Workstation · Chrome Desktop
-                      </p>
-                      <p className="text-[11px] text-slate-500 truncate">
-                        TP. Hồ Chí Minh · IP Nội bộ Toàn Trung · Vừa xong
-                      </p>
-                    </div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[10px] font-bold shrink-0">
-                    Phiên hiện tại
-                  </span>
-                </div>
-
-                <div className="p-3 rounded-xl bg-white border border-slate-200/70 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 grid place-items-center shrink-0">
-                      <Smartphone className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold text-slate-800 truncate">
-                        Toàn Trung Mobile Web · Safari iOS
-                      </p>
-                      <p className="text-[11px] text-slate-400 truncate">
-                        TP. Hồ Chí Minh · Đồng bộ thông báo đẩy
-                      </p>
-                    </div>
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-semibold shrink-0">
-                    Đã xác thực
-                  </span>
-                </div>
+                  );
+                })}
               </div>
             </div>
           </div>

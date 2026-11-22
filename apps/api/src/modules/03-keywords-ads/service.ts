@@ -518,17 +518,17 @@ export async function createSeoKeyword(
       cachedSearchVolume:
         typeof input.cachedSearchVolume === 'number'
           ? Math.max(0, Math.round(input.cachedSearchVolume))
-          : 950,
+          : 0,
       cachedAdsClicks:
         typeof input.cachedAdsClicks === 'number'
           ? Math.max(0, Math.round(input.cachedAdsClicks))
-          : 45,
+          : 0,
       cachedOrganicClicks:
         typeof input.cachedOrganicClicks === 'number'
           ? Math.max(0, Math.round(input.cachedOrganicClicks))
-          : 60,
+          : 0,
       cachedAvgPosition:
-        input.cachedAvgPosition !== undefined ? input.cachedAvgPosition : 6.4,
+        input.cachedAvgPosition !== undefined ? input.cachedAvgPosition : null,
       cacheSourceAccountKey: `GADS-TT-01 + https://${input.targetWebsite}`,
       cacheWindowStartDate: new Date(now.getTime() - 30 * 86400000).toISOString().slice(0, 10),
       cacheWindowEndDate: now.toISOString().slice(0, 10),

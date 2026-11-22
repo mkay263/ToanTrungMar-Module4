@@ -59,12 +59,16 @@ export async function GET(
     );
   }
 
+  const safeName = fileData.fileName.replace(/["\r\n\\]/g, '_');
+  const isSafeInlineRaster = /^image\/(png|jpeg|webp|gif)$/i.test(fileData.mimeType);
   return new Response(new Uint8Array(fileData.buffer), {
     status: 200,
     headers: {
       'Content-Type': fileData.mimeType,
-      'Content-Disposition': `inline; filename="${fileData.fileName}"`,
-      'Cache-Control': 'private, no-store',
+      'Content-Disposition': `${isSafeInlineRaster ? 'inline' : 'attachment'}; filename="${safeName}"`,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'private, max-age=86400, immutable',
     },
   });
 }

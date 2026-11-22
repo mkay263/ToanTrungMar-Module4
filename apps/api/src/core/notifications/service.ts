@@ -7,6 +7,7 @@ import {
   type RoleCode,
 } from '@toantrung/contracts';
 import { bumpDomainRevisions, getOrComputeScopedCache } from '../cache/server-data-cache';
+import { sanitizeUntrustedReportHtml } from '../security/html-sanitizer';
 
 export type DepartmentScopeCode =
   | 'ALL'
@@ -128,7 +129,14 @@ export interface DispatchedReportItemDto {
   createdAt: string;
 }
 
-export async function countUnreadNotificationsFast(userId: number): Promise<number> {
+export async function countUnreadNotificationsFast(
+  userId: number,
+  roleCode?: RoleCode,
+): Promise<number> {
+  if (roleCode) {
+    const summary = await listUserNotifications(userId, roleCode, { summaryOnly: true });
+    return summary.unreadCount;
+  }
   const res = await getOrComputeScopedCache<number>({
     key: `notif-unread-count:${userId}`,
     domains: ['notifications'],
@@ -169,7 +177,9 @@ export async function listUserNotifications(
           orderBy: { createdAt: 'desc' },
           take: summaryOnly ? 20 : 60,
         }),
-        summaryOnly ? Promise.resolve([] as DispatchedReportItemDto[]) : listDispatchedExecutiveReports(25, userId),
+        summaryOnly
+          ? Promise.resolve([] as DispatchedReportItemDto[])
+          : listDispatchedExecutiveReports(25, userId, roleCode),
       ]);
 
       // C10: Gộp các thông báo chưa đọc bị trùng khóa (category + title) khi hiển thị, nhưng không tự xóa bản ghi chưa đọc trong CSDL
@@ -297,7 +307,8 @@ export async function createDispatchNotification(
     : DEPARTMENT_SCOPE_LABELS[senderDept];
 
   let savedReportId: number | null = null;
-  if (input.contentHtml && input.contentHtml.trim()) {
+  const sanitizedHtml = sanitizeUntrustedReportHtml(input.contentHtml);
+  if (sanitizedHtml && sanitizedHtml.trim()) {
     const auditEntry = await prisma.auditLog.create({
       data: {
         actorUserId: userId,
@@ -307,7 +318,7 @@ export async function createDispatchNotification(
         detailsJson: JSON.stringify({
           title: input.title.trim(),
           summary: input.summary.trim(),
-          contentHtml: input.contentHtml,
+          contentHtml: sanitizedHtml,
           targetDepartments: effectiveTargetDepts,
           authorName: input.authorName || 'Điều hành Toàn Trung',
           authorRole: input.authorRole || roleCode,
@@ -317,9 +328,13 @@ export async function createDispatchNotification(
     savedReportId = auditEntry.id;
   }
 
+  const safeCustomActionUrl =
+    input.actionUrl && /^\/(?!\/)[a-zA-Z0-9/_?=&%-]*$/.test(input.actionUrl.trim())
+      ? input.actionUrl.trim()
+      : '/notifications';
   const finalActionUrl = savedReportId
     ? `/notifications?reportId=${savedReportId}`
-    : input.actionUrl || '/notifications';
+    : safeCustomActionUrl;
 
   const allActiveUsers = await prisma.user.findMany({
     where: { isActive: true, deletedAt: null },
@@ -392,11 +407,12 @@ export async function saveReportDraftForUser(
     reportingPeriod?: string;
   },
 ) {
+  const sanitizedDraftHtml = sanitizeUntrustedReportHtml(input.contentHtml);
   const payloadJson = JSON.stringify({
     status: 'DRAFT',
     title: input.title.trim(),
     summary: input.summary.trim(),
-    contentHtml: input.contentHtml,
+    contentHtml: sanitizedDraftHtml,
     targetDepartments: input.targetDepartments || [],
     authorName: input.authorName || 'Điều hành Toàn Trung',
     authorRole: input.authorRole || roleCode,
@@ -449,6 +465,7 @@ export async function saveReportDraftForUser(
 export async function listDispatchedExecutiveReports(
   limit = 20,
   actorUserId?: number,
+  roleCode?: RoleCode,
 ): Promise<DispatchedReportItemDto[]> {
   const logs = await prisma.auditLog.findMany({
     where: {
@@ -464,7 +481,7 @@ export async function listDispatchedExecutiveReports(
     take: limit,
   });
 
-  return logs.map((l) => {
+  const mapped = logs.map((l) => {
     let parsed: {
       status?: 'DRAFT' | 'ISSUED';
       title?: string;
@@ -489,14 +506,35 @@ export async function listDispatchedExecutiveReports(
       status: isDraft ? ('DRAFT' as const) : ('ISSUED' as const),
       title: parsed.title || 'Báo cáo điều hành nội bộ',
       summary: parsed.summary || '',
-      contentHtml: parsed.contentHtml || '',
+      contentHtml: sanitizeUntrustedReportHtml(parsed.contentHtml || ''),
       targetDepartments: parsed.targetDepartments || [],
       reportingPeriod: parsed.reportingPeriod || '30 ngày gần nhất',
       authorName: parsed.authorName || l.actor?.fullName || 'Điều hành',
       authorRole: parsed.authorRole || '',
       createdAt: l.createdAt.toISOString(),
+      actorUserId: l.actorUserId,
     };
   });
+
+  if (!roleCode || roleCode === 'BOD' || roleCode === 'ADMIN') {
+    return mapped.map(({ actorUserId: _a, ...item }) => item);
+  }
+
+  const userDept = getDepartmentScopeForRole(roleCode);
+  return mapped
+    .filter((rpt) => {
+      if (rpt.status === 'DRAFT') {
+        return actorUserId ? rpt.actorUserId === actorUserId : false;
+      }
+      const targets = rpt.targetDepartments || [];
+      return (
+        targets.length === 0 ||
+        targets.includes('ALL') ||
+        targets.includes(userDept) ||
+        (actorUserId !== undefined && rpt.actorUserId === actorUserId)
+      );
+    })
+    .map(({ actorUserId: _a, ...item }) => item);
 }
 
 /**

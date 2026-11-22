@@ -36,6 +36,17 @@ export class OpenAiImageProvider implements AiDesignProvider {
     this.activeModel = opts?.activeModel || 'gpt-image-1';
   }
 
+  private resolveEditsEndpoint(): string {
+    const base = this.apiEndpoint || 'https://api.openai.com/v1/images/generations';
+    if (/\/images\/generations\/?$/i.test(base)) {
+      return base.replace(/\/images\/generations\/?$/i, '/images/edits');
+    }
+    if (/\/images\/edits\/?$/i.test(base)) {
+      return base;
+    }
+    return `${base.replace(/\/+$/, '')}/images/edits`;
+  }
+
   getStatusInfo(): ProviderStatusInfo {
     const isConfigured = Boolean(this.apiKey);
     return {
@@ -130,7 +141,8 @@ export class OpenAiImageProvider implements AiDesignProvider {
         };
 
         const hasMask = Boolean(input.maskImageBuffer && input.maskImageBuffer.length > 0);
-        res = await fetch('https://api.openai.com/v1/images/edits', {
+        const editsEndpoint = this.resolveEditsEndpoint();
+        res = await fetch(editsEndpoint, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
@@ -139,7 +151,7 @@ export class OpenAiImageProvider implements AiDesignProvider {
           signal: AbortSignal.timeout(75000),
         });
         if (!res.ok && hasMask && (res.status === 400 || res.status === 422)) {
-          res = await fetch('https://api.openai.com/v1/images/edits', {
+          res = await fetch(editsEndpoint, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${this.apiKey}`,
@@ -325,7 +337,8 @@ export class OpenAiImageProvider implements AiDesignProvider {
         };
 
         const hasMask = Boolean(input.maskImageBuffer && input.maskImageBuffer.length > 0);
-        res = await fetch('https://api.openai.com/v1/images/edits', {
+        const editsEndpoint = this.resolveEditsEndpoint();
+        res = await fetch(editsEndpoint, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
@@ -334,7 +347,7 @@ export class OpenAiImageProvider implements AiDesignProvider {
           signal: AbortSignal.timeout(75000),
         });
         if (!res.ok && hasMask && (res.status === 400 || res.status === 422)) {
-          res = await fetch('https://api.openai.com/v1/images/edits', {
+          res = await fetch(editsEndpoint, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${this.apiKey}`,

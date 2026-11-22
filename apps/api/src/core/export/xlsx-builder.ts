@@ -42,13 +42,30 @@ function escapeXml(str: unknown): string {
     .replace(/'/g, '&apos;');
 }
 
-function sanitizeForFormulaInjection(val: string): string {
+export function sanitizeForFormulaInjection(val: string): string {
   if (!val) return '';
-  // Prepend single quote if string begins with formula trigger chars (=, +, -, @)
-  if (/^[=+\-@]/.test(val)) {
+  // Prepend single quote if string begins with formula trigger chars (=, +, -, @, or leading tab/CR/LF before formula)
+  if (/^[=+\-@\t\r\n]/.test(val) || /^[\s]*[=+\-@]/.test(val)) {
     return `'${val}`;
   }
   return val;
+}
+
+export function sanitizeXlsxSheetName(rawName: string, usedNames: Set<string>): string {
+  const cleaned =
+    (rawName || 'Sheet')
+      .replace(/[:\\/?*\[\]\0]/g, '_')
+      .replace(/^'+|'+$/g, '')
+      .trim() || 'Sheet';
+  let candidate = cleaned.slice(0, 31);
+  let suffix = 2;
+  while (usedNames.has(candidate.toLowerCase())) {
+    const tag = `_${suffix}`;
+    candidate = `${cleaned.slice(0, Math.max(1, 31 - tag.length))}${tag}`;
+    suffix++;
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
 }
 
 // Convert 0-indexed column number to Excel column letters (0 -> A, 27 -> AB)
@@ -447,8 +464,12 @@ export function buildStandardXlsxBuffer(sheets: XlsxSheet[]): Buffer {
   );
 
   // 4. xl/workbook.xml
+  const usedSheetNames = new Set<string>();
   const sheetsTag = sheets
-    .map((s, i) => `<sheet name="${escapeXml(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+    .map((s, i) => {
+      const safeName = sanitizeXlsxSheetName(s.name, usedSheetNames);
+      return `<sheet name="${escapeXml(safeName)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`;
+    })
     .join('');
 
   zip.addFile(

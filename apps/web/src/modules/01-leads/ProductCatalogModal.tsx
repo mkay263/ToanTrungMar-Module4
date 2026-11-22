@@ -282,6 +282,7 @@ export function ProductCatalogModal({
                   value={newProductName}
                   onChange={(e) => setNewProductName(e.target.value)}
                   onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                     if (e.key === 'Enter') {
                       e.preventDefault();
                       void handleAddProduct();

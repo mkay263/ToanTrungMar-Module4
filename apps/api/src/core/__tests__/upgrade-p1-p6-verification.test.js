@@ -121,8 +121,15 @@ test('P1-03 & P6: Idempotency chống tạo Lead trùng khi xử lý lại cùng
 });
 
 test('R01–R06: Đối chứng tự động toàn bộ 6 hạng mục rà soát (GSC dataState, PostgreSQL Prisma Client, Gmail Checkpoint, Manifest 413 tệp, OpenXML .docx/.xlsx, 10 số SĐT & ẩn Doanh thu)', () => {
-  // R04: Manifest 413 tệp vật lý đã phân loại 4 nhóm và 0 broken DB links
+  // R04: Manifest tệp vật lý đã phân loại 4 nhóm và 0 broken DB links
   const manifestPath = path.join(REPO_ROOT, 'storage/pg-migration-artifacts/file-handover-manifest.json');
+  if (!fs.existsSync(manifestPath)) {
+    const { execFileSync } = require('node:child_process');
+    execFileSync(process.execPath, [path.join(REPO_ROOT, 'scripts/audit-handover-files.js')], {
+      cwd: REPO_ROOT,
+      stdio: 'pipe',
+    });
+  }
   assert.ok(fs.existsSync(manifestPath), 'file-handover-manifest.json phải tồn tại');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
   assert.equal(manifest.brokenDbLinksCount, 0);

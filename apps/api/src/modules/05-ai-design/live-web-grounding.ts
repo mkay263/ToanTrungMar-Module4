@@ -82,7 +82,7 @@ const FX_INTENT_REGEX =
   /tỷ\s*giá|tiền\s*tệ|đổi\s*tiền|\busd\b|\beur\b|\bjpy\b|\bcny\b|đô\s*la|nhân\s*dân\s*tệ|yên\s*nhật|ngoại\s*tệ/i;
 
 const WEB_NEWS_INTENT_REGEX =
-  /hôm\s*nay|hiện\s*tại|hiện\s*nay|mới\s*nhất|tin\s*tức|báo\s*mới|giá\s*vàng|giá\s*xăng|giá\s*dầu|bóng\s*đá|tỷ\s*số|lịch\s*thi\s*đấu|chứng\s*khoán|vn-?index|bitcoin|crypto|tra\s*cứu|tìm\s*kiếm|cập\s*nhật|sự\s*kiện|ai\s*là|bao\s*nhiêu|2025|2026|2027/i;
+  /(?:\b(?:tin\s*tức|báo\s*mới|giá\s*vàng|giá\s*xăng|giá\s*dầu|tỷ\s*số|lịch\s*thi\s*đấu|chứng\s*khoán|vn-?index|bitcoin|crypto)\b|\b(?:thời\s*tiết|nhiệt\s*độ|tỷ\s*giá)\b.*?\b(?:hôm\s*nay|hiện\s*tại|mới\s*nhất)\b|\b(?:tra\s*cứu|tìm\s*kiếm|cập\s*nhật)\s+(?:tin|giá|thời\s*tiết|tỷ\s*giá|thông\s*tin\s+mới))/i;
 
 function normalizeVi(text: string): string {
   return (text || '')

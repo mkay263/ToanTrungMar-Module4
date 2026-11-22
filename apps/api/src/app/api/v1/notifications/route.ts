@@ -13,7 +13,9 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   if (url.searchParams.get('countOnly') === '1') {
-    const unreadCount = await (await import('../../../../core/notifications/service')).countUnreadNotificationsFast(auth.user.id);
+    const unreadCount = await (
+      await import('../../../../core/notifications/service')
+    ).countUnreadNotificationsFast(auth.user.id, auth.user.roleCode);
     return jsonSuccess({ items: [], unreadCount, reports: [] });
   }
   const summaryOnly = url.searchParams.get('summary') === '1';

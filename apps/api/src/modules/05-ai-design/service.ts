@@ -4,11 +4,13 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import {
   prisma,
   ConcurrencyConflictError,
   recordAiUsageAttempt,
 } from '@toantrung/database';
+import { APP_CONFIG } from '../../core/config';
 import {
   DESIGN_TASK_LABELS,
   LED_SCREEN_SHAPE_META,
@@ -43,6 +45,7 @@ import {
   type UpdateDesignProjectDto,
 } from '@toantrung/contracts';
 import {
+  deletePrivateBusinessFile,
   readPrivateBusinessFile,
   resolvePrivateBusinessFilePath,
   savePrivateBusinessFile,
@@ -302,10 +305,66 @@ export async function assertCanAccessDesignProject(
   }
 }
 
+async function cleanupUnusedDesignStorageKeys(keys: Array<string | null | undefined>): Promise<void> {
+  const uniqueKeys = Array.from(
+    new Set(
+      keys
+        .map((k) => (typeof k === 'string' ? k.trim() : ''))
+        .filter((k) => k.length > 0 && !k.startsWith('http://') && !k.startsWith('https://'))
+    )
+  );
+  for (const key of uniqueKeys) {
+    const [versionRefCount, requestRefCount] = await Promise.all([
+      prisma.designAssetVersion.count({ where: { storageObjectKey: key } }),
+      prisma.designRequest.count({
+        where: {
+          OR: [
+            { sitePhotoUrl: key },
+            { aiDraftImageUrl: key },
+            { finalRenderUrl: key },
+            { installPositionJson: { contains: key } },
+          ],
+        },
+      }),
+    ]);
+    if (versionRefCount === 0 && requestRefCount === 0) {
+      deletePrivateBusinessFile(key);
+    }
+  }
+}
+
 export async function assertCanAccessStorageObjectKey(
   user: SessionUserDto,
   storageObjectKey: string
 ): Promise<void> {
+  const normalized = storageObjectKey.replace(/\\/g, '/').trim();
+  if (
+    !normalized ||
+    normalized.startsWith('/') ||
+    /^[a-zA-Z]:/.test(normalized) ||
+    normalized.includes('\0') ||
+    normalized.split('/').includes('..') ||
+    !/^[a-zA-Z0-9._/-]+$/.test(normalized)
+  ) {
+    throw new ForbiddenDesignProjectAccessError('Khóa tệp thiết kế không hợp lệ.');
+  }
+
+  const rootResolved = path.resolve(APP_CONFIG.getStorageRoot());
+  const targetResolved = path.resolve(rootResolved, normalized);
+  if (!targetResolved.startsWith(rootResolved + path.sep)) {
+    throw new ForbiddenDesignProjectAccessError('Đường dẫn tệp thiết kế vượt ngoài phạm vi cho phép.');
+  }
+
+  if (
+    normalized.includes('/') &&
+    !normalized.startsWith('design/') &&
+    !normalized.startsWith('leads/')
+  ) {
+    throw new ForbiddenDesignProjectAccessError(
+      'Không được phép truy cập tệp ngoài kho thiết kế.'
+    );
+  }
+
   if (['ADMIN', 'BOD', 'SALES_LEAD', 'DESIGNER'].includes(user.roleCode)) {
     return;
   }
@@ -351,11 +410,13 @@ export async function assertCanAccessStorageObjectKey(
     take: 5,
   });
 
-  if (candidateRequests.length > 0) {
-    const allowed = candidateRequests.some((r) => canUserAccessDesignProject(user, r));
-    if (!allowed) {
-      throw new ForbiddenDesignProjectAccessError();
-    }
+  if (candidateRequests.length === 0) {
+    throw new ForbiddenDesignProjectAccessError();
+  }
+
+  const allowed = candidateRequests.some((r) => canUserAccessDesignProject(user, r));
+  if (!allowed) {
+    throw new ForbiddenDesignProjectAccessError();
   }
 }
 
@@ -1532,9 +1593,9 @@ export async function createDesignRequestWithAiDraft(
 }
 
 const DAO_TAO_ANH_POSTER_REGEX =
-  /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner)\s*:?\s*/i;
+  /^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster)\s*:?\s*/i;
 const DAO_TAO_ANH_REGEX =
-  /^\s*@(?:taoanhposter|taoposter|tao_anh_poster|taobanner|taoanhbanner|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\s*:?\s*/i;
+  /^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster|taoanh|tạoảnh|tao_anh|tao-anh|taojanh|draw|render)\s*:?\s*/i;
 
 function buildConsultantReplyAndSuggestedPrompt(params: {
   userText: string;
@@ -1826,11 +1887,14 @@ export async function processChatDesignRequest(
     if (input.designBrief.outputHeightPx) currentMeta.bannerHeightPx = input.designBrief.outputHeightPx;
   }
 
-  // 2. Deterministic Command Router (free chat mode stays CHAT unless explicit @TaoAnh/@TaoBanner command is typed)
-  const isExplicitImageCommand = DAO_TAO_ANH_REGEX.test(input.prompt);
+  // 2. Deterministic Command Router (free chat mode stays CHAT unless explicit @banner/@taobanner/@TaoAnh command is typed)
+  const isExplicitBannerCommand = DAO_TAO_ANH_POSTER_REGEX.test(input.prompt);
+  const isExplicitSceneCommand = !isExplicitBannerCommand && DAO_TAO_ANH_REGEX.test(input.prompt);
+  const isExplicitImageCommand = isExplicitBannerCommand || isExplicitSceneCommand;
+  const triggerSource = input.triggerSource || 'user_input';
   const routeDecision =
-    (input.chatMode === 'consultant_free' && !isExplicitImageCommand) ||
-    input.taskCode === 'brief_analyze'
+    input.taskCode === 'brief_analyze' ||
+    (input.chatMode === 'consultant_free' && !isExplicitImageCommand)
       ? {
           action: 'CHAT' as const,
           commandToken: null,
@@ -1838,51 +1902,56 @@ export async function processChatDesignRequest(
           isMetaQuestionAboutCommand: false,
           blockedNonUserTrigger: false,
           reason:
-            input.chatMode === 'consultant_free'
-              ? 'chatMode:consultant_free'
-              : 'taskCode:brief_analyze',
+            input.taskCode === 'brief_analyze'
+              ? 'taskCode:brief_analyze'
+              : 'chatMode:consultant_free',
         }
-      : input.taskCode === 'banner_generate'
-        ? {
-            action: 'GENERATE_BANNER' as const,
-            commandToken: '@taobanner',
-            cleanInstruction: input.prompt,
-            isMetaQuestionAboutCommand: false,
-            blockedNonUserTrigger: false,
-            reason: 'taskCode:banner_generate',
-          }
-        : input.taskCode === 'perspective_compose'
+      : isExplicitImageCommand
+        ? routeDesignCommand({
+            rawMessage: input.prompt,
+            source: triggerSource,
+            explicitButtonAction: null,
+          })
+        : input.taskCode === 'banner_generate'
           ? {
-              action: 'GENERATE_SCENE' as const,
-              commandToken: '@taoanh',
+              action: 'GENERATE_BANNER' as const,
+              commandToken: '@banner',
               cleanInstruction: input.prompt,
               isMetaQuestionAboutCommand: false,
               blockedNonUserTrigger: false,
-              reason: 'taskCode:perspective_compose',
+              reason: 'taskCode:banner_generate',
             }
-          : input.taskCode === 'design_edit'
+          : input.taskCode === 'perspective_compose'
             ? {
-                action: (existing.requestType === 'banner' ? 'GENERATE_BANNER' : 'GENERATE_SCENE') as
-                  | 'GENERATE_BANNER'
-                  | 'GENERATE_SCENE',
-                commandToken: existing.requestType === 'banner' ? '@taobanner' : '@taoanh',
+                action: 'GENERATE_SCENE' as const,
+                commandToken: '@taoanh',
                 cleanInstruction: input.prompt,
                 isMetaQuestionAboutCommand: false,
                 blockedNonUserTrigger: false,
-                reason: 'taskCode:design_edit',
+                reason: 'taskCode:perspective_compose',
               }
-            : routeDesignCommand({
-                rawMessage: input.prompt,
-                source: input.triggerSource || 'user_input',
-                explicitButtonAction:
-                  input.chatMode === 'image_generator' &&
-                  !DAO_TAO_ANH_REGEX.test(input.prompt) &&
-                  input.triggerSource === 'user_button'
-                    ? existing.requestType === 'banner'
-                      ? 'GENERATE_BANNER'
-                      : 'GENERATE_SCENE'
-                    : null,
-              });
+            : input.taskCode === 'design_edit'
+              ? {
+                  action: (existing.requestType === 'banner' ? 'GENERATE_BANNER' : 'GENERATE_SCENE') as
+                    | 'GENERATE_BANNER'
+                    | 'GENERATE_SCENE',
+                  commandToken: existing.requestType === 'banner' ? '@banner' : '@taoanh',
+                  cleanInstruction: input.prompt,
+                  isMetaQuestionAboutCommand: false,
+                  blockedNonUserTrigger: false,
+                  reason: 'taskCode:design_edit',
+                }
+              : routeDesignCommand({
+                  rawMessage: input.prompt,
+                  source: triggerSource,
+                  explicitButtonAction:
+                    input.chatMode === 'image_generator' &&
+                    triggerSource === 'user_button'
+                      ? existing.requestType === 'banner'
+                        ? 'GENERATE_BANNER'
+                        : 'GENERATE_SCENE'
+                      : null,
+                });
 
   // Extract multi-turn user-confirmed specifications from chat text
   const extraction = extractAndMergeUserChatContext(designContext, input.prompt);
@@ -2115,7 +2184,7 @@ export async function processChatDesignRequest(
       replyText = [
         `Mình giải thích nhanh về 2 lệnh tạo ảnh trong Studio nhé:`,
         `• **\`@taoanh <mô tả>\`** (hoặc \`@TaoAnh\`): Dùng khi bạn muốn AI ghép phối cảnh màn hình LED vào đúng 4 góc đã chấm trên ảnh khảo sát.`,
-        `• **\`@taobanner <nội dung>\`** (hoặc \`@TaoAnhPoster\`): Dùng khi bạn muốn AI thiết kế hình ảnh Banner/Poster trình chiếu trên màn hình LED.`,
+        `• **\`@banner <nội dung>\`** (hoặc \`@baneer\`, \`@taobanner\`, \`@TaoAnhPoster\`): Dùng khi bạn muốn AI thiết kế hình ảnh Banner/Poster trình chiếu trên màn hình LED.`,
         `• Còn khi bạn nhắn tin bình thường như thế này thì mình sẽ trò chuyện, giải đáp và tư vấn hoàn toàn tự nhiên như một AI thông thường (không tự động tạo ảnh hay tốn phí)! 😊`,
       ].join('\n');
     } else if (extraction.newlyConfirmedLabels.length > 0) {
@@ -2167,7 +2236,7 @@ export async function processChatDesignRequest(
             `3. Người dùng đang hỏi về kỹ thuật LED; thông số tham khảo hiện tại (nếu cần): LED ${pitch}, kích thước ${wM}m x ${hM}m, tỷ lệ ${ratio}.`,
           ]
         : []),
-      '4. Nếu người dùng nhờ lên ý tưởng tạo ảnh hoặc muốn vẽ/tạo một bức ảnh theo mô tả tự do, hãy tư vấn nhiệt tình và có thể gợi ý ở dòng cuối một câu lệnh dạng: `@taobanner: <mô tả chi tiết bức ảnh cần tạo>` để người dùng bấm tạo ảnh ngay.',
+      '4. Nếu người dùng nhờ lên ý tưởng tạo ảnh hoặc muốn vẽ/tạo một bức ảnh theo mô tả tự do, hãy tư vấn nhiệt tình và có thể gợi ý ở dòng cuối một câu lệnh dạng: `@banner: <mô tả chi tiết bức ảnh cần tạo>` để người dùng bấm tạo ảnh ngay.',
       ...(liveGrounding?.contextText
         ? [
             '',
@@ -3779,6 +3848,10 @@ export async function deleteProjectPhoto(
 
   bumpDomainRevisions(['design'], 'design_photo_deleted');
 
+  if (target?.storageObjectKey) {
+    await cleanupUnusedDesignStorageKeys([target.storageObjectKey]);
+  }
+
   return { ok: true, remainingCount: updatedPhotos.length };
 }
 
@@ -3830,6 +3903,8 @@ export async function deleteDesignAssetVersion(
 
   bumpDomainRevisions(['design', 'reports'], 'design_version_deleted');
 
+  await cleanupUnusedDesignStorageKeys([targetVer.storageObjectKey]);
+
   return {
     ok: true,
     deletedVersionId: versionId,
@@ -3843,8 +3918,20 @@ export async function deleteDesignProject(
 ) {
   await assertCanAccessDesignProject(actor, requestId);
 
-  const existing = await prisma.designRequest.findUnique({ where: { id: requestId } });
+  const existing = await prisma.designRequest.findUnique({
+    where: { id: requestId },
+    include: { assetVersions: { select: { storageObjectKey: true } } },
+  });
   if (!existing) throw new Error('Không tìm thấy dự án thiết kế cần xóa.');
+
+  const meta = parseProjectMetadata(existing.installPositionJson);
+  const candidateKeys = [
+    existing.sitePhotoUrl,
+    existing.aiDraftImageUrl,
+    existing.finalRenderUrl,
+    ...existing.assetVersions.map((v) => v.storageObjectKey),
+    ...(meta.photos || []).map((p) => p.storageObjectKey),
+  ];
 
   await prisma.$transaction([
     prisma.designAssetVersion.deleteMany({ where: { designRequestId: requestId } }),
@@ -3861,6 +3948,8 @@ export async function deleteDesignProject(
   ]);
 
   bumpDomainRevisions(['design', 'leads', 'reports', 'notifications'], 'design_project_deleted');
+
+  await cleanupUnusedDesignStorageKeys(candidateKeys);
 
   return { ok: true, deletedId: requestId };
 }

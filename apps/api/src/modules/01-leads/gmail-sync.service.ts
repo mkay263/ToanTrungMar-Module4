@@ -338,7 +338,15 @@ export async function getGmailIntakeAuditLogs(limit = 50): Promise<GmailIntakeAu
 async function appendGmailIntakeAuditLogs(entries: GmailIntakeAuditEntry[]): Promise<void> {
   if (entries.length === 0) return;
   const existing = await getGmailIntakeAuditLogs(MAX_GMAIL_AUDIT_LOG_ENTRIES);
-  const merged = [...entries.slice().reverse(), ...existing].slice(0, MAX_GMAIL_AUDIT_LOG_ENTRIES);
+  const combined = [...entries.slice().reverse(), ...existing];
+  const seenMsgIds = new Set<string>();
+  const merged: GmailIntakeAuditEntry[] = [];
+  for (const item of combined) {
+    if (item.messageId && seenMsgIds.has(item.messageId)) continue;
+    if (item.messageId) seenMsgIds.add(item.messageId);
+    merged.push(item);
+    if (merged.length >= MAX_GMAIL_AUDIT_LOG_ENTRIES) break;
+  }
   await prisma.systemSetting.upsert({
     where: { key: SETTING_KEY_GMAIL_AUDIT_LOGS },
     update: { value: JSON.stringify(merged) },
@@ -1050,6 +1058,15 @@ async function runSyncLeadsFromGmailInternal(options?: {
   const existingMessageIdSet = new Set(
     existingRows.map((r) => r.externalSubmissionId).filter((v): v is string => Boolean(v)),
   );
+  const priorIrrelevantMessageIdSet = new Set<string>();
+  if (!isMockFeed) {
+    const recentAudits = await getGmailIntakeAuditLogs(MAX_GMAIL_AUDIT_LOG_ENTRIES);
+    for (const a of recentAudits) {
+      if (a.messageId && a.classification === 'IRRELEVANT') {
+        priorIrrelevantMessageIdSet.add(a.messageId);
+      }
+    }
+  }
   for (const row of existingRows) {
     const dt = row.lead?.contactedAt || row.lead?.createdAt;
     if (dt) {
@@ -1072,6 +1089,11 @@ async function runSyncLeadsFromGmailInternal(options?: {
     try {
       if (existingMessageIdSet.has(ref.id)) {
         summary.deduplicated += 1;
+        continue;
+      }
+      if (!isMockFeed && priorIrrelevantMessageIdSet.has(ref.id)) {
+        summary.skippedNoise += 1;
+        classificationCounts.IRRELEVANT += 1;
         continue;
       }
 

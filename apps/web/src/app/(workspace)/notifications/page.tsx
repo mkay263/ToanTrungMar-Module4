@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { useSession } from '@/core/session/SessionContext';
 import { apiRequest } from '@/core/http/client';
+import { SafeHtmlRenderer } from '@/components/common/SafeHtmlRenderer';
 
 type DepartmentScopeCode =
   | 'ALL'
@@ -943,9 +944,9 @@ export default function NotificationsPage() {
                   {selectedReport.summary}
                 </div>
               )}
-              <div
+              <SafeHtmlRenderer
                 className="prose prose-sm max-w-none text-slate-800"
-                dangerouslySetInnerHTML={{ __html: selectedReport.contentHtml }}
+                html={selectedReport.contentHtml}
               />
             </div>
 

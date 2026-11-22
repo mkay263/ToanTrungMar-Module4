@@ -1,4 +1,5 @@
 import { prisma } from '@toantrung/database';
+import { hasBaPermission } from '@toantrung/contracts';
 import { jsonError } from '../../../../../core/http';
 import { requirePermissionSession } from '../../../../../core/permissions';
 import { buildStandardXlsxBuffer } from '../../../../../core/export/xlsx-builder';
@@ -7,6 +8,16 @@ import { getTrackingDashboardData } from '../../../../../modules/02-tracking-syn
 export async function GET(req: Request) {
   const auth = await requirePermissionSession(req, 'EXPORT_DATA');
   if (!auth.ok) return auth.response;
+  if (
+    !hasBaPermission(auth.user.roleCode, 'TRACKING_ADS_OPTIMIZE') &&
+    auth.user.roleCode !== 'BOD'
+  ) {
+    return jsonError(
+      'FORBIDDEN_PERMISSION',
+      'Chỉ nhân sự Marketing, Ads, Ban Giám đốc hoặc Quản trị viên mới được kết xuất báo cáo Tracking.',
+      403,
+    );
+  }
 
   try {
     const url = new URL(req.url);

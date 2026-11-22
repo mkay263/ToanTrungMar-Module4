@@ -188,6 +188,21 @@ export async function getPublicBrandingConfig(bypassCache = false): Promise<Publ
   return cached.data;
 }
 
+const ALLOWED_COVER_POSITIONS = new Set(['center', 'top', 'bottom', 'left', 'right']);
+
+function sanitizeBannerButtonHref(rawHref: string): string {
+  const trimmed = rawHref.trim();
+  if (!trimmed) return '/leads';
+  if (
+    (trimmed.startsWith('/') && !trimmed.startsWith('//')) ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('http://')
+  ) {
+    return trimmed;
+  }
+  return '/leads';
+}
+
 export async function updateBrandingMetadata(
   actorUserId: number,
   input: UpdateBrandingMetaDto,
@@ -202,13 +217,25 @@ export async function updateBrandingMetadata(
   if (input.footerText !== undefined) updates.push({ key: 'footerText', value: input.footerText });
   if (input.logoAltText !== undefined) updates.push({ key: 'logoAltText', value: input.logoAltText });
   if (input.heroAltText !== undefined) updates.push({ key: 'heroAltText', value: input.heroAltText });
-  if (input.heroCoverPosition !== undefined) updates.push({ key: 'heroCoverPosition', value: input.heroCoverPosition });
-  if (input.heroCrop !== undefined) updates.push({ key: 'heroCrop', value: JSON.stringify(input.heroCrop) });
+  if (input.heroCoverPosition !== undefined && ALLOWED_COVER_POSITIONS.has(input.heroCoverPosition)) {
+    updates.push({ key: 'heroCoverPosition', value: input.heroCoverPosition });
+  }
+  if (input.heroCrop !== undefined) {
+    const safeCrop = {
+      zoom: Math.max(1, Math.min(3, Number(input.heroCrop.zoom) || 1)),
+      offsetX: Math.max(-50, Math.min(50, Number(input.heroCrop.offsetX) || 0)),
+      offsetY: Math.max(-50, Math.min(50, Number(input.heroCrop.offsetY) || 0)),
+      frameScale: Math.max(0.6, Math.min(1.2, Number(input.heroCrop.frameScale) || 1)),
+    };
+    updates.push({ key: 'heroCrop', value: JSON.stringify(safeCrop) });
+  }
   if (input.bannerHeadline !== undefined) updates.push({ key: 'bannerHeadline', value: input.bannerHeadline });
   if (input.bannerDescription !== undefined) updates.push({ key: 'bannerDescription', value: input.bannerDescription });
   if (input.bannerShowButton !== undefined) updates.push({ key: 'bannerShowButton', value: String(input.bannerShowButton) });
   if (input.bannerButtonLabel !== undefined) updates.push({ key: 'bannerButtonLabel', value: input.bannerButtonLabel });
-  if (input.bannerButtonHref !== undefined) updates.push({ key: 'bannerButtonHref', value: input.bannerButtonHref });
+  if (input.bannerButtonHref !== undefined) {
+    updates.push({ key: 'bannerButtonHref', value: sanitizeBannerButtonHref(input.bannerButtonHref) });
+  }
   if (input.bannerShowImage !== undefined) updates.push({ key: 'bannerShowImage', value: String(input.bannerShowImage) });
   if (input.bannerImageAlt !== undefined) updates.push({ key: 'bannerImageAlt', value: input.bannerImageAlt });
 

@@ -51,17 +51,17 @@ export interface CommandReadinessResult {
   clarificationReply: string | null;
 }
 
-// Prefix regexes for @taobanner (checked first so @taoanhposter / @taobanner doesn't match @taoanh prefix)
+// Prefix regexes for @banner / @taobanner (checked first so @taoanhposter / @taobanner doesn't match @taoanh prefix)
 const BANNER_COMMAND_PREFIX_REGEX =
-  /^\s*(@(?:taobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster))\b\s*[:\-–—]?\s*/i;
+  /^\s*(@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster))\b\s*[:\-–—]?\s*/i;
 
 // Prefix regexes for @taoanh
 const SCENE_COMMAND_PREFIX_REGEX =
   /^\s*(@(?:taoanh|tạoảnh|tao_anh|tao-anh|taojanh))\b\s*[:\-–—]?\s*/i;
 
-// Any mention of @taoanh or @taobanner inside a sentence
+// Any mention of @banner / @taobanner / @taoanh inside a sentence
 const ANY_COMMAND_MENTION_REGEX =
-  /@(?:taobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|taoanh|tạoảnh|tao_anh|tao-anh|taojanh)\b/i;
+  /@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|tao_anh_poster|poster|taoanh|tạoảnh|tao_anh|tao-anh|taojanh)\b/i;
 
 // Detects when the user is asking ABOUT the command rather than executing it
 const META_COMMAND_QUESTION_PATTERNS: RegExp[] = [
@@ -255,8 +255,8 @@ export function validateCommandReadiness(input: CommandReadinessInput): CommandR
       effectiveAction: 'CHAT',
       missingFields: ['banner_brief'],
       clarificationReply: [
-        'Để thực thi lệnh **`@taobanner`**, bạn vui lòng mô tả ngắn gọn nội dung hoặc chủ đề Banner cần thiết kế.',
-        '• Ví dụ: `@taobanner Thiết kế banner khai trương showroom, màu đỏ trắng, hiện đại, kích thước 1920x1080.`',
+        'Để thực thi lệnh **`@banner`** / **`@taobanner`**, bạn vui lòng mô tả ngắn gọn nội dung hoặc chủ đề Banner cần thiết kế.',
+        '• Ví dụ: `@banner Thiết kế banner khai trương showroom, màu đỏ trắng, hiện đại, kích thước 1920x1080.`',
       ].join('\n'),
     };
   }

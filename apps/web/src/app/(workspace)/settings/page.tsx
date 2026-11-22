@@ -750,12 +750,19 @@ export default function SettingsPage() {
             </div>
 
             {backupNotice && (
-              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center justify-between">
+              <div
+                role="status"
+                className={`p-3.5 rounded-xl text-xs font-semibold flex items-center justify-between ${
+                  backupNotice.startsWith('Lỗi') || backupNotice.startsWith('Không thể')
+                    ? 'bg-red-50 border border-red-200 text-red-700'
+                    : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                }`}
+              >
                 <span>{backupNotice}</span>
                 <button
                   type="button"
                   onClick={() => setBackupNotice(null)}
-                  className="text-emerald-700 font-bold"
+                  className="font-bold underline ml-3"
                 >
                   Đóng
                 </button>
@@ -928,7 +935,14 @@ export default function SettingsPage() {
             </div>
 
             {companyProfileMsg && (
-              <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
+              <div
+                role="status"
+                className={`p-3.5 rounded-xl text-xs font-semibold ${
+                  companyProfileMsg.startsWith('Lỗi') || companyProfileMsg.startsWith('Không thể')
+                    ? 'bg-red-50 border border-red-200 text-red-700'
+                    : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                }`}
+              >
                 {companyProfileMsg}
               </div>
             )}

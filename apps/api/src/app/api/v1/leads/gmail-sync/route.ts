@@ -1,6 +1,10 @@
+import { hasBaPermission } from '@toantrung/contracts';
 import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { jsonError, jsonSuccess } from '../../../../../core/http';
-import { requirePermissionSession } from '../../../../../core/permissions';
+import {
+  requireAuthenticatedSession,
+  requirePermissionSession,
+} from '../../../../../core/permissions';
 import {
   ensureGmailAutoSyncPollerStarted,
   getGmailLeadSyncStatus,
@@ -8,6 +12,29 @@ import {
   syncLeadsFromGmail,
   type MockGmailMessageInput,
 } from '../../../../../modules/01-leads/gmail-sync.service';
+import {
+  maskEmail,
+  maskPhone,
+  shouldAnonymizeLeadForRole,
+} from '../../../../../modules/01-leads/service';
+
+function maskPiiInFreeText(text: string | null | undefined): string {
+  if (!text) return '';
+  return text
+    .replace(/\b0\d{2,3}[\s.-]?\d{3}[\s.-]?\d{3,4}\b/g, (m) => maskPhone(m.replace(/\D/g, '')))
+    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, (m) => maskEmail(m) || '***');
+}
+
+function redactGmailPayloadForAnonymizedRole<T>(payload: T, anonymize: boolean): T {
+  if (!anonymize || !payload || typeof payload !== 'object') return payload;
+  const serialized = JSON.stringify(payload);
+  const masked = maskPiiInFreeText(serialized);
+  try {
+    return JSON.parse(masked) as T;
+  } catch {
+    return payload;
+  }
+}
 
 export async function GET(req: Request) {
   const auth = await requirePermissionSession(req, 'LEAD_VIEW_OWN');
@@ -17,7 +44,8 @@ export async function GET(req: Request) {
 
   try {
     const status = await getGmailLeadSyncStatus();
-    return jsonSuccess(status);
+    const anonymize = shouldAnonymizeLeadForRole(auth.user.roleCode);
+    return jsonSuccess(redactGmailPayloadForAnonymizedRole(status, anonymize));
   } catch (err) {
     return jsonError(
       'GMAIL_SYNC_STATUS_FAILED',
@@ -28,8 +56,18 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const auth = await requirePermissionSession(req, 'LEAD_CREATE');
+  const auth = await requireAuthenticatedSession(req);
   if (!auth.ok) return auth.response;
+  if (
+    !hasBaPermission(auth.user.roleCode, 'LEAD_CREATE') &&
+    auth.user.roleCode !== 'MKT_LEAD'
+  ) {
+    return jsonError(
+      'FORBIDDEN_PERMISSION',
+      `Vai trò ${auth.user.roleName} không có quyền thực hiện đồng bộ Gmail.`,
+      403,
+    );
+  }
 
   ensureGmailAutoSyncPollerStarted();
 
@@ -112,11 +150,17 @@ export async function POST(req: Request) {
         auth.user.roleCode === 'ADMIN' ? body.mockConnectedEmail : undefined,
     });
     const status = await getGmailLeadSyncStatus();
+    const anonymize = shouldAnonymizeLeadForRole(auth.user.roleCode);
 
-    return jsonSuccess({
-      ...result,
-      status,
-    });
+    return jsonSuccess(
+      redactGmailPayloadForAnonymizedRole(
+        {
+          ...result,
+          status,
+        },
+        anonymize,
+      ),
+    );
   } catch (err) {
     return jsonError(
       'GMAIL_SYNC_FAILED',

@@ -30,7 +30,7 @@ export function canonicalizeQuadClient(pts: ClientPoint2D[]): QuadCoordinatesDto
   }));
   const cx = four.reduce((s, p) => s + p.x, 0) / 4;
   const cy = four.reduce((s, p) => s + p.y, 0) / 4;
-  const sorted = [...four].sort(
+  const sorted = four.toSorted(
     (a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx)
   );
   let tlIdx = 0;

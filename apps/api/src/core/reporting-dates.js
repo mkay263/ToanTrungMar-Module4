@@ -64,16 +64,27 @@ function getCanonicalDateRange(periodDays, referenceDate = new Date(), timezone 
   };
 }
 
+function isValidCalendarYmd(ymdStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymdStr)) return false;
+  const [y, m, d] = ymdStr.split('-').map((n) => parseInt(n, 10));
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
 function getCustomCanonicalDateRange(fromStr, toStr, timezone = 'Asia/Ho_Chi_Minh') {
   if (!fromStr || !toStr) {
     return getCanonicalDateRange(30, new Date(), timezone);
   }
-  let cleanFrom = fromStr.slice(0, 10);
-  let cleanTo = toStr.slice(0, 10);
+  let cleanFrom = String(fromStr).slice(0, 10);
+  let cleanTo = String(toStr).slice(0, 10);
 
-  // Validate date format YYYY-MM-DD
-  const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-  if (!dateRegex.test(cleanFrom) || !dateRegex.test(cleanTo)) {
+  // Strictly validate real calendar dates YYYY-MM-DD (reject rollover dates like 2026-02-31)
+  if (!isValidCalendarYmd(cleanFrom) || !isValidCalendarYmd(cleanTo)) {
     return getCanonicalDateRange(30, new Date(), timezone);
   }
 
@@ -166,6 +177,7 @@ function resolveDatePresetRange(
 }
 
 module.exports = {
+  isValidCalendarYmd,
   getVietnamDateParts,
   formatVietnamDate,
   formatVietnamDateTime,

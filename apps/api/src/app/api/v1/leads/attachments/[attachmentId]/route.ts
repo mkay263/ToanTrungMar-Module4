@@ -51,9 +51,19 @@ export async function GET(
   }
 
   const canViewAll = hasBaPermission(auth.user.roleCode, 'LEAD_VIEW_ALL');
-  if (
+  if (auth.user.roleCode === 'DESIGNER') {
+    const linkedDesignCount = await prisma.designRequest.count({
+      where: { leadId: attachment.leadId },
+    });
+    if (linkedDesignCount === 0) {
+      return jsonError(
+        'FORBIDDEN_LEAD_SCOPE',
+        'Designer chỉ được xem tệp đính kèm của hồ sơ Lead có yêu cầu thiết kế 3D/2D.',
+        403,
+      );
+    }
+  } else if (
     !canViewAll &&
-    auth.user.roleCode !== 'DESIGNER' &&
     attachment.lead.assignedSalesId !== auth.user.id &&
     attachment.lead.createdByUserId !== auth.user.id
   ) {
@@ -71,21 +81,27 @@ export async function GET(
 
   const url = new URL(req.url);
   const forceDownload = url.searchParams.get('download') === '1';
+  const isUnsafeActiveType = /^image\/svg\+xml|^text\/html|^application\/javascript/i.test(
+    fileData.mimeType,
+  );
   const isInlinePreviewable =
     !forceDownload &&
-    (fileData.mimeType.startsWith('image/') ||
+    !isUnsafeActiveType &&
+    (/^image\/(?:png|jpeg|webp|gif|bmp)$/i.test(fileData.mimeType) ||
       fileData.mimeType === 'application/pdf' ||
-      fileData.mimeType.startsWith('text/') ||
+      fileData.mimeType.startsWith('text/plain') ||
       fileData.mimeType.startsWith('video/'));
   const dispositionType = isInlinePreviewable ? 'inline' : 'attachment';
-  const asciiFallback = attachment.fileName.replace(/[^\x20-\x7E]/g, '_') || 'attachment';
+  const asciiFallback =
+    attachment.fileName.replace(/["\r\n\\]/g, '_').replace(/[^\x20-\x7E]/g, '_') || 'attachment';
 
   return new NextResponse(new Uint8Array(fileData.buffer), {
     status: 200,
     headers: {
-      'Content-Type': fileData.mimeType,
+      'Content-Type': isUnsafeActiveType ? 'application/octet-stream' : fileData.mimeType,
       'Content-Disposition': `${dispositionType}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(attachment.fileName)}`,
       'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
       'Cache-Control': 'private, no-store',
     },
   });

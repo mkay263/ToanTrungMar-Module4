@@ -10,7 +10,7 @@
 import zlib from 'node:zlib';
 import type { QuadCoordinatesDto } from '@toantrung/contracts';
 import type { CompositingProtectionMode } from './design-context';
-import { mapPointToQuadHomographyUV } from './led-homography';
+import { computeQuadToUnitHomography, mapPointToQuadHomographyUV } from './led-homography';
 
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -323,17 +323,6 @@ export function encodeRgbToPng(image: DecodedRgbImage): Buffer {
   ]);
 }
 
-function cross2D(
-  ax: number,
-  ay: number,
-  bx: number,
-  by: number,
-  px: number,
-  py: number
-): number {
-  return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
-}
-
 /**
  * Checks if point (px, py) in [0..100] percentage space lies inside the convex/simple 4-corner quad
  * (topLeft -> topRight -> bottomRight -> bottomLeft) and computes normalized (u, v) in [0, 1]^2.
@@ -341,9 +330,10 @@ function cross2D(
 export function mapPointToQuadUV(
   px: number,
   py: number,
-  quad: QuadCoordinatesDto
+  quad: QuadCoordinatesDto,
+  precomputedHinv?: number[] | null
 ): { inside: boolean; u: number; v: number; edgeDist: number } {
-  return mapPointToQuadHomographyUV(px, py, quad);
+  return mapPointToQuadHomographyUV(px, py, quad, precomputedHinv);
 }
 
 export interface PerspectiveCompositeResult {
@@ -420,12 +410,13 @@ export function renderPerspectiveCompositeWithProtection(params: {
 
   const cabCols = Math.max(2, Math.min(24, params.cabinetCols || 8));
   const cabRows = Math.max(2, Math.min(16, params.cabinetRows || 6));
+  const precomputedHinv = computeQuadToUnitHomography(params.placementQuad);
 
   for (let y = 0; y < height; y++) {
     const py = (y / height) * 100;
     for (let x = 0; x < width; x++) {
       const px = (x / width) * 100;
-      const mapped = mapPointToQuadUV(px, py, params.placementQuad);
+      const mapped = mapPointToQuadUV(px, py, params.placementQuad, precomputedHinv);
       const idx = (y * width + x) * 3;
 
       if (mapped.inside) {
@@ -577,7 +568,7 @@ export function processBannerToTargetResolution(params: {
       targetWidthPx: targetW,
       targetHeightPx: targetH,
       wasResizedOrCropped: true,
-      resizeExplanation: `Nhà cung cấp AI tạo ảnh gốc theo khung chuẩn đám mây; hệ thống đã chuẩn hóa метаdata kích thước đầu ra về ${targetW}×${targetH} px theo yêu cầu.`,
+      resizeExplanation: `Nhà cung cấp AI tạo ảnh gốc theo khung chuẩn đám mây; hệ thống đã chuẩn hóa metadata kích thước đầu ra về ${targetW}×${targetH} px theo yêu cầu.`,
       typographyWarning,
     };
   }

@@ -62,10 +62,10 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
 3. **Marketing Turbo Kit (`LedQuickInstallWizard.tsx`, `led-content-presets.ts`, `marketing-export-kit.ts`)**:
    - Tự đổ Brief từ M03/M04, kho 16 mẫu 1 chạm, **Sinh Bộ 3 Biến Thể A/B**, **Ảnh Trước/Sau (3 layout)**, **Smart Focal Crop** xuất 5 khổ (`Gốc`, `1:1`, `4:5`, `16:9`, `9:16`) kèm Brand Kit Overlay & lưu công thức.
    - Bảo toàn nguyên vẹn ma trận quyền BA (`Q16` đã ghi nhận tại [OPEN_QUESTIONS.md](../decisions/OPEN_QUESTIONS.md#q16)).
-4. **Kiểm chứng & Bản vá QA 21/11/2026**:
-   - Thiết kế lại thanh đầu AI Studio thành **3 tab lớn tách biệt** (`🎯 1. Gắn LED công trình` | `🎨 2. Tạo Banner / Chat AI` | `🛍️ 3. Banner ghép Sản phẩm`), dời `Thông số` sang cụm tiện ích phải và gỡ bỏ hàng nút nhỏ gây rối dưới ô chat.
-   - Tách cứng `bannerMode='prompt_only'` (ẩn/bỏ qua hoàn toàn ảnh Kho SP) và `bannerMode='with_product'` (hiển thị hộp chọn SP bắt buộc) trên `AiDesignWorkspace.tsx`, `service.ts` và `packages/contracts/src/05-ai-design/index.ts`.
-   - Ngắt fallback ngầm về `LocalSandboxAiProvider.generateBannerDraft` (vốn sinh gradient trơn lệch prompt) tại `executeBannerWithFallback` khi chạy Cloud AI; giữ `design_edit` đúng ngữ nghĩa khi chỉnh sửa ảnh tham chiếu.
-   - Bổ sung giải thích rõ đầu ra là ảnh **2D PNG/JPG** giả lập phối cảnh 3D và chính sách token/hạn mức theo API Key ngay trên header trợ lý AI.
+4. **Kiểm chứng & Bản vá QA 21/11/2026 – 23/11/2026 (Khôi phục Studio hợp nhất + `@banner` & Nâng cấp toàn hệ thống)**:
+   - Khôi phục không gian **Studio Phối cảnh & Banner AI hợp nhất** (`🎯 1. Gắn LED Nhanh & MKT` | `✨ 2. Studio Phối cảnh & Banner AI` kèm nút `Trợ lý AI` thu phóng và `Thông số`) theo đúng luồng gõ lệnh trực tiếp `@banner`, `@baneer`, `@taobanner`, `@TaoAnhPoster`, `@taoanh` trong cùng một khung chat duy nhất.
+   - Giữ nguyên tách biệt `bannerMode='prompt_only'` (Banner thuần Prompt) và `bannerMode='with_product'` (Banner ghép ảnh Kho SP Công ty) ngay trên thanh ngữ cảnh của ô chat mà không cần chia tách thành nhiều tab rời rạc.
+   - Ngắt fallback ngầm về `LocalSandboxAiProvider.generateBannerDraft` (vốn sinh gradient trơn lệch prompt) tại `executeBannerWithFallback` khi chạy Cloud AI; nâng cấp `google-imagen.provider.ts` (timeout 45s + truyền ảnh tham chiếu), `openai-image.provider.ts` (`/images/edits` chuẩn), `universal-cloud.provider.ts`, và tối ưu tốc độ `led-homography.ts` (hoist ma trận nghịch đảo $H^{-1}$ ra ngoài vòng lặp pixel) + `LedQuickInstallWizard.tsx` (LRU canvas cache 24 mục, tắt re-render con trỏ thụ động).
+   - Khóa bảo mật đường dẫn `assertCanAccessStorageObjectKey` (chống Path Traversal + kiểm tra phân quyền dự án/Lead).
    - Bước tiếp theo: Chờ PO/Admin quyết định [Q16](../decisions/OPEN_QUESTIONS.md#q16) nếu muốn mở tab Gắn LED Nhanh trực tiếp cho `MKT_STAFF`/`MKT_LEAD`.
 

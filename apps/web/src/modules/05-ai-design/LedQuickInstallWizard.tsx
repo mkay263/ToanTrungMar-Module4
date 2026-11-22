@@ -185,9 +185,11 @@ export function LedQuickInstallWizard({
   // Dragging & cursor state for Loupe 2.5x
   const [dragTarget, setDragTarget] = useState<DragTarget | null>(null);
   const [cursorNorm, setCursorNorm] = useState<ClientPoint2D | null>(null);
+  const moveDragLastPtRef = useRef<ClientPoint2D | null>(null);
   const isPaintingBrushRef = useRef(false);
   const lastBrushPtRef = useRef<ClientPoint2D | null>(null);
   const uploadContentInputRef = useRef<HTMLInputElement>(null);
+  const contentCanvasCacheRef = useRef<Map<string, HTMLCanvasElement>>(new Map());
 
   const activeScreen = useMemo(
     () => screens.find((s) => s.id === activeScreenId) || screens[0] || null,
@@ -325,29 +327,45 @@ export function LedQuickInstallWizard({
     [activeScreen, commitScreens]
   );
 
-  // Build per-screen content canvas map
+  // Build per-screen content canvas map with ref cache to avoid rebuilding 1280x720 textures on drag/hover
   const buildContentCanvasMap = useCallback((): Record<string, HTMLCanvasElement> => {
     const map: Record<string, HTMLCanvasElement> = {};
+    const cache = contentCanvasCacheRef.current;
+    const briefKey = `${effectiveBrief?.headlineText || ''}|${effectiveBrief?.subheadlineText || ''}|${effectiveBrief?.ctaText || ''}|${effectiveBrief?.campaignName || ''}|${effectiveBrief?.websiteDomain || ''}`;
     for (const s of screens) {
       const customImg = s.contentImageUrl ? uploadedContentMap[s.contentImageUrl] : null;
       if (customImg && customImg.naturalWidth > 0) {
-        const c = document.createElement('canvas');
-        c.width = Math.min(1280, customImg.naturalWidth);
-        c.height = Math.round(c.width * (customImg.naturalHeight / customImg.naturalWidth));
-        c.getContext('2d')?.drawImage(customImg, 0, 0, c.width, c.height);
-        map[s.id] = c;
+        const cw = Math.min(1280, customImg.naturalWidth);
+        const ch = Math.round(cw * (customImg.naturalHeight / customImg.naturalWidth));
+        const cacheKey = `img:${s.id}:${s.contentImageUrl}:${cw}x${ch}`;
+        let cached = cache.get(cacheKey);
+        if (!cached) {
+          cached = document.createElement('canvas');
+          cached.width = cw;
+          cached.height = ch;
+          cached.getContext('2d')?.drawImage(customImg, 0, 0, cw, ch);
+          cache.set(cacheKey, cached);
+        }
+        map[s.id] = cached;
       } else {
         const isPortrait =
           s.shapeType === 'led_standee' || s.shapeType === 'cylindrical_column';
         const cw = isPortrait ? 720 : 1280;
         const ch = isPortrait ? 1280 : 720;
-        map[s.id] = renderPresetToCanvas(
-          s.contentPresetId || 'opening_red_gold',
-          cw,
-          ch,
-          effectiveBrief
-        );
+        const pid = s.contentPresetId || 'opening_red_gold';
+        const cacheKey = `preset:${s.id}:${pid}:${cw}x${ch}:${briefKey}`;
+        let cached = cache.get(cacheKey);
+        if (!cached) {
+          cached = renderPresetToCanvas(pid, cw, ch, effectiveBrief);
+          cache.set(cacheKey, cached);
+        }
+        map[s.id] = cached;
       }
+    }
+    while (cache.size > 24) {
+      const oldestKey = cache.keys().next().value;
+      if (!oldestKey) break;
+      cache.delete(oldestKey);
     }
     return map;
   }, [screens, uploadedContentMap, effectiveBrief]);
@@ -787,6 +805,7 @@ export function LedQuickInstallWizard({
       if (pt.x >= minX && pt.x <= maxX && pt.y >= minY && pt.y <= maxY) {
         setActiveScreenId(sc.id);
         setUndoStack((u) => [...u.slice(-19), screens]);
+        moveDragLastPtRef.current = pt;
         setDragTarget({ type: 'move_screen', screenId: sc.id, startPt: pt });
         return;
       }
@@ -795,10 +814,15 @@ export function LedQuickInstallWizard({
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (!baseImg) return;
+    const isActivelyPainting = toolMode === 'occlusion_brush' && isPaintingBrushRef.current;
+    if (!dragTarget && !isActivelyPainting) {
+      return;
+    }
+
     const pt = getCanvasNormPoint(e);
     setCursorNorm(pt);
 
-    if (toolMode === 'occlusion_brush' && isPaintingBrushRef.current) {
+    if (isActivelyPainting) {
       paintOcclusionStroke(pt, false);
       return;
     }
@@ -845,9 +869,10 @@ export function LedQuickInstallWizard({
         }
 
         if (dragTarget.type === 'move_screen') {
-          const dx = pt.x - dragTarget.startPt.x;
-          const dy = pt.y - dragTarget.startPt.y;
-          dragTarget.startPt = pt;
+          const lastPt = moveDragLastPtRef.current || dragTarget.startPt;
+          const dx = pt.x - lastPt.x;
+          const dy = pt.y - lastPt.y;
+          moveDragLastPtRef.current = pt;
           const shiftPt = (p: ClientPoint2D) => ({
             x: Number(Math.max(1, Math.min(99, p.x + dx)).toFixed(2)),
             y: Number(Math.max(1, Math.min(99, p.y + dy)).toFixed(2)),
@@ -886,6 +911,7 @@ export function LedQuickInstallWizard({
   const handleCanvasPointerUp = () => {
     isPaintingBrushRef.current = false;
     lastBrushPtRef.current = null;
+    moveDragLastPtRef.current = null;
     setDragTarget(null);
   };
 
@@ -993,7 +1019,11 @@ export function LedQuickInstallWizard({
     try {
       const currentPid = activeScreen?.contentPresetId || 'opening_red_gold';
       const candidateIds = Array.from(
-        new Set([currentPid, 'opening_red_gold', 'corp_meeting', 'showroom_auto', 'stage_gala'])
+        new Set(
+          activeScreen?.shapeType === 'transparent_glass'
+            ? [currentPid, 'transparent_neon_3d', 'opening_red_gold', 'corp_meeting']
+            : [currentPid, 'opening_red_gold', 'corp_meeting', 'showroom_auto', 'stage_gala']
+        )
       ).slice(0, 3);
 
       const savedList: Array<{ versionNumber: number; label: string; downloadUrl: string }> = [];
@@ -1691,7 +1721,7 @@ export function LedQuickInstallWizard({
                       type="button"
                       onClick={() => {
                         const cloned: LedScreenInstanceDto = {
-                          ...JSON.parse(JSON.stringify(activeScreen)),
+                          ...structuredClone(activeScreen),
                           id: `led-${Date.now()}`,
                           name: `${activeScreen.name} (Bản sao)`,
                         };

@@ -93,12 +93,12 @@ export function canViewPrivateQuoteFinancials(roleCode: SessionUserDto['roleCode
   );
 }
 
-function maskPhone(phone: string): string {
+export function maskPhone(phone: string): string {
   if (!phone || phone.length < 7) return '***';
   return `${phone.slice(0, 4)}***${phone.slice(-3)}`;
 }
 
-function maskEmail(email: string | null): string | null {
+export function maskEmail(email: string | null): string | null {
   if (!email) return null;
   const [local, domain] = email.split('@');
   if (!domain) return '***';
@@ -218,7 +218,10 @@ export async function inspectDuplicateAndPriceCheck(params: {
   const lookupKey = buildNormalizedLookupKey(params.companyName, params.projectName);
   const companyNorm = normalizeLookupText(params.companyName);
 
-  const orConditions: Array<Record<string, unknown>> = [{ phone: normalizedPhone }];
+  const orConditions: Array<Record<string, unknown>> = [];
+  if (normalizedPhone && normalizedPhone !== 'Chưa có SĐT') {
+    orConditions.push({ phone: normalizedPhone });
+  }
   if (params.email && params.email.trim()) {
     orConditions.push({ email: params.email.trim().toLowerCase() });
   }
@@ -226,21 +229,24 @@ export async function inspectDuplicateAndPriceCheck(params: {
     orConditions.push({ normalizedLookupKey: lookupKey });
   }
 
-    const candidateLeads = await prisma.lead.findMany({
-      where: {
-        ...(params.excludeLeadId ? { id: { not: params.excludeLeadId } } : {}),
-        isSpam: false,
-        NOT: {
-          AND: [
-            { pipelineStatus: 'lost' },
-            { lostReason: { in: ['Sai số/nhầm máy', 'Sai số', 'Nhầm máy', 'SĐT không tồn tại', 'Trùng Lead', 'Spam'] } },
-          ],
-        },
-        OR: orConditions,
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 5,
-    });
+  const candidateLeads =
+    orConditions.length === 0
+      ? []
+      : await prisma.lead.findMany({
+          where: {
+            ...(params.excludeLeadId ? { id: { not: params.excludeLeadId } } : {}),
+            isSpam: false,
+            NOT: {
+              AND: [
+                { pipelineStatus: 'lost' },
+                { lostReason: { in: ['Sai số/nhầm máy', 'Sai số', 'Nhầm máy', 'SĐT không tồn tại', 'Trùng Lead', 'Spam'] } },
+              ],
+            },
+            OR: orConditions,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+        });
 
     let isDuplicateAlert = false;
     let duplicateStatus = 'none';
@@ -882,13 +888,20 @@ export async function listLeadsForUser(
     };
   });
 
+  const scrubTextPii = (raw: string | null | undefined): string => {
+    if (!raw) return '';
+    return raw
+      .replace(/\b0\d{2,3}[\s.-]?\d{3}[\s.-]?\d{3,4}\b/g, (m) => maskPhone(m.replace(/\D/g, '')))
+      .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, (m) => maskEmail(m) || '***');
+  };
+
   const priceCheckAlerts: PriceCheckAlertDto[] = alertRows.map((a) => ({
     id: a.id,
     leadId: a.leadId,
     leadCode: a.lead.leadCode,
     phone: isAnonymized ? maskPhone(a.phone) : a.phone,
-    companyName: a.companyName,
-    reasonEvidence: a.reason,
+    companyName: isAnonymized ? 'Khách hàng ẩn danh' : a.companyName,
+    reasonEvidence: isAnonymized ? scrubTextPii(a.reason) : a.reason,
     chatScreenshotDownloadUrl:
       a.chatScreenshotUrl && !isAnonymized
         ? `/api/v1/leads/price-check-alerts?downloadAlertId=${a.id}`
@@ -1132,11 +1145,14 @@ export function assertLeadMutationScope(
   actor: SessionUserDto,
   existing: { assignedSalesId: number | null; createdByUserId: number | null },
 ) {
-  if (
-    existing.assignedSalesId !== actor.id &&
-    existing.createdByUserId !== actor.id &&
-    !hasBaPermission(actor.roleCode, 'LEAD_VIEW_ALL')
-  ) {
+  if (hasBaPermission(actor.roleCode, 'LEAD_VIEW_ALL')) {
+    return;
+  }
+  const isOwner =
+    existing.assignedSalesId !== null
+      ? existing.assignedSalesId === actor.id
+      : existing.createdByUserId === actor.id;
+  if (!isOwner) {
     throw new Error('Bạn chỉ được phép thao tác trên hồ sơ Lead do chính mình phụ trách.');
   }
 }
@@ -1230,11 +1246,10 @@ export async function updateLeadInformation(
         isDuplicateAlert: dupCheck.isDuplicateAlert,
         duplicateStatus: dupCheck.duplicateStatus,
         matchedOldLeadId: dupCheck.matchedOldLead?.id ?? null,
-        isSuspectedPriceCheck: input.note?.includes('[BỎ NGHI VẤN]')
-          ? false
-          : input.note?.includes('[NGHI VẤN') ||
-            existing.isSuspectedPriceCheck ||
-            dupCheck.isSuspectedPriceCheck,
+        isSuspectedPriceCheck:
+          Boolean(input.note?.includes('[NGHI VẤN')) ||
+          existing.isSuspectedPriceCheck ||
+          dupCheck.isSuspectedPriceCheck,
         version: { increment: 1 },
       },
     });

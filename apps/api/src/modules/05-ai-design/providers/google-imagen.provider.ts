@@ -275,7 +275,7 @@ export class GoogleImagenProvider implements AiDesignProvider {
             personGeneration: 'dont_allow',
           },
         }),
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(45000),
       });
 
       const durationMs = Date.now() - started;
@@ -393,8 +393,8 @@ export class GoogleImagenProvider implements AiDesignProvider {
     const gemAttempt = await this.tryGeminiGenerateContentImage(
       input.prompt,
       started,
-      undefined,
-      undefined,
+      input.referenceImageBuffer,
+      input.referenceImageMimeType,
       input.productReferenceBuffers
     );
     if (gemAttempt.result) return gemAttempt.result;
@@ -428,7 +428,7 @@ export class GoogleImagenProvider implements AiDesignProvider {
             safetyFilterLevel: 'block_medium_and_above',
           },
         }),
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(45000),
       });
 
       const durationMs = Date.now() - started;
@@ -452,6 +452,26 @@ export class GoogleImagenProvider implements AiDesignProvider {
 
       const json = await response.json();
       const b64 = json.predictions?.[0]?.bytesBase64Encoded;
+      if (!b64) {
+        return {
+          imageBuffer: Buffer.alloc(0),
+          mimeType: 'image/png',
+          durationMs,
+          modelUsed: this.activeModel || 'imagen-3.0-generate-002',
+          requestedModel: this.activeModel || 'imagen-3.0-generate-002',
+          reportedModel: null,
+          tokensActual: false,
+          costState: 'unknown',
+          provider: 'google_imagen',
+          promptTokens: 0,
+          completionTokens: 0,
+          totalTokens: 0,
+          costMicros: 0n,
+          costCurrency: 'USD',
+          status: 'failed',
+          errorMessage: 'Google Imagen không trả về dữ liệu ảnh banner.',
+        };
+      }
       return {
         imageBuffer: Buffer.from(b64, 'base64'),
         mimeType: 'image/png',

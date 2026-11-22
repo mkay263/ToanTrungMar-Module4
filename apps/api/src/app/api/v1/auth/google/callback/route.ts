@@ -1,5 +1,10 @@
 import { NextResponse } from 'next/server';
-import { handleGoogleOAuthCallback } from '../../../../../../modules/02-tracking-sync/google-oauth.service';
+import { requireAuthenticatedSession } from '../../../../../../core/permissions';
+import {
+  handleGoogleOAuthCallback,
+  redactGoogleSecretsFromText,
+  verifySignedOAuthState,
+} from '../../../../../../modules/02-tracking-sync/google-oauth.service';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,20 +15,30 @@ export async function GET(req: Request) {
   const error = url.searchParams.get('error');
   const origin = url.origin;
 
-  let returnPath = '/tracking';
-  if (stateStr) {
-    try {
-      const parsed = JSON.parse(Buffer.from(stateStr, 'base64url').toString('utf8'));
-      if (parsed.returnPath && typeof parsed.returnPath === 'string' && parsed.returnPath.startsWith('/')) {
-        returnPath = parsed.returnPath;
-      }
-    } catch {
-      // ignore
-    }
+  const stateVerification = verifySignedOAuthState(stateStr);
+  const returnPath = stateVerification.returnPath;
+
+  const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
+  if (!auth.ok || (auth.user.roleCode !== 'ADMIN' && auth.user.roleCode !== 'MKT_LEAD')) {
+    return NextResponse.redirect(
+      new URL(
+        `${returnPath}?google_auth=error&msg=${encodeURIComponent('Chỉ Quản trị viên hoặc Trưởng phòng Marketing đang đăng nhập mới được phép hoàn tất kết nối Google OAuth.')}`,
+        origin,
+      ),
+    );
+  }
+
+  if (!stateVerification.valid) {
+    return NextResponse.redirect(
+      new URL(
+        `${returnPath}?google_auth=error&msg=${encodeURIComponent('Trạng thái bảo mật OAuth (state) không hợp lệ hoặc đã quá hạn 15 phút.')}`,
+        origin,
+      ),
+    );
   }
 
   if (error || !code) {
-    const errorMsg = error || 'Không nhận được mã ủy quyền từ Google.';
+    const errorMsg = redactGoogleSecretsFromText(error || 'Không nhận được mã ủy quyền từ Google.');
     return NextResponse.redirect(
       new URL(`${returnPath}?google_auth=error&msg=${encodeURIComponent(errorMsg)}`, origin),
     );
@@ -38,7 +53,9 @@ export async function GET(req: Request) {
       ),
     );
   } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : 'Lỗi xử lý phản hồi từ Google.';
+    const errorMsg = redactGoogleSecretsFromText(
+      err instanceof Error ? err.message : 'Lỗi xử lý phản hồi từ Google.',
+    );
     return NextResponse.redirect(
       new URL(`${returnPath}?google_auth=error&msg=${encodeURIComponent(errorMsg)}`, origin),
     );

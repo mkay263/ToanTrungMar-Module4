@@ -32,6 +32,7 @@ import type {
 } from '@toantrung/contracts';
 import { apiRequest } from '../../core/http/client';
 import { useSession } from '../../core/session/SessionContext';
+import { SafeHtmlRenderer, cleanUntrustedHtmlClient } from '../../components/common/SafeHtmlRenderer';
 
 interface DispatchedReportItem {
   id: number;
@@ -87,11 +88,7 @@ function getVnYmdDate(d = new Date()): string {
 }
 
 function sanitizeReportHtml(rawHtml: string): string {
-  return (rawHtml || '')
-    .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
-    .replace(/<(iframe|object|embed)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/\son\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-    .replace(/javascript:/gi, '#blocked:');
+  return cleanUntrustedHtmlClient(rawHtml || '');
 }
 
 export function ReportDocComposer({ user, data, scope, m04Data }: ReportDocComposerProps) {
@@ -861,13 +858,25 @@ export function ReportDocComposer({ user, data, scope, m04Data }: ReportDocCompo
         </div>
       </div>
 
-      {/* Xem trước bản in A4 */}
+      {/* Xem trước bản in A4 (Native <dialog> modal) */}
       {previewOpen && (
-        <div
-          role="dialog"
-          aria-modal="true"
+        <dialog
+          open
+          ref={(el) => {
+            if (el && typeof el.showModal === 'function' && !el.open) {
+              try {
+                el.showModal();
+              } catch {
+                // fallback if already open
+              }
+            }
+          }}
+          onCancel={(e) => {
+            e.preventDefault();
+            setPreviewOpen(false);
+          }}
           aria-label="Xem trước bản in báo cáo"
-          className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 m-0 h-full w-full max-h-none max-w-none bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4"
         >
           <div className="bg-white w-full max-w-4xl max-h-[90vh] rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
             <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
@@ -890,9 +899,9 @@ export function ReportDocComposer({ user, data, scope, m04Data }: ReportDocCompo
                 <h1 className="font-display font-extrabold text-lg text-center text-[#1E3A8A] mb-6">
                   {docTitle}
                 </h1>
-                <div
+                <SafeHtmlRenderer
                   className="prose prose-slate max-w-none text-sm leading-relaxed space-y-3"
-                  dangerouslySetInnerHTML={{ __html: sanitizeReportHtml(docHtml) }}
+                  html={sanitizeReportHtml(docHtml)}
                 />
               </div>
             </div>
@@ -916,7 +925,7 @@ export function ReportDocComposer({ user, data, scope, m04Data }: ReportDocCompo
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </div>
   );

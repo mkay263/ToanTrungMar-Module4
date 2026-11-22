@@ -95,12 +95,20 @@ export async function GET(req: Request) {
           designType: DESIGN_TYPE_LABELS[r.designType] || r.designType,
           leadCode: r.leadCode || 'Độc lập (Không gắn Lead)',
           contactName: r.contactName || '—',
-          ledSpec: r.ledModuleSpec || r.productName || 'P2.5 Indoor',
+          ledSpec: r.designType === 'banner' ? r.ledModuleSpec || 'Banner / Poster 2D' : r.ledModuleSpec || r.productName || 'P2.5 Indoor',
           physicalSize:
             r.designType === 'perspective_3d'
-              ? `${r.screenWidthM ?? 4.8}m × ${r.screenHeightM ?? 2.7}m`
+              ? r.screenWidthM && r.screenHeightM
+                ? `${r.screenWidthM}m × ${r.screenHeightM}m`
+                : '—'
               : `${r.bannerWidthPx ?? 1920}×${r.bannerHeightPx ?? 1080}px`,
-          areaM2: r.productSpec?.areaM2 ?? Number(((r.screenWidthM || 4.8) * (r.screenHeightM || 2.7)).toFixed(2)),
+          areaM2:
+            r.designType === 'banner'
+              ? null
+              : r.productSpec?.areaM2 ??
+                (r.screenWidthM && r.screenHeightM
+                  ? Number((r.screenWidthM * r.screenHeightM).toFixed(2))
+                  : null),
           aspectRatio: r.aspectRatio || '16:9',
           photoCount: r.photos.length,
           versionCount: r.assetVersions.length,
@@ -121,7 +129,11 @@ export async function GET(req: Request) {
             requests
               .reduce(
                 (acc, r) =>
-                  acc + (r.productSpec?.areaM2 ?? (r.screenWidthM || 4.8) * (r.screenHeightM || 2.7)),
+                  r.designType === 'banner'
+                    ? acc
+                    : acc +
+                      (r.productSpec?.areaM2 ??
+                        (r.screenWidthM && r.screenHeightM ? r.screenWidthM * r.screenHeightM : 0)),
                 0
               )
               .toFixed(2)

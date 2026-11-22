@@ -111,8 +111,10 @@ export function bumpDomainRevisions(domains: CacheDomain[], _reason?: string): v
   }
 
   // Delete matching inflight entries so future readers don't join a pre-invalidation compute
+  const escapedDomains = domains.map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const domainRe = new RegExp(`(?:^|[|,])(?:${escapedDomains.join('|')})=`);
   for (const key of Array.from(store.inflight.keys())) {
-    if (domains.some((d) => key.includes(`|${d}=`))) {
+    if (domainRe.test(key)) {
       store.inflight.delete(key);
     }
   }

@@ -221,13 +221,14 @@ export async function resolveDashboardScope(params?: {
       : null;
 
   const rawPreset = String(params?.preset || '7D').toUpperCase();
+  const normalizedPreset = rawPreset === 'ALL' ? '30D' : rawPreset;
   const preset: DashboardDatePreset =
-    rawPreset === 'TODAY' ||
-    rawPreset === 'YESTERDAY' ||
-    rawPreset === '7D' ||
-    rawPreset === '30D' ||
-    rawPreset === 'CUSTOM'
-      ? rawPreset
+    normalizedPreset === 'TODAY' ||
+    normalizedPreset === 'YESTERDAY' ||
+    normalizedPreset === '7D' ||
+    normalizedPreset === '30D' ||
+    normalizedPreset === 'CUSTOM'
+      ? normalizedPreset
       : '7D';
 
   const range =

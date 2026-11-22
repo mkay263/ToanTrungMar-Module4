@@ -48,6 +48,17 @@ export async function POST(req: Request) {
     const raw = (await req.json()) as Record<string, unknown>;
     const action = String(raw.action || 'lookup_keyword');
 
+    if (
+      auth.user.roleCode === 'ADS' &&
+      (action === 'save_serpapi_key' || action === 'sync_serpapi' || action === 'import_csv')
+    ) {
+      return jsonError(
+        'FORBIDDEN_ADS_READONLY_SEO',
+        'Theo quy định UC05 A4, vai trò Ads chỉ được tra cứu xu hướng từ khóa (Read-Only), không được ghi đè dữ liệu SEO/Trends.',
+        403,
+      );
+    }
+
     if (action === 'save_serpapi_key') {
       if (
         !hasBaPermission(auth.user.roleCode, 'SYSTEM_USER_ADMIN') &&

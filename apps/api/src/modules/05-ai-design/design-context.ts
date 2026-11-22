@@ -356,9 +356,9 @@ export function extractAndMergeUserChatContext(
     }
   }
 
-  // 10. Banner brief / content extraction ("banner khai trương showroom...", "nội dung banner...")
+  // 10. Banner brief / content extraction ("@banner ...", "banner khai trương showroom...", "nội dung banner...")
   const bannerBriefMatch = text.match(
-    /(?:thiết\s*kế\s*banner|nội\s*dung\s*banner|banner\s*hiển\s*thị|chủ\s*đề\s*banner)\s*[:\-]?\s*([^\n]+)/i
+    /(?:^\s*@(?:banner|baneer|taobanner|tạobanner|tao_banner|tao-banner|taoanhbanner|taoanhposter|taoposter|poster)|thiết\s*kế\s*banner|nội\s*dung\s*banner|banner\s*hiển\s*thị|chủ\s*đề\s*banner)\s*[:\-–—]?\s*([^\n]+)/i
   );
   if (bannerBriefMatch) {
     const cleanBrief = bannerBriefMatch[1].trim();

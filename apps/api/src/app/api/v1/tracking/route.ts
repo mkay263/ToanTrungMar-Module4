@@ -3,9 +3,13 @@ import {
   ResolveReconciliationSchema,
   TriggerPlatformSyncSchema,
   WebhookLeadIntakeSchema,
+  hasBaPermission,
 } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../core/http';
-import { requirePermissionSession } from '../../../../core/permissions';
+import {
+  requireAuthenticatedSession,
+  requirePermissionSession,
+} from '../../../../core/permissions';
 import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   declareExternalCampaignAndRemapUtm,
@@ -23,8 +27,18 @@ import {
 } from '../../../../workers';
 
 export async function GET(req: Request) {
-  const auth = await requirePermissionSession(req, 'TRACKING_ADS_OPTIMIZE');
+  const auth = await requireAuthenticatedSession(req, { requireCsrf: false });
   if (!auth.ok) return auth.response;
+  if (
+    !hasBaPermission(auth.user.roleCode, 'TRACKING_ADS_OPTIMIZE') &&
+    auth.user.roleCode !== 'BOD'
+  ) {
+    return jsonError(
+      'FORBIDDEN_PERMISSION',
+      `Vai trò ${auth.user.roleName} không có quyền xem dữ liệu Tracking & Đồng bộ.`,
+      403,
+    );
+  }
 
   try {
     const url = new URL(req.url);
