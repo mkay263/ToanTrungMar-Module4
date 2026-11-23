@@ -207,7 +207,7 @@ async function main() {
         maxMessages: 2,
         onlyLeadKeywords: true,
         mockMessages: mockEmails,
-        mockConnectedEmail: 'truongvanlong.19052005@gmail.com',
+        mockConnectedEmail: 'crm-intake@toantrung.vn',
       },
     });
     for (const cl of u01Pass1.json.data?.createdLeads || []) {
@@ -223,7 +223,7 @@ async function main() {
         maxMessages: 2,
         onlyLeadKeywords: true,
         mockMessages: mockEmails,
-        mockConnectedEmail: 'truongvanlong.19052005@gmail.com',
+        mockConnectedEmail: 'crm-intake@toantrung.vn',
       },
     });
 

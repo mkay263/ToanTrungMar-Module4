@@ -872,30 +872,98 @@ export class AiDesignProviderFactory {
       }
     }
 
-    // Build candidate config explicitly for the requested provider only (zero key-prefix switching, zero host guessing)
-    const testConfig: StoredMultiAiConfig = {
+    let activePid: AiProviderId = explicitPid;
+    let activeEndpoint = explicitEndpoint;
+
+    // Build candidate config explicitly for the requested provider
+    let testConfig: StoredMultiAiConfig = {
       ...config,
       providers: {
         ...config.providers,
-        [explicitPid]: {
+        [activePid]: {
           ...storedEntry,
           apiKey: effectiveKey,
-          apiEndpoint: explicitEndpoint || storedEntry?.apiEndpoint || null,
+          apiEndpoint: activeEndpoint || storedEntry?.apiEndpoint || null,
         },
       },
     };
 
-    const snapshot = await AiModelRegistryService.getModelRegistrySnapshot(testConfig, {
+    let snapshot = await AiModelRegistryService.getModelRegistrySnapshot(testConfig, {
       forceRefresh: true,
-      onlyProviderId: explicitPid,
+      onlyProviderId: activePid,
     });
-    const conn = snapshot.connections.find((c) => c.providerId === explicitPid);
+    let conn = snapshot.connections.find((c) => c.providerId === activePid);
+
+    // Smart fallback between openai_dalle and custom_endpoint when user pastes an sk-... key without typing Gateway URL
+    if (
+      conn &&
+      conn.listApiStatus === 'error' &&
+      !input.apiEndpoint?.trim() &&
+      effectiveKey.startsWith('sk-')
+    ) {
+      const configuredCustomEndpoint =
+        config.providers.custom_endpoint?.apiEndpoint ||
+        resolveEffectiveProviderCredential('custom_endpoint', config).apiEndpoint ||
+        '';
+      if (activePid === 'openai_dalle' && configuredCustomEndpoint) {
+        const altPid: AiProviderId = 'custom_endpoint';
+        const altConfig: StoredMultiAiConfig = {
+          ...config,
+          providers: {
+            ...config.providers,
+            [altPid]: {
+              ...config.providers[altPid],
+              apiKey: effectiveKey,
+              apiEndpoint: configuredCustomEndpoint,
+            },
+          },
+        };
+        const altSnap = await AiModelRegistryService.getModelRegistrySnapshot(altConfig, {
+          forceRefresh: true,
+          onlyProviderId: altPid,
+        });
+        const altConn = altSnap.connections.find((c) => c.providerId === altPid);
+        if (altConn && altConn.listApiStatus === 'ok') {
+          activePid = altPid;
+          activeEndpoint = configuredCustomEndpoint;
+          testConfig = altConfig;
+          snapshot = altSnap;
+          conn = altConn;
+        }
+      } else if (activePid === 'custom_endpoint') {
+        const altPid: AiProviderId = 'openai_dalle';
+        const altEndpoint = 'https://api.openai.com/v1';
+        const altConfig: StoredMultiAiConfig = {
+          ...config,
+          providers: {
+            ...config.providers,
+            [altPid]: {
+              ...config.providers[altPid],
+              apiKey: effectiveKey,
+              apiEndpoint: altEndpoint,
+            },
+          },
+        };
+        const altSnap = await AiModelRegistryService.getModelRegistrySnapshot(altConfig, {
+          forceRefresh: true,
+          onlyProviderId: altPid,
+        });
+        const altConn = altSnap.connections.find((c) => c.providerId === altPid);
+        if (altConn && altConn.listApiStatus === 'ok') {
+          activePid = altPid;
+          activeEndpoint = altEndpoint;
+          testConfig = altConfig;
+          snapshot = altSnap;
+          conn = altConn;
+        }
+      }
+    }
 
     if (conn && conn.listApiStatus === 'error') {
       return {
         ok: false,
         connected: false,
-        providerId: explicitPid,
+        providerId: activePid,
         modelTested: input.modelId || 'none',
         latencyMs: Date.now() - started,
         replyText: conn.listApiDetail,
@@ -903,7 +971,7 @@ export class AiDesignProviderFactory {
       };
     }
 
-    const providerModels = snapshot.models.filter((m) => m.providerId === explicitPid);
+    const providerModels = snapshot.models.filter((m) => m.providerId === activePid);
     const discoveredModels: AiModelOptionDto[] = providerModels.slice(0, 20).map((m) => {
       const supportsImage =
         m.supportedOperations.includes('image_generation') ||
@@ -923,18 +991,18 @@ export class AiDesignProviderFactory {
       discoveredModels.find((v) => v.id === requestedClean) ||
       discoveredModels.find((v) => v.badge.includes('Tạo')) ||
       discoveredModels[0];
-    const chosenModel = chosenEntry?.id || requestedClean || storedEntry?.activeModel || explicitPid;
+    const chosenModel = chosenEntry?.id || requestedClean || storedEntry?.activeModel || activePid;
 
     const currentCfg = readStoredConfig();
-    const prevEntry = currentCfg.providers[explicitPid] || {};
-    currentCfg.providers[explicitPid] = {
+    const prevEntry = currentCfg.providers[activePid] || {};
+    currentCfg.providers[activePid] = {
       ...prevEntry,
       apiKey: effectiveKey,
-      ...(explicitEndpoint ? { apiEndpoint: explicitEndpoint } : {}),
+      ...(activeEndpoint ? { apiEndpoint: activeEndpoint } : {}),
       activeModel: chosenModel,
       ...(discoveredModels.length > 0 ? { discoveredModels } : {}),
     };
-    currentCfg.defaultProviderId = explicitPid;
+    currentCfg.defaultProviderId = activePid;
     currentCfg.defaultModelId = chosenModel;
     writeStoredConfig(currentCfg);
 
@@ -952,13 +1020,13 @@ export class AiDesignProviderFactory {
     return {
       ok: true,
       connected: true,
-      providerId: explicitPid,
+      providerId: activePid,
       modelTested: chosenModel,
       latencyMs: Date.now() - started,
       replyText:
         conn?.listApiStatus === 'ok'
           ? `Kết nối thành công ${conn.providerName} → Đọc được ${providerModels.length} model (${imgCount} tạo/sửa ảnh, ${chatCount} phân tích brief). Đã chọn: ${chosenModel}.`
-          : `Đã lưu cấu hình ${explicitPid} (${maskSecretValue(effectiveKey)}). ${conn?.listApiDetail || ''}`,
+          : `Đã lưu cấu hình ${activePid} (${maskSecretValue(effectiveKey)}). ${conn?.listApiDetail || ''}`,
       maskedKey: maskSecretValue(effectiveKey),
       discoveredModels: discoveredModels.length > 0 ? discoveredModels : undefined,
       providerStatus: this.getActiveProviderInfo(),

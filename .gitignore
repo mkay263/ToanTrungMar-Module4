@@ -24,6 +24,13 @@ coverage/
 .env
 .env.*
 !.env.example
+# Local report documents & internal handover docs (kept on local machine only)
+*.docx
+docs/BAO_CAO_DU_LIEU_MODULE_02_03_TOAN_TRUNG_V2.md
+docs/UPGRADE_PROGRESS.md
+docs/UPGRADE_SCOPE.md
+docs/POSTGRES_MIGRATION_RUNBOOK.md
+docs/WEBSITE_FORM_INTEGRATION.md
 # Regenerate context for each task instead of committing stale packets
 .ai-context/
 docs/tasks/**/*.local.json

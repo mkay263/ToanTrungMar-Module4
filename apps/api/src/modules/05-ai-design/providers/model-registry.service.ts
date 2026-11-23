@@ -662,7 +662,10 @@ export class AiModelRegistryService {
           try {
             const parsedErr = JSON.parse(errText) as { error?: { message?: string } };
             if (parsedErr?.error?.message) {
-              upstreamHint = ` [${parsedErr.error.message}]`;
+              const sanitizedMsg = parsedErr.error.message
+                .replace(/\b(?:sk|AIza|AQ\.|gsk_)[A-Za-z0-9*_\-.]{6,}\b/g, (m) => maskSecretValue(m.replace(/\*+/g, '')) || '***')
+                .slice(0, 180);
+              upstreamHint = ` [${sanitizedMsg}]`;
             }
           } catch {
             // ignore non-json error body

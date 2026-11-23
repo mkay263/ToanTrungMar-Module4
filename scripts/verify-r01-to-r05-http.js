@@ -282,7 +282,7 @@ async function main() {
     // Pha 1: Xử lý thư đầu tiên và lưu checkpoint
     const r03Pass1 = await apiCall('POST', '/api/v1/leads/gmail-sync', {
       mockMessages: [mockMsg1],
-      mockConnectedEmail: 'truongvanlong.19052005@gmail.com',
+      mockConnectedEmail: 'crm-intake@toantrung.vn',
     });
     const cpPass1 = r03Pass1.body?.data?.status?.checkpoint;
 
@@ -290,14 +290,14 @@ async function main() {
     // Hệ thống đọc từ checkpoint (ts1), bỏ qua msg1 đã xử lý và chỉ tạo Lead cho msg2, cập nhật checkpoint lên ts2
     const r03Pass2 = await apiCall('POST', '/api/v1/leads/gmail-sync', {
       mockMessages: [mockMsg1, mockMsg2],
-      mockConnectedEmail: 'truongvanlong.19052005@gmail.com',
+      mockConnectedEmail: 'crm-intake@toantrung.vn',
     });
     const cpPass2 = r03Pass2.body?.data?.status?.checkpoint;
 
     // Pha 3: Quét lại toàn bộ cả 2 thư — chống trùng tuyệt đối (created = 0, deduplicated = 2)
     const r03Pass3 = await apiCall('POST', '/api/v1/leads/gmail-sync', {
       mockMessages: [mockMsg1, mockMsg2],
-      mockConnectedEmail: 'truongvanlong.19052005@gmail.com',
+      mockConnectedEmail: 'crm-intake@toantrung.vn',
     });
     const cpPass3 = r03Pass3.body?.data?.status?.checkpoint;
 

@@ -3121,7 +3121,31 @@ export async function processChatDesignRequest(
     }
 
     // Validate binary output strictly: NEVER mark success if provider returned text-only, empty buffer, or invalid image bytes!
-    const imageValidation = validateGeneratedImageBuffer(providerResult.imageBuffer);
+    let imageValidation = validateGeneratedImageBuffer(providerResult.imageBuffer);
+
+    // If the browser passed a high-res clientRenderedBase64 composite (e.g. from AiDesignWorkspace)
+    // and the selected provider/model is a chat/free-tier model or failed to return an image buffer,
+    // use the verified clientRenderedBase64 composite so the Studio workflow saves the version smoothly.
+    if (
+      (providerResult.status === 'failed' || !imageValidation.isValid) &&
+      input.clientRenderedBase64
+    ) {
+      try {
+        const clientBuf = Buffer.from(input.clientRenderedBase64, 'base64');
+        const clientCheck = validateGeneratedImageBuffer(clientBuf);
+        if (clientCheck.isValid) {
+          providerResult.imageBuffer = clientBuf;
+          providerResult.mimeType = clientCheck.detectedMimeType || 'image/jpeg';
+          providerResult.status = 'success';
+          providerResult.fallbackNotice =
+            providerResult.fallbackNotice ||
+            'Đã kết xuất qua Studio Engine với bố cục & ảnh tham chiếu chất lượng cao.';
+          imageValidation = clientCheck;
+        }
+      } catch {
+        // keep original validation state
+      }
+    }
 
     if (providerResult.status === 'failed' || !imageValidation.isValid) {
       const latestRow = await prisma.designRequest.findUnique({

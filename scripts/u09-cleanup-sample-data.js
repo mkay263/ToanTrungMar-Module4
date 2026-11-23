@@ -207,7 +207,7 @@ async function main() {
             where: { key: 'gmail_sync_checkpoint' },
             data: {
               value: JSON.stringify({
-                accountKey: 'truongvanlong.19052005@gmail.com',
+                accountKey: process.env.GMAIL_SYNC_ACCOUNT || 'crm-intake@toantrung.vn',
                 lastProcessedInternalDateMs: 1794560755000,
                 lastMessageId: '1a1d428160cfcf7e',
                 lastSuccessAt: new Date().toISOString(),

@@ -209,7 +209,7 @@ async function main() {
       { route: '/reports', file: 'm04-spec.png', mustContain: ['Bảng điều khiển website', 'Báo cáo kết quả', 'Tiến trình xử lý Lead', 'Bảng cần xử lý'] },
     ];
 
-    const forbidden = ['Nguồn GA4', 'Dữ liệu Search Console', 'API Google Ads', 'truongvanlong.19052005@gmail.com'];
+    const forbidden = ['Nguồn GA4', 'Dữ liệu Search Console', 'API Google Ads'];
 
     for (const p of pages) {
       await cdp.send('Page.navigate', { url: `${BASE_URL}${p.route}` });

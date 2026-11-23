@@ -194,8 +194,6 @@ function isInternalCompanyMailbox(email: string | null | undefined, connectedAcc
   return (
     local === 'toantrungco' ||
     local.startsWith('toantrungco+') ||
-    local === 'truongvanlong.19052005' ||
-    local.startsWith('truongvanlong') ||
     lower.endsWith('@toantrung.com.vn') ||
     lower.endsWith('@bangled.vn') ||
     lower.endsWith('@manhinhled.net.vn')
@@ -1291,7 +1289,7 @@ async function runSyncLeadsFromGmailInternal(options?: {
       }
 
       // Chỉ đọc thông tin khách hàng trong nội dung thư/đoạn chat;
-      // KHÔNG lấy email/tên của hộp thư nội bộ (toantrungco, truongvanlong, connected account) làm thông tin khách hàng hay nguồn.
+      // KHÔNG lấy email/tên của hộp thư nội bộ (toantrungco, connected account) làm thông tin khách hàng hay nguồn.
       const senderIsInternal = isInternalCompanyMailbox(parsedFrom.email, accountKey);
       const leadEmail = structured.email || (structured.isStructuredForm || senderIsInternal ? null : parsedFrom.email);
       const leadCompanyName =
