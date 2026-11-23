@@ -26,6 +26,7 @@ import {
   Clock,
   FileSpreadsheet,
   FileText,
+  FolderOpen,
   Globe,
   LayoutDashboard,
   Package,
@@ -63,11 +64,24 @@ const ReportDocComposer = dynamic(
   },
 );
 
+const SharedTeamFilesPanel = dynamic(
+  () => import('./SharedTeamFilesPanel').then((m) => m.SharedTeamFilesPanel),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="rounded-[14px] border border-slate-200 bg-white p-6 text-xs text-slate-500">
+        Đang tải kho dữ liệu dùng chung...
+      </div>
+    ),
+  },
+);
+
 type ReportsSectionKey =
   | 'overview'
   | 'reconcile'
   | 'sales_pipeline'
   | 'products'
+  | 'shared_files'
   | 'composer';
 type ReconcileTabKey = 'website' | 'channel' | 'campaign';
 type SortDirection = 'asc' | 'desc';
@@ -120,6 +134,7 @@ const VALID_SECTIONS: ReportsSectionKey[] = [
   'reconcile',
   'sales_pipeline',
   'products',
+  'shared_files',
   'composer',
 ];
 
@@ -904,21 +919,30 @@ export function ReportsWorkspace() {
       ],
     };
 
-    if (!canExport) return [analyticsGroup];
+    const docItems: VerticalNavItem[] = [
+      {
+        id: 'shared_files',
+        label: 'Kho dữ liệu chung',
+        icon: FolderOpen,
+      },
+      ...(canExport
+        ? [
+            {
+              id: 'composer',
+              label: 'Soạn & Phát hành',
+              icon: PenLine,
+            },
+          ]
+        : []),
+    ];
 
     return [
       analyticsGroup,
       {
         id: 'documents',
-        label: 'Văn bản',
+        label: 'Văn bản & Kho chung',
         defaultOpen: true,
-        items: [
-          {
-            id: 'composer',
-            label: 'Soạn & Phát hành',
-            icon: PenLine,
-          },
-        ],
+        items: docItems,
       },
     ];
   }, [data, classifiedProductRows.length, canExport]);
@@ -1018,7 +1042,9 @@ export function ReportsWorkspace() {
         />
 
         <div className="flex-1 min-w-0 w-full space-y-4">
-          {activeSection === 'composer' && canExport ? (
+          {activeSection === 'shared_files' ? (
+            <SharedTeamFilesPanel />
+          ) : activeSection === 'composer' && canExport ? (
             legacyData ? (
               <ReportDocComposer
                 user={user}
