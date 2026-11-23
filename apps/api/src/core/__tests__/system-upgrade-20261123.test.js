@@ -310,3 +310,166 @@ test('UPG-20261123-10: GET /api/v1/auth/me?optional=1 returns 200 null user whil
   const strictRes = await getAuthMeRoute(new Request('http://localhost:3000/api/v1/auth/me'));
   assert.equal(strictRes.status, 401);
 });
+
+const {
+  recordTrackingTouchpoint,
+  getStoredTouchpoints,
+} = require(path.join(V2_ROOT, 'apps/api/src/modules/02-tracking-sync/service.ts'));
+const { prisma } = require(path.join(V2_ROOT, 'packages/database/src/index.ts'));
+const leadsService = require(path.join(V2_ROOT, 'apps/api/src/modules/01-leads/service.ts'));
+
+test('UPG-20261124-11: 20 concurrent recordTrackingTouchpoint events with distinct eventIds all succeed and all 20 are saved without lost updates', async () => {
+  const settingRowBefore = await prisma.systemSetting.findUnique({
+    where: { key: 'tracking_touchpoints_v1' },
+  });
+  const backupValue = settingRowBefore ? settingRowBefore.value : null;
+
+  try {
+    const batchTag = `CONC-${Date.now()}`;
+    const eventIds = Array.from({ length: 20 }, (_, idx) => `${batchTag}-EVT-${String(idx + 1).padStart(2, '0')}`);
+
+    const results = await Promise.all(
+      eventIds.map((eventId, idx) =>
+        recordTrackingTouchpoint({
+          eventId,
+          eventType: idx % 2 === 0 ? 'product_view' : 'contact_click',
+          sourceWebsite: 'toantrung.com.vn',
+          pageUrl: `https://toantrung.com.vn/test-${idx + 1}`,
+          visitorId: `vis-${idx + 1}`,
+        })
+      )
+    );
+
+    assert.equal(results.length, 20);
+    for (const r of results) {
+      assert.equal(r.ok, true);
+      assert.equal(r.deduplicated, false);
+    }
+
+    const stored = await getStoredTouchpoints();
+    const savedEventIds = new Set(stored.map((item) => item.eventId));
+    for (const id of eventIds) {
+      assert.equal(savedEventIds.has(id), true, `Expected concurrent touchpoint ${id} to be persisted`);
+    }
+  } finally {
+    if (backupValue !== null) {
+      await prisma.systemSetting.upsert({
+        where: { key: 'tracking_touchpoints_v1' },
+        update: { value: backupValue },
+        create: { key: 'tracking_touchpoints_v1', value: backupValue },
+      });
+    } else {
+      await prisma.systemSetting.deleteMany({
+        where: { key: 'tracking_touchpoints_v1' },
+      });
+    }
+  }
+});
+
+test('UPG-20261124-12: exportAllLeadsForUser exports all 5,001 matching leads without truncating at 5,000', async () => {
+  const TOTAL_SYNTHETIC_LEADS = 5001;
+  const origFindMany = prisma.lead.findMany;
+  const origCount = prisma.lead.count;
+
+  const now = new Date();
+  const makeFakeLeadRow = (index) => ({
+    id: 900000 + index,
+    leadCode: `TT-20261124-${String(index).padStart(5, '0')}`,
+    version: 1,
+    contactName: `Khách giả lập ${index}`,
+    companyName: `Công ty Kiểm thử ${index}`,
+    projectName: `Dự án LED ${index}`,
+    phone: `090${String(1000000 + index).slice(-7)}`,
+    email: `lead${index}@example.test`,
+    isPhoneUnstandardized: false,
+    contactChannel: 'form_web',
+    sourceWebsite: 'toantrung.com.vn',
+    selfReportedSource: 'Google',
+    areaType: 'tphcm',
+    district: 'Quận 10',
+    province: 'TP. Hồ Chí Minh',
+    installationAddress: 'Địa chỉ giả lập',
+    assignedSalesId: 1,
+    assignedSales: { id: 1, fullName: 'Sales Test' },
+    createdBy: null,
+    receivedBy: null,
+    matchedOldLead: null,
+    matchedOldLeadId: null,
+    receivedAt: null,
+    pipelineStatus: 'new_lead',
+    lostReason: null,
+    firstQuoteSentAt: null,
+    quoteRespondedAt: null,
+    isDuplicateAlert: false,
+    duplicateStatus: 'none',
+    isSuspectedPriceCheck: false,
+    isSpam: false,
+    spamAdsExclusionStatus: 'none',
+    spamReason: null,
+    needsManagerAttention: false,
+    createdByActorType: 'webhook',
+    createdByActorRef: 'website_webhook:toantrung.com.vn',
+    contactedAt: now,
+    createdAt: now,
+    updatedAt: now,
+    leadProducts: [],
+    tracking: null,
+    attachments: [],
+    activities: [],
+    designRequests: [],
+  });
+
+  prisma.lead.count = async () => TOTAL_SYNTHETIC_LEADS;
+  prisma.lead.findMany = async (args = {}) => {
+    const skip = args.skip || 0;
+    const take = args.take || 50;
+    const end = Math.min(skip + take, TOTAL_SYNTHETIC_LEADS);
+    const slice = [];
+    for (let i = skip; i < end; i++) {
+      slice.push(makeFakeLeadRow(i + 1));
+    }
+    return slice;
+  };
+
+  try {
+    bumpDomainRevisions(['leads'], 'test_5001_export');
+    const exported = await leadsService.exportAllLeadsForUser(
+      {
+        id: 1,
+        email: 'admin@toantrung.vn',
+        fullName: 'Admin',
+        roleCode: 'ADMIN',
+        roleName: 'Quản trị viên',
+        department: 'admin',
+        csrfToken: 'test-csrf',
+        avatarUrl: null,
+        coverUrl: null,
+        isReceivingLeads: false,
+        permissions: ['LEAD_VIEW_ALL', 'EXPORT_DATA'],
+      },
+      { search: 'SYNTHETIC_5001_FILTER' }
+    );
+
+    assert.equal(exported.totalCount, 5001);
+    assert.equal(exported.leads.length, 5001);
+    assert.equal(exported.leads[0].leadCode, 'TT-20261124-00001');
+    assert.equal(exported.leads[5000].leadCode, 'TT-20261124-05001');
+  } finally {
+    prisma.lead.findMany = origFindMany;
+    prisma.lead.count = origCount;
+    bumpDomainRevisions(['leads'], 'restore_after_5001_export');
+  }
+});
+
+test('UPG-20261124-13: package.json build/start scripts do not invoke db:seed and seed.js blocks default password in production', () => {
+  const pkgJson = JSON.parse(fs.readFileSync(path.join(V2_ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkgJson.scripts.build.includes('db:seed'), false, 'build script must not invoke db:seed');
+  assert.equal(pkgJson.scripts.start.includes('db:seed'), false, 'start script must not invoke db:seed');
+
+  const seedSource = fs.readFileSync(path.join(V2_ROOT, 'packages/database/scripts/seed.js'), 'utf8');
+  assert.equal(
+    seedSource.includes("process.env.NODE_ENV === 'production'"),
+    true,
+    'seed.js must guard account seeding when NODE_ENV === production'
+  );
+});

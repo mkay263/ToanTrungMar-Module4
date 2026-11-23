@@ -196,15 +196,21 @@ function mapProductCatalogRow(
   };
 }
 
+const globalForLeadSeq = globalThis as unknown as {
+  __toantrungLeadSeqCounter?: number;
+};
+
 export async function generateNextLeadCode(): Promise<string> {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
   const count = await prisma.lead.count();
+  globalForLeadSeq.__toantrungLeadSeqCounter = ((globalForLeadSeq.__toantrungLeadSeqCounter ?? 0) + 1) % 900;
+  const monotonicSuffix = String(100 + globalForLeadSeq.__toantrungLeadSeqCounter);
   const seq = String(count + 1).padStart(4, '0');
   const rand = String(Math.floor(10 + Math.random() * 89));
-  return `TT-${y}${m}${d}-${seq}${rand}`;
+  return `TT-${y}${m}${d}-${seq}${monotonicSuffix}${rand}`;
 }
 
 export async function inspectDuplicateAndPriceCheck(params: {
@@ -935,8 +941,8 @@ export async function listLeadsForUser(
 
 /**
  * Bounded batch iterator for exporting 100% of matching authorized Leads (DATA-02).
- * Fetches in bounded pages of 100 records per query so records > 200 (e.g. 212 Leads)
- * are never silently omitted while keeping memory and query size bounded.
+ * Fetches in bounded pages of 500 records per query (up to 100,000 records across 200 batches)
+ * so large filters (> 5,000 leads, e.g. 5,001 leads) are never truncated while keeping memory bounded.
  */
 export async function exportAllLeadsForUser(
   user: SessionUserDto,
@@ -955,8 +961,8 @@ export async function exportAllLeadsForUser(
     toDateStr?: string;
   },
 ): Promise<{ leads: LeadItemDto[]; totalCount: number }> {
-  const BATCH_SIZE = 100;
-  const MAX_BATCHES = 50; // up to 5,000 records in bounded chunks
+  const BATCH_SIZE = 500;
+  const MAX_BATCHES = 200; // up to 100,000 records in bounded chunks
   const allLeads: LeadItemDto[] = [];
   let currentPage = 1;
   let totalCount = 0;

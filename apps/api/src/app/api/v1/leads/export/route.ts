@@ -518,21 +518,50 @@ export async function GET(request: Request) {
     const wonCount = leads.filter((l) => l.pipelineStatus === 'won').length;
     const lostCount = leads.filter((l) => l.pipelineStatus === 'lost').length;
 
-    // Tính nhãn Trùng / Quay lại đồng bộ với giao diện LeadsWorkspace
+    // Tính nhãn Trùng / Quay lại đồng bộ với giao diện LeadsWorkspace (O(N) hash-indexed cho >5.000 dòng)
+    const activeNonSpamByPhone = new Map<string, (typeof leads)[number][]>();
+    const activeNonSpamByCompany = new Map<string, (typeof leads)[number][]>();
+    for (const item of leads) {
+      if (item.spamStatus !== 'NONE') continue;
+      const cleanPhone = item.phone.replace(/\D/g, '');
+      if (cleanPhone && !item.phone.includes('*')) {
+        const list = activeNonSpamByPhone.get(cleanPhone);
+        if (list) list.push(item);
+        else activeNonSpamByPhone.set(cleanPhone, [item]);
+      }
+      const normCompany = (item.companyName || '').trim().toLowerCase();
+      if (normCompany.length >= 5) {
+        const list = activeNonSpamByCompany.get(normCompany);
+        if (list) list.push(item);
+        else activeNonSpamByCompany.set(normCompany, [item]);
+      }
+    }
+
     const classifyDuplicateForExport = (lead: (typeof leads)[number]): string => {
       if (lead.pipelineStatus === 'won' || lead.pipelineStatus === 'lost') {
         return 'Đã đóng hồ sơ';
       }
       const cleanPhone = lead.phone.replace(/\D/g, '');
       const normCompany = (lead.companyName || '').trim().toLowerCase();
-      const sameCustomer = leads.filter((other) => {
-        if (other.id === lead.id || other.spamStatus !== 'NONE') return false;
-        const otherClean = other.phone.replace(/\D/g, '');
-        const phoneMatch = cleanPhone && !cleanPhone.includes('*') && otherClean === cleanPhone;
-        const compMatch =
-          normCompany.length >= 5 && (other.companyName || '').trim().toLowerCase() === normCompany;
-        return phoneMatch || compMatch;
-      });
+      const phoneMatches =
+        cleanPhone && !lead.phone.includes('*') ? activeNonSpamByPhone.get(cleanPhone) || [] : [];
+      const companyMatches =
+        normCompany.length >= 5 ? activeNonSpamByCompany.get(normCompany) || [] : [];
+
+      const sameCustomer: (typeof leads)[number][] = [];
+      const seenIds = new Set<number>([lead.id]);
+      for (const other of phoneMatches) {
+        if (!seenIds.has(other.id)) {
+          seenIds.add(other.id);
+          sameCustomer.push(other);
+        }
+      }
+      for (const other of companyMatches) {
+        if (!seenIds.has(other.id)) {
+          seenIds.add(other.id);
+          sameCustomer.push(other);
+        }
+      }
 
       const openDup = sameCustomer.find(
         (o) =>

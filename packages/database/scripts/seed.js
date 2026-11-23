@@ -14,8 +14,8 @@ const chosenDbFile =
 const defaultDbUrl = chosenDbFile.startsWith('/') ? `file://${chosenDbFile}` : `file:${chosenDbFile}`;
 const targetDbUrl =
   process.env.DATABASE_URL &&
-  process.env.DATABASE_URL !== 'file:./dev.db' &&
-  process.env.DATABASE_URL !== 'file:./independent_v2.db'
+    process.env.DATABASE_URL !== 'file:./dev.db' &&
+    process.env.DATABASE_URL !== 'file:./independent_v2.db'
     ? process.env.DATABASE_URL
     : defaultDbUrl;
 process.env.DATABASE_URL = targetDbUrl;
@@ -169,9 +169,9 @@ async function seedSyntheticModuleData(usersByEmail) {
   const rawStorageEnv = (process.env.STORAGE_ROOT || '').trim();
   const normalizedStorageRoot =
     !rawStorageEnv ||
-    rawStorageEnv === './storage' ||
-    rawStorageEnv === 'storage' ||
-    rawStorageEnv === '.\\storage'
+      rawStorageEnv === './storage' ||
+      rawStorageEnv === 'storage' ||
+      rawStorageEnv === '.\\storage'
       ? './storage_independent_v2'
       : rawStorageEnv;
   const storageRoot = path.isAbsolute(normalizedStorageRoot)
@@ -1067,9 +1067,20 @@ async function main() {
     });
   }
 
-  const shouldSeedAccounts = process.env.SKIP_SEED_ACCOUNTS !== 'true';
+  const isProductionEnv = process.env.NODE_ENV === 'production';
+  const allowProdSeedAccounts = process.env.ALLOW_PRODUCTION_SEED_ACCOUNTS === 'true';
+  const shouldSeedAccounts =
+    process.env.SKIP_SEED_ACCOUNTS !== 'true' && (!isProductionEnv || allowProdSeedAccounts);
   if (shouldSeedAccounts) {
-    const seedPassword = process.env.SEED_DEV_PASSWORD || 'ToanTrung@2026';
+    const configuredSeedPassword = (process.env.SEED_DEV_PASSWORD || '').trim();
+    if (isProductionEnv && !configuredSeedPassword) {
+      throw new Error(
+        'Production seed requires an explicit SEED_DEV_PASSWORD environment variable (default password is forbidden in production).',
+      );
+    }
+    const seedPassword =
+      configuredSeedPassword ||
+      (isProductionEnv ? crypto.randomBytes(24).toString('base64url') : 'ToanTrung@2026');
     const passwordHash = hashPassword(seedPassword);
 
     const rolesByCode = {};

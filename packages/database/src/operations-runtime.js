@@ -130,20 +130,29 @@ function isSqliteBusyError(err) {
   return msg.includes('SQLITE_BUSY') || msg.includes('database is locked') || msg.includes('TransactionWriteConflict');
 }
 
-async function withConcurrencyRetry(fn, maxRetries = 6) {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (isSqliteBusyError(err) && attempt < maxRetries) {
-        attempt += 1;
-        await new Promise((r) => setTimeout(r, 15 * attempt));
-        continue;
+function withSerializedIntakeLock(fn) {
+  const prev = globalThis.__toantrungIntakeWriteQueue || Promise.resolve();
+  const next = prev.then(fn, fn);
+  globalThis.__toantrungIntakeWriteQueue = next.catch(() => undefined);
+  return next;
+}
+
+async function withConcurrencyRetry(fn, maxRetries = 8) {
+  return withSerializedIntakeLock(async () => {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (isSqliteBusyError(err) && attempt < maxRetries) {
+          attempt += 1;
+          await new Promise((r) => setTimeout(r, 15 * attempt));
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
-  }
+  });
 }
 
 async function ingestLeadWithTrackingIdempotent(client, input) {

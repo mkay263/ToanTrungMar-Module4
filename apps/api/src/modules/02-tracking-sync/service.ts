@@ -199,164 +199,166 @@ export function resolveAttributionBySignals(input: {
 }
 
 export async function ingestWebhookLeadWithErrorProtection(input: WebhookLeadIntakeDto) {
-  const providerInternal =
-    input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'google_lead_form' : 'website_webhook';
-  const accountKey = input.intakeSourceAccountKey.trim().toLowerCase();
-  const submissionId = input.externalSubmissionId.trim();
+  return withSerializedWebhookIntakeLock(async () => {
+    const providerInternal =
+      input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'google_lead_form' : 'website_webhook';
+    const accountKey = input.intakeSourceAccountKey.trim().toLowerCase();
+    const submissionId = input.externalSubmissionId.trim();
 
-  try {
-    const { normalizedPhone, isUnstandardized } = normalizeVietnamPhone(input.phone);
-    const dupCheck = await inspectDuplicateAndPriceCheck({
-      phone: normalizedPhone,
-      email: input.email,
-      companyName: input.companyName,
-      projectName: input.projectName,
-    });
-
-    const assignment = await selectAutoAssignedSales(dupCheck.matchedOldLead?.assignedSalesId);
-    const leadCode = await generateNextLeadCode();
-
-    const gclid = input.tracking?.gclid?.trim() || null;
-    const utmCampaign = input.tracking?.utmCampaign?.trim() || null;
-    const googleCampaignCode = input.tracking?.googleCampaignCode?.trim() || null;
-
-    const allCampaigns = await prisma.campaign.findMany({ where: { isActive: true } });
-    const matchedByGclid = googleCampaignCode
-      ? allCampaigns.find((c) => c.campaignCode.toLowerCase() === googleCampaignCode.toLowerCase()) ||
-        null
-      : null;
-
-    const matchedByUtm = utmCampaign
-      ? allCampaigns.find(
-          (c) =>
-            c.utmCampaignSlug?.toLowerCase() === utmCampaign.toLowerCase() ||
-            c.campaignCode.toLowerCase() === utmCampaign.toLowerCase(),
-        ) || null
-      : null;
-
-    const resolvedAttr = input.tracking
-      ? resolveAttributionBySignals({
-          provider: input.intakeSourceProvider,
-          gclid,
-          googleCampaignCode,
-          utmSource: input.tracking.utmSource,
-          utmMedium: input.tracking.utmMedium,
-          utmCampaign,
-          referrerUrl: input.tracking.referrerUrl,
-          matchedCampaignByGclid: matchedByGclid,
-          matchedCampaignByUtm: matchedByUtm,
-        })
-      : {
-          marketingSource:
-            input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'Google Ads' : 'Chưa xác định',
-          sourceResolutionMethod:
-            input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'google_lead_form' : 'unknown',
-          campaignId: null,
-          campaignName: null,
-          isUnknownSource: input.intakeSourceProvider !== 'GOOGLE_LEAD_FORM',
-          isUnknownCampaign: true,
-          isUtmGclidMismatch: false,
-          isUnmatchedUtm: false,
-        };
-
-    const resolvedWebsite =
-      normalizeWebsiteDomain(input.sourceWebsite) ||
-      normalizeWebsiteDomain(input.tracking?.landingPageUrl) ||
-      (providerInternal === 'website_webhook' ? normalizeWebsiteDomain(accountKey) : null);
-
-    const ingested = await ingestLeadWithTrackingIdempotent(prisma, {
-      intakeSourceProvider: providerInternal,
-      intakeSourceAccountKey: accountKey,
-      externalSubmissionId: submissionId,
-      leadCode,
-      contactChannel:
-        input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'google_lead_form' : 'form_web',
-      phone: normalizedPhone,
-      email: input.email || null,
-      contactName: input.contactName || null,
-      companyName: input.companyName || null,
-      projectName: input.projectName || null,
-      areaType: input.areaType === 'hcm' ? 'tphcm' : input.areaType === 'other_province' ? 'other_province' : null,
-      province: input.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : input.province || null,
-      district: input.hcmDistrict || null,
-      installationAddress: input.installationAddress || null,
-      sourceWebsite: resolvedWebsite,
-      assignedSalesId: assignment.assignedSalesId,
-      marketingSource: resolvedAttr.marketingSource,
-      sourceResolutionMethod: resolvedAttr.sourceResolutionMethod,
-      utmSource: input.tracking?.utmSource || null,
-      utmMedium: input.tracking?.utmMedium || null,
-      utmCampaign: input.tracking?.utmCampaign || null,
-      campaignName: resolvedAttr.campaignName,
-      gclid,
-      referrerUrl: input.tracking?.referrerUrl || null,
-      landingPageUrl: input.tracking?.landingPageUrl || null,
-      deviceType: input.tracking?.deviceType || null,
-    });
-
-    if (!ingested.deduplicated) {
-      await prisma.$transaction(async (tx) => {
-        await tx.lead.update({
-          where: { id: ingested.lead.id },
-          data: {
-            isPhoneUnstandardized: isUnstandardized,
-            normalizedLookupKey: dupCheck.lookupKey,
-            isDuplicateAlert: dupCheck.isDuplicateAlert,
-            duplicateStatus: dupCheck.duplicateStatus,
-            matchedOldLeadId: dupCheck.matchedOldLead?.id ?? null,
-            isSuspectedPriceCheck: dupCheck.isSuspectedPriceCheck,
-            needsManagerAttention: assignment.needsManagerAttention,
-          },
-        });
-
-        await tx.marketingTracking.update({
-          where: { leadId: ingested.lead.id },
-          data: {
-            campaignId: resolvedAttr.campaignId,
-            isUnknownSource: resolvedAttr.isUnknownSource,
-            isUnknownCampaign: resolvedAttr.isUnknownCampaign,
-            isUtmGclidMismatch: resolvedAttr.isUtmGclidMismatch,
-            isUnmatchedUtm: resolvedAttr.isUnmatchedUtm,
-            isRepeatLead: Boolean(dupCheck.matchedOldLead),
-          },
-        });
+    try {
+      const { normalizedPhone, isUnstandardized } = normalizeVietnamPhone(input.phone);
+      const dupCheck = await inspectDuplicateAndPriceCheck({
+        phone: normalizedPhone,
+        email: input.email,
+        companyName: input.companyName,
+        projectName: input.projectName,
       });
-    }
 
-    return {
-      ok: true as const,
-      leadId: ingested.lead.id,
-      leadCode: ingested.lead.leadCode,
-      deduplicated: ingested.deduplicated,
-      marketingSource: ingested.tracking.marketingSource,
-    };
-  } catch (err) {
-    const errorMsg = err instanceof Error ? err.message : 'Lỗi xử lý Webhook Intake.';
-    await prisma.webhookIntakeErrorLog.upsert({
-      where: {
-        uq_webhook_error_source_submission: {
+      const assignment = await selectAutoAssignedSales(dupCheck.matchedOldLead?.assignedSalesId);
+      const leadCode = await generateNextLeadCode();
+
+      const gclid = input.tracking?.gclid?.trim() || null;
+      const utmCampaign = input.tracking?.utmCampaign?.trim() || null;
+      const googleCampaignCode = input.tracking?.googleCampaignCode?.trim() || null;
+
+      const allCampaigns = await prisma.campaign.findMany({ where: { isActive: true } });
+      const matchedByGclid = googleCampaignCode
+        ? allCampaigns.find((c) => c.campaignCode.toLowerCase() === googleCampaignCode.toLowerCase()) ||
+          null
+        : null;
+
+      const matchedByUtm = utmCampaign
+        ? allCampaigns.find(
+            (c) =>
+              c.utmCampaignSlug?.toLowerCase() === utmCampaign.toLowerCase() ||
+              c.campaignCode.toLowerCase() === utmCampaign.toLowerCase(),
+          ) || null
+        : null;
+
+      const resolvedAttr = input.tracking
+        ? resolveAttributionBySignals({
+            provider: input.intakeSourceProvider,
+            gclid,
+            googleCampaignCode,
+            utmSource: input.tracking.utmSource,
+            utmMedium: input.tracking.utmMedium,
+            utmCampaign,
+            referrerUrl: input.tracking.referrerUrl,
+            matchedCampaignByGclid: matchedByGclid,
+            matchedCampaignByUtm: matchedByUtm,
+          })
+        : {
+            marketingSource:
+              input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'Google Ads' : 'Chưa xác định',
+            sourceResolutionMethod:
+              input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'google_lead_form' : 'unknown',
+            campaignId: null,
+            campaignName: null,
+            isUnknownSource: input.intakeSourceProvider !== 'GOOGLE_LEAD_FORM',
+            isUnknownCampaign: true,
+            isUtmGclidMismatch: false,
+            isUnmatchedUtm: false,
+          };
+
+      const resolvedWebsite =
+        normalizeWebsiteDomain(input.sourceWebsite) ||
+        normalizeWebsiteDomain(input.tracking?.landingPageUrl) ||
+        (providerInternal === 'website_webhook' ? normalizeWebsiteDomain(accountKey) : null);
+
+      const ingested = await ingestLeadWithTrackingIdempotent(prisma, {
+        intakeSourceProvider: providerInternal,
+        intakeSourceAccountKey: accountKey,
+        externalSubmissionId: submissionId,
+        leadCode,
+        contactChannel:
+          input.intakeSourceProvider === 'GOOGLE_LEAD_FORM' ? 'google_lead_form' : 'form_web',
+        phone: normalizedPhone,
+        email: input.email || null,
+        contactName: input.contactName || null,
+        companyName: input.companyName || null,
+        projectName: input.projectName || null,
+        areaType: input.areaType === 'hcm' ? 'tphcm' : input.areaType === 'other_province' ? 'other_province' : null,
+        province: input.areaType === 'hcm' ? 'TP. Hồ Chí Minh' : input.province || null,
+        district: input.hcmDistrict || null,
+        installationAddress: input.installationAddress || null,
+        sourceWebsite: resolvedWebsite,
+        assignedSalesId: assignment.assignedSalesId,
+        marketingSource: resolvedAttr.marketingSource,
+        sourceResolutionMethod: resolvedAttr.sourceResolutionMethod,
+        utmSource: input.tracking?.utmSource || null,
+        utmMedium: input.tracking?.utmMedium || null,
+        utmCampaign: input.tracking?.utmCampaign || null,
+        campaignName: resolvedAttr.campaignName,
+        gclid,
+        referrerUrl: input.tracking?.referrerUrl || null,
+        landingPageUrl: input.tracking?.landingPageUrl || null,
+        deviceType: input.tracking?.deviceType || null,
+      });
+
+      if (!ingested.deduplicated) {
+        await prisma.$transaction(async (tx) => {
+          await tx.lead.update({
+            where: { id: ingested.lead.id },
+            data: {
+              isPhoneUnstandardized: isUnstandardized,
+              normalizedLookupKey: dupCheck.lookupKey,
+              isDuplicateAlert: dupCheck.isDuplicateAlert,
+              duplicateStatus: dupCheck.duplicateStatus,
+              matchedOldLeadId: dupCheck.matchedOldLead?.id ?? null,
+              isSuspectedPriceCheck: dupCheck.isSuspectedPriceCheck,
+              needsManagerAttention: assignment.needsManagerAttention,
+            },
+          });
+
+          await tx.marketingTracking.update({
+            where: { leadId: ingested.lead.id },
+            data: {
+              campaignId: resolvedAttr.campaignId,
+              isUnknownSource: resolvedAttr.isUnknownSource,
+              isUnknownCampaign: resolvedAttr.isUnknownCampaign,
+              isUtmGclidMismatch: resolvedAttr.isUtmGclidMismatch,
+              isUnmatchedUtm: resolvedAttr.isUnmatchedUtm,
+              isRepeatLead: Boolean(dupCheck.matchedOldLead),
+            },
+          });
+        });
+      }
+
+      return {
+        ok: true as const,
+        leadId: ingested.lead.id,
+        leadCode: ingested.lead.leadCode,
+        deduplicated: ingested.deduplicated,
+        marketingSource: ingested.tracking.marketingSource,
+      };
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : 'Lỗi xử lý Webhook Intake.';
+      await prisma.webhookIntakeErrorLog.upsert({
+        where: {
+          uq_webhook_error_source_submission: {
+            sourcePlatform: providerInternal,
+            intakeSourceAccountKey: accountKey,
+            externalSubmissionId: submissionId,
+          },
+        },
+        update: {
+          rawPayloadJson: JSON.stringify(input),
+          errorMessage: errorMsg,
+          retryCount: { increment: 1 },
+          lastRetriedAt: new Date(),
+        },
+        create: {
           sourcePlatform: providerInternal,
           intakeSourceAccountKey: accountKey,
           externalSubmissionId: submissionId,
+          rawPayloadJson: JSON.stringify(input),
+          errorCode: 'WEBHOOK_VALIDATION_FAILED',
+          errorMessage: errorMsg,
         },
-      },
-      update: {
-        rawPayloadJson: JSON.stringify(input),
-        errorMessage: errorMsg,
-        retryCount: { increment: 1 },
-        lastRetriedAt: new Date(),
-      },
-      create: {
-        sourcePlatform: providerInternal,
-        intakeSourceAccountKey: accountKey,
-        externalSubmissionId: submissionId,
-        rawPayloadJson: JSON.stringify(input),
-        errorCode: 'WEBHOOK_VALIDATION_FAILED',
-        errorMessage: errorMsg,
-      },
-    });
-    throw err;
-  }
+      });
+      throw err;
+    }
+  });
 }
 
 export async function retryUnresolvedGclids() {
@@ -601,6 +603,25 @@ interface StoredTouchpointRecord {
   occurredAt: string;
 }
 
+const globalForTrackingLocks = globalThis as unknown as {
+  __toantrungTouchpointWriteQueue?: Promise<unknown>;
+  __toantrungWebhookIntakeQueue?: Promise<unknown>;
+};
+
+function withSerializedTouchpointLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = globalForTrackingLocks.__toantrungTouchpointWriteQueue ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  globalForTrackingLocks.__toantrungTouchpointWriteQueue = next.catch(() => undefined);
+  return next;
+}
+
+function withSerializedWebhookIntakeLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = globalForTrackingLocks.__toantrungWebhookIntakeQueue ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  globalForTrackingLocks.__toantrungWebhookIntakeQueue = next.catch(() => undefined);
+  return next;
+}
+
 export async function getStoredTouchpoints(): Promise<StoredTouchpointRecord[]> {
   const row = await prisma.systemSetting.findUnique({
     where: { key: SETTING_KEY_TOUCHPOINTS },
@@ -624,43 +645,47 @@ export async function recordTrackingTouchpoint(input: {
   visitorId?: string | null;
   occurredAt?: string | null;
 }): Promise<{ ok: true; deduplicated: boolean; linkedLeadCode: string | null }> {
-  const existing = await getStoredTouchpoints();
-  const found = existing.find((e) => e.eventId === input.eventId);
-  if (found) {
-    return { ok: true, deduplicated: true, linkedLeadCode: found.leadCode };
-  }
+  return withSerializedTouchpointLock(async () => {
+    const normalizedEventId = input.eventId.trim();
+    const existing = await getStoredTouchpoints();
+    const found = existing.find((e) => e.eventId === normalizedEventId);
+    if (found) {
+      return { ok: true, deduplicated: true, linkedLeadCode: found.leadCode };
+    }
 
-  let linkedLeadCode = input.leadCode?.trim() || null;
-  if (!linkedLeadCode && input.submissionId?.trim()) {
-    const matchedTracking = await prisma.marketingTracking.findFirst({
-      where: { externalSubmissionId: input.submissionId.trim() },
-      include: { lead: { select: { leadCode: true } } },
+    let linkedLeadCode = input.leadCode?.trim() || null;
+    if (!linkedLeadCode && input.submissionId?.trim()) {
+      const matchedTracking = await prisma.marketingTracking.findFirst({
+        where: { externalSubmissionId: input.submissionId.trim() },
+        include: { lead: { select: { leadCode: true } } },
+      });
+      linkedLeadCode = matchedTracking?.lead?.leadCode || null;
+    }
+
+    const record: StoredTouchpointRecord = {
+      eventId: normalizedEventId,
+      eventType: input.eventType,
+      sourceWebsite:
+        normalizeWebsiteDomain(input.sourceWebsite) || input.sourceWebsite.trim().toLowerCase(),
+      pageUrl: input.pageUrl?.trim() || null,
+      leadCode: linkedLeadCode,
+      submissionId: input.submissionId?.trim() || null,
+      visitorId: input.visitorId?.trim() || null,
+      occurredAt: input.occurredAt?.trim() || new Date().toISOString(),
+    };
+
+    const next = [record, ...existing].slice(0, 500);
+    await prisma.systemSetting.upsert({
+      where: { key: SETTING_KEY_TOUCHPOINTS },
+      update: { value: JSON.stringify(next) },
+      create: {
+        key: SETTING_KEY_TOUCHPOINTS,
+        value: JSON.stringify(next),
+      },
     });
-    linkedLeadCode = matchedTracking?.lead?.leadCode || null;
-  }
 
-  const record: StoredTouchpointRecord = {
-    eventId: input.eventId.trim(),
-    eventType: input.eventType,
-    sourceWebsite: normalizeWebsiteDomain(input.sourceWebsite) || input.sourceWebsite.trim().toLowerCase(),
-    pageUrl: input.pageUrl?.trim() || null,
-    leadCode: linkedLeadCode,
-    submissionId: input.submissionId?.trim() || null,
-    visitorId: input.visitorId?.trim() || null,
-    occurredAt: input.occurredAt?.trim() || new Date().toISOString(),
-  };
-
-  const next = [record, ...existing].slice(0, 500);
-  await prisma.systemSetting.upsert({
-    where: { key: SETTING_KEY_TOUCHPOINTS },
-    update: { value: JSON.stringify(next) },
-    create: {
-      key: SETTING_KEY_TOUCHPOINTS,
-      value: JSON.stringify(next),
-    },
+    return { ok: true, deduplicated: false, linkedLeadCode };
   });
-
-  return { ok: true, deduplicated: false, linkedLeadCode };
 }
 
 export async function resolveLeadReconciliationAlert(

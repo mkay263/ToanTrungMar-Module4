@@ -188,20 +188,33 @@ function isSqliteBusyError(err: unknown): boolean {
   return msg.includes('SQLITE_BUSY') || msg.includes('database is locked') || msg.includes('TransactionWriteConflict');
 }
 
-async function withConcurrencyRetry<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {
-  let attempt = 0;
-  while (true) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (isSqliteBusyError(err) && attempt < maxRetries) {
-        attempt += 1;
-        await new Promise((r) => setTimeout(r, 15 * attempt));
-        continue;
+const globalForIntakeQueue = globalThis as unknown as {
+  __toantrungIntakeWriteQueue?: Promise<unknown>;
+};
+
+function withSerializedIntakeLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = globalForIntakeQueue.__toantrungIntakeWriteQueue ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  globalForIntakeQueue.__toantrungIntakeWriteQueue = next.catch(() => undefined);
+  return next;
+}
+
+async function withConcurrencyRetry<T>(fn: () => Promise<T>, maxRetries = 8): Promise<T> {
+  return withSerializedIntakeLock(async () => {
+    let attempt = 0;
+    while (true) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (isSqliteBusyError(err) && attempt < maxRetries) {
+          attempt += 1;
+          await new Promise((r) => setTimeout(r, 15 * attempt));
+          continue;
+        }
+        throw err;
       }
-      throw err;
     }
-  }
+  });
 }
 
 /**
