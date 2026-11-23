@@ -37,7 +37,7 @@ import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
-import { GooglePlatformSwitcher } from '@/components/common/GooglePlatformSwitcher';
+import { MktSpreadsheetCalcBar, useMktExcelSelection } from '@/components/common/MktSpreadsheetCalcBar';
 
 const GscPerformanceChart = dynamic(
   () => import('./GscPerformanceChart').then((m) => m.GscPerformanceChart),
@@ -180,6 +180,7 @@ export function SeoKeywordsWorkspace() {
     () => loadRouteState<{ contentPage?: number }>('ads')?.contentPage || 1,
   );
   const [searchTerm, setSearchTerm] = useState('');
+  const seoExcelCalc = useMktExcelSelection();
 
   // Ngưỡng gợi ý cơ hội cấu hình được (không hardcode cố định)
   const [draftMinImpr, setDraftMinImpr] = useState('30');
@@ -375,62 +376,6 @@ export function SeoKeywordsWorkspace() {
 
   const seo = data?.seo;
 
-  const exportCsvCurrentTab = () => {
-    if (!seo) return;
-    const rows: string[][] = [];
-    if (activeTab === 'queries' || activeTab === 'overview') {
-      rows.push(['Từ khóa', 'Click tìm kiếm', 'Hiển thị tìm kiếm', 'CTR (%)', 'Vị trí TB', 'Thay đổi Click', 'Cải thiện vị trí']);
-      for (const r of seo.tables.queries.rows) {
-        rows.push([
-          r.key,
-          String(r.clicks),
-          String(r.impressions),
-          r.ctrPct !== null ? `${r.ctrPct}%` : '',
-          r.averagePosition !== null ? String(r.averagePosition) : '',
-          r.clickChange !== null ? String(r.clickChange) : '',
-          r.positionImprovement !== null ? String(r.positionImprovement) : '',
-        ]);
-      }
-    } else if (activeTab === 'pages') {
-      rows.push(['Trang đích', 'Click tìm kiếm', 'Hiển thị tìm kiếm', 'CTR (%)', 'Vị trí TB', 'Thay đổi Click']);
-      for (const r of seo.tables.pages.rows) {
-        rows.push([
-          r.key,
-          String(r.clicks),
-          String(r.impressions),
-          r.ctrPct !== null ? `${r.ctrPct}%` : '',
-          r.averagePosition !== null ? String(r.averagePosition) : '',
-          r.clickChange !== null ? String(r.clickChange) : '',
-        ]);
-      }
-    } else {
-      rows.push(['Tiêu đề bài viết', 'Từ khóa mục tiêu', 'Website đích', 'Người phụ trách', 'Trạng thái', 'Cập nhật lúc']);
-      for (const r of seo.tables.content?.rows || []) {
-        rows.push([
-          r.title,
-          r.targetQuery,
-          r.targetWebsite || '',
-          r.owner,
-          formatWorkflowStatus(r.workflowStatus),
-          r.updatedAt,
-        ]);
-      }
-    }
-
-    const csv =
-      '\uFEFF' +
-      rows
-        .map((r) => r.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
-        .join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `tu-khoa-seo-${scope.websiteId}-${activeTab}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
   const handleQuickPlanKeyword = (queryText: string) => {
     const inferredDomain =
       scope.websiteId === 'bangled.vn' || scope.websiteId === 'manhinhled.net.vn'
@@ -554,8 +499,6 @@ export function SeoKeywordsWorkspace() {
 
   return (
     <div className="space-y-4 pb-8">
-      <GooglePlatformSwitcher active={activeTab === 'trends' ? 'trends' : 'gsc'} platforms={['gsc', 'trends']} />
-
       <WebsiteDashboardHeader
         title="Từ khóa & SEO"
         scope={scope}
@@ -599,14 +542,13 @@ export function SeoKeywordsWorkspace() {
               <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
               {UI_VOCABULARY.actions.refresh}
             </button>
-            <button
-              type="button"
-              onClick={exportCsvCurrentTab}
+            <a
+              href="/api/v1/ads/export"
               className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
             >
               <Download className="w-3.5 h-3.5" />
               {UI_VOCABULARY.actions.exportExcel}
-            </button>
+            </a>
             <button
               type="button"
               onClick={() => setShowAiPanel((prev) => !prev)}
@@ -1203,10 +1145,30 @@ export function SeoKeywordsWorkspace() {
                 </button>
               </div>
             )}
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+            <MktSpreadsheetCalcBar
+              title="Bảng Từ khóa SEO (Kiểu Excel)"
+              excelMode={seoExcelCalc.excelMode}
+              onToggleExcelMode={seoExcelCalc.toggleExcelMode}
+              stats={seoExcelCalc.stats}
+              onClear={seoExcelCalc.clearSelection}
+              copiedOk={seoExcelCalc.copiedOk}
+              onCopyTable={() =>
+                void seoExcelCalc.copyTsv(
+                  ['Từ khóa tìm kiếm', 'Click tìm kiếm', 'Hiển thị', 'CTR (%)', 'Vị trí TB'],
+                  queryRowsFiltered.map((r) => [
+                    r.key,
+                    r.clicks,
+                    r.impressions,
+                    r.ctrPct ?? '',
+                    r.averagePosition ?? '',
+                  ]),
+                )
+              }
+            />
+            <div tabIndex={0} role="region" aria-label="Bảng từ khóa tìm kiếm kiểu Excel" className="overflow-x-auto max-h-[68vh]">
+              <table className={`w-full text-xs border-separate border-spacing-0 ${seoExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
+                  <tr className="border-b border-slate-200">
                     <th scope="col" className="py-2.5 px-4 text-left font-semibold">Từ khóa tìm kiếm</th>
                     <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
                     <th scope="col" className="py-2.5 px-3 text-right font-semibold">Hiển thị tìm kiếm</th>
@@ -1227,20 +1189,32 @@ export function SeoKeywordsWorkspace() {
                     queryRowsFiltered.map((r) => {
                       const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
                       return (
-                        <tr key={r.key} className="hover:bg-slate-50/70">
+                        <tr key={r.key} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                           <td className="py-2.5 px-4 font-medium text-slate-900 max-w-[320px] truncate" title={r.key}>
                             {r.key}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`q:${r.key}:clicks`, 'Click', r.clicks)}
+                            className={`py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums ${seoExcelCalc.cellClass(`q:${r.key}:clicks`)}`}
+                          >
                             {r.clicks.toLocaleString('vi-VN')}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`q:${r.key}:impr`, 'Hiển thị', r.impressions)}
+                            className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${seoExcelCalc.cellClass(`q:${r.key}:impr`)}`}
+                          >
                             {r.impressions.toLocaleString('vi-VN')}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`q:${r.key}:ctr`, 'CTR', r.ctrPct)}
+                            className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${seoExcelCalc.cellClass(`q:${r.key}:ctr`)}`}
+                          >
                             {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`q:${r.key}:pos`, 'Vị trí TB', r.averagePosition)}
+                            className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${seoExcelCalc.cellClass(`q:${r.key}:pos`)}`}
+                          >
                             {r.averagePosition !== null ? r.averagePosition : '—'}
                           </td>
                           <td className="py-2.5 px-3 text-right text-[11px] text-slate-600 tabular-nums">
@@ -1276,6 +1250,29 @@ export function SeoKeywordsWorkspace() {
                     })
                   )}
                 </tbody>
+                {queryRowsFiltered.length > 0 && (() => {
+                  const totalClicks = queryRowsFiltered.reduce((s, r) => s + r.clicks, 0);
+                  const totalImpr = queryRowsFiltered.reduce((s, r) => s + r.impressions, 0);
+                  const aggCtr = totalImpr > 0 ? ((totalClicks / totalImpr) * 100).toFixed(2) : null;
+                  const posRows = queryRowsFiltered.filter((r) => r.averagePosition !== null);
+                  const avgPos =
+                    posRows.length > 0
+                      ? (posRows.reduce((s, r) => s + (r.averagePosition || 0), 0) / posRows.length).toFixed(1)
+                      : null;
+                  return (
+                    <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0">
+                      <tr>
+                        <td className="py-2.5 px-4">Σ TỔNG ({queryRowsFiltered.length} từ khóa)</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{totalClicks.toLocaleString('vi-VN')}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{totalImpr.toLocaleString('vi-VN')}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{aggCtr !== null ? `${aggCtr}%` : '—'}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{avgPos ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-400 font-normal">—</td>
+                        <td className="py-2.5 px-4" />
+                      </tr>
+                    </tfoot>
+                  );
+                })()}
               </table>
             </div>
           </div>
@@ -1367,6 +1364,29 @@ export function SeoKeywordsWorkspace() {
                     })
                   )}
                 </tbody>
+                {pageRowsFiltered.length > 0 && (() => {
+                  const totalClicks = pageRowsFiltered.reduce((s, r) => s + r.clicks, 0);
+                  const totalImpr = pageRowsFiltered.reduce((s, r) => s + r.impressions, 0);
+                  const aggCtr = totalImpr > 0 ? ((totalClicks / totalImpr) * 100).toFixed(2) : null;
+                  const posRows = pageRowsFiltered.filter((r) => r.averagePosition !== null);
+                  const avgPos =
+                    posRows.length > 0
+                      ? (posRows.reduce((s, r) => s + (r.averagePosition || 0), 0) / posRows.length).toFixed(1)
+                      : null;
+                  return (
+                    <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0">
+                      <tr>
+                        <td className="py-2.5 px-4">Σ TỔNG ({pageRowsFiltered.length} trang đích)</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{totalClicks.toLocaleString('vi-VN')}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{totalImpr.toLocaleString('vi-VN')}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{aggCtr !== null ? `${aggCtr}%` : '—'}</td>
+                        <td className="py-2.5 px-3 text-right tabular-nums">{avgPos ?? '—'}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-400 font-normal">—</td>
+                        {queryPageLinks.length > 0 && <td className="py-2.5 px-4" />}
+                      </tr>
+                    </tfoot>
+                  );
+                })()}
               </table>
             </div>
           </div>

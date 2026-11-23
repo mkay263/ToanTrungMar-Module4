@@ -412,7 +412,7 @@ export function MarketingTrafficChart({
 
         <svg
           viewBox={`0 0 ${geom.W} ${geom.H}`}
-          className="w-full h-[248px] overflow-visible"
+          className="w-full h-[268px] overflow-visible"
           onMouseLeave={() => setHoverIdx(null)}
           role="img"
           aria-label="Biểu đồ xu hướng lưu lượng chiến dịch marketing"
@@ -519,11 +519,14 @@ export function MarketingTrafficChart({
 
           {/* Điểm nút dữ liệu + Nhãn trục X + Vùng bắt hover rộng */}
           {geom.nodes.map((n, idx) => {
+            const xStep = Math.max(1, Math.ceil(geom.nodes.length / 8));
+            const isLast = idx === geom.nodes.length - 1;
+            const tooCloseToLast = !isLast && geom.nodes.length - 1 - idx < Math.max(2, Math.ceil(xStep * 0.65));
             const showXLabel =
-              geom.nodes.length <= 12 ||
+              geom.nodes.length <= 10 ||
               idx === 0 ||
-              idx === geom.nodes.length - 1 ||
-              idx % Math.ceil(geom.nodes.length / 8) === 0;
+              isLast ||
+              (idx % xStep === 0 && !tooCloseToLast);
             const isHovered = hoverIdx === idx;
             const mainY =
               mode === 'depth'

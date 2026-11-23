@@ -3,13 +3,19 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   Calculator,
+  Check,
   ChevronDown,
   Columns3,
+  Copy,
   ExternalLink,
   Globe,
   Plus,
   RotateCcw,
+  Table2,
   Trash2,
 } from 'lucide-react';
 import { UI_VOCABULARY, type M02CampaignRowDto } from '@toantrung/contracts';
@@ -248,11 +254,32 @@ export function AdsExcelTableSection({
   const [fConstB, setFConstB] = useState('1');
   const [fFormat, setFFormat] = useState<FormulaFormat>('vnd');
 
-  // Excel interactive cell-pick calculator
+  // Excel interactive cell-pick calculator + multi-cell SUM/AVG + sorting + grid coordinates
   const [calcActive, setCalcActive] = useState(false);
+  const [excelGridCoords, setExcelGridCoords] = useState(true);
+  const [pickedList, setPickedList] = useState<PickedCell[]>([]);
   const [cellA, setCellA] = useState<PickedCell | null>(null);
   const [cellB, setCellB] = useState<PickedCell | null>(null);
   const [pickOp, setPickOp] = useState<FormulaOp>('/');
+  const [copiedTableOk, setCopiedTableOk] = useState(false);
+  const [sortCol, setSortCol] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<'ascending' | 'descending'>('descending');
+  const [sortAnnouncement, setSortAnnouncement] = useState('');
+
+  const textCollator = useMemo(
+    () => new Intl.Collator('vi', { numeric: true, sensitivity: 'base' }),
+    [],
+  );
+
+  const toggleSort = (colKey: string, colLabel: string) => {
+    const nextDir: 'ascending' | 'descending' =
+      sortCol === colKey && sortDir === 'descending' ? 'ascending' : 'descending';
+    setSortCol(colKey);
+    setSortDir(nextDir);
+    setSortAnnouncement(
+      `Đã sắp xếp theo ${colLabel}, ${nextDir === 'ascending' ? 'tăng dần' : 'giảm dần'}`,
+    );
+  };
 
   const enabledCount = useMemo(
     () => campaigns.filter((c) => c.status === 'ENABLED').length,
@@ -330,7 +357,25 @@ export function AdsExcelTableSection({
       return flat;
     }
 
-    return filteredCampaigns.map((c) => ({
+    const sortDisplayRows = (list: TableDisplayRow[]): TableDisplayRow[] => {
+      if (!sortCol) return list;
+      const factor = sortDir === 'ascending' ? 1 : -1;
+      return [...list].sort((a, b) => {
+        if (sortCol === 'campaignName') {
+          return factor * textCollator.compare(a.campaign.campaignName, b.campaign.campaignName);
+        }
+        if (sortCol === 'date') {
+          return factor * textCollator.compare(a.date || '', b.date || '');
+        }
+        const va = a[sortCol as MetricColKey];
+        const vb = b[sortCol as MetricColKey];
+        const na = va === null || va === undefined ? -Infinity : Number(va);
+        const nb = vb === null || vb === undefined ? -Infinity : Number(vb);
+        return factor * (na - nb);
+      });
+    };
+
+    const rows: TableDisplayRow[] = filteredCampaigns.map((c) => ({
       rowId: c.campaignId,
       campaign: c,
       cost: c.cost,
@@ -343,7 +388,9 @@ export function AdsExcelTableSection({
       validAttributedLeadCount: c.validAttributedLeadCount,
       costPerValidLead: c.costPerValidLead,
     }));
-  }, [filteredCampaigns, viewMode]);
+
+    return sortDisplayRows(rows);
+  }, [filteredCampaigns, viewMode, sortCol, sortDir, textCollator]);
 
   const summaryTotals = useMemo(() => {
     const totalCost = filteredCampaigns.reduce((s, c) => s + c.cost, 0);
@@ -378,6 +425,13 @@ export function AdsExcelTableSection({
   ) => {
     if (!calcActive || val === null || !Number.isFinite(val)) return;
     const picked: PickedCell = { rowId, rowLabel, colKey, colLabel, value: val };
+    setPickedList((prev) => {
+      const exists = prev.some((p) => p.rowId === rowId && p.colKey === colKey && p.colLabel === colLabel);
+      if (exists) {
+        return prev.filter((p) => !(p.rowId === rowId && p.colKey === colKey && p.colLabel === colLabel));
+      }
+      return [...prev, picked];
+    });
     if (!cellA) {
       setCellA(picked);
       setCellB(null);
@@ -389,6 +443,70 @@ export function AdsExcelTableSection({
     }
     setCellA(picked);
     setCellB(null);
+  };
+
+  const multiPickStats = useMemo(() => {
+    if (pickedList.length === 0) return null;
+    const vals = pickedList.map((p) => p.value);
+    const sum = vals.reduce((s, v) => s + v, 0);
+    return {
+      count: vals.length,
+      sum,
+      avg: sum / vals.length,
+      min: Math.min(...vals),
+      max: Math.max(...vals),
+    };
+  }, [pickedList]);
+
+  const handleCopyAdsTableToExcel = async () => {
+    try {
+      const activeMetrics = METRIC_FIELDS.filter((mf) => isVisible(mf.key));
+      const headers = [
+        ...(viewMode === 'daily' ? ['Ngày'] : []),
+        'Tên chiến dịch',
+        ...(isVisible('website') ? ['Website'] : []),
+        ...(isVisible('status') ? ['Trạng thái'] : []),
+        ...activeMetrics.map((m) => m.label),
+        ...customFormulas.map((cf) => cf.name),
+      ];
+      const rows = displayRows.map((row) => [
+        ...(viewMode === 'daily' ? [row.date || ''] : []),
+        row.campaign.campaignName,
+        ...(isVisible('website') ? [row.campaign.targetWebsiteDomain || ''] : []),
+        ...(isVisible('status') ? [row.campaign.status === 'ENABLED' ? 'Đang chạy' : 'Tạm dừng'] : []),
+        ...activeMetrics.map((m) => {
+          const v = getRowMetric(row, m.key);
+          return v === null ? '' : v;
+        }),
+        ...customFormulas.map((cf) => {
+          const a = getRowMetric(row, cf.colA);
+          const b = cf.bMode === 'const' ? cf.constB : getRowMetric(row, cf.colB);
+          const r = evalBinaryOp(a, cf.op, b);
+          return r === null ? '' : Number(r.toFixed(2));
+        }),
+      ]);
+      const tsv = [headers.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n');
+      await navigator.clipboard.writeText(tsv);
+      setCopiedTableOk(true);
+      window.setTimeout(() => setCopiedTableOk(false), 2000);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
+
+  const addPresetFormula = (preset: {
+    name: string;
+    colA: MetricColKey;
+    op: FormulaOp;
+    bMode: 'column' | 'const';
+    colB: MetricColKey;
+    constB: number;
+    format: FormulaFormat;
+  }) => {
+    setCustomFormulas((prev) => {
+      if (prev.some((f) => f.name === preset.name)) return prev;
+      return [...prev, { id: `cf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ...preset }];
+    });
   };
 
   const pickedResult = useMemo(() => {
@@ -447,9 +565,11 @@ export function AdsExcelTableSection({
     if (!calcActive) return '';
     const isA = cellA && cellA.rowId === rowId && cellA.colKey === colKey;
     const isB = cellB && cellB.rowId === rowId && cellB.colKey === colKey;
+    const inMulti = pickedList.some((p) => p.rowId === rowId && p.colKey === colKey);
     if (isA && isB) return 'ring-2 ring-inset ring-amber-500 bg-amber-50/90 cursor-cell';
     if (isA) return 'ring-2 ring-inset ring-emerald-500 bg-emerald-50/90 cursor-cell';
     if (isB) return 'ring-2 ring-inset ring-violet-500 bg-violet-50/90 cursor-cell';
+    if (inMulti) return 'ring-2 ring-inset ring-blue-500 bg-blue-50/90 cursor-cell';
     return 'cursor-cell hover:bg-blue-50/60';
   };
 
@@ -559,7 +679,7 @@ export function AdsExcelTableSection({
             </button>
           </div>
 
-          {/* Nút Chọn ô A ÷ B kiểu Excel */}
+          {/* Nút Chọn ô tính SUM/AVG/A÷B kiểu Excel */}
           <button
             type="button"
             aria-pressed={calcActive}
@@ -568,6 +688,7 @@ export function AdsExcelTableSection({
               if (calcActive) {
                 setCellA(null);
                 setCellB(null);
+                setPickedList([]);
               }
             }}
             className={`h-8 px-2.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition ${
@@ -577,7 +698,42 @@ export function AdsExcelTableSection({
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            <span>Chia ô Excel (A ÷ B)</span>
+            <span>Tính ô Excel (SUM / A÷B)</span>
+          </button>
+
+          {/* Copy thẳng bảng sang Excel / Google Sheets */}
+          <button
+            type="button"
+            onClick={() => void handleCopyAdsTableToExcel()}
+            className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 transition"
+          >
+            {copiedTableOk ? (
+              <>
+                <Check className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="text-emerald-700">Đã copy (Ctrl+V vào Excel)</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy bảng Excel</span>
+              </>
+            )}
+          </button>
+
+          {/* Bật/Tắt toạ độ cột A, B, C kiểu Excel */}
+          <button
+            type="button"
+            aria-pressed={excelGridCoords}
+            onClick={() => setExcelGridCoords((p) => !p)}
+            title="Hiển thị ký hiệu cột A, B, C và số dòng như trang tính Excel"
+            className={`h-8 px-2 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1 transition ${
+              excelGridCoords
+                ? 'bg-slate-900 border-slate-900 text-white'
+                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+            }`}
+          >
+            <Table2 className="w-3.5 h-3.5" />
+            <span>Lưới A-Z</span>
           </button>
 
           {/* Nút thêm Cột công thức */}
@@ -646,12 +802,60 @@ export function AdsExcelTableSection({
         </div>
       </div>
 
-      {/* Form thêm Cột Công Thức (kiểu Excel = Cột A [phép tính] Cột B) */}
+      {/* Form thêm Cột Công Thức (kiểu Excel = Cột A [phép tính] Cột B) + Công thức MKT cài sẵn */}
       {showFormulaCreator && (
-        <form
-          onSubmit={handleCreateCustomFormula}
-          className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-end gap-2.5 text-xs"
-        >
+        <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 space-y-2.5 text-xs">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold text-slate-600">Công thức MKT 1 chạm:</span>
+            {[
+              {
+                name: 'Tỷ lệ Lead/Click (%)',
+                colA: 'validAttributedLeadCount' as const,
+                op: 'pct' as const,
+                bMode: 'column' as const,
+                colB: 'clicks' as const,
+                constB: 1,
+                format: 'percent' as const,
+              },
+              {
+                name: 'Tỷ lệ CĐ/Click (%)',
+                colA: 'conversions' as const,
+                op: 'pct' as const,
+                bMode: 'column' as const,
+                colB: 'clicks' as const,
+                constB: 1,
+                format: 'percent' as const,
+              },
+              {
+                name: 'Dự toán tháng (×30)',
+                colA: 'cost' as const,
+                op: '*' as const,
+                bMode: 'const' as const,
+                colB: 'cost' as const,
+                constB: 30,
+                format: 'vnd' as const,
+              },
+              {
+                name: 'Chi phí / 1 Hiển thị',
+                colA: 'cost' as const,
+                op: '/' as const,
+                bMode: 'column' as const,
+                colB: 'impressions' as const,
+                constB: 1,
+                format: 'vnd' as const,
+              },
+            ].map((p) => (
+              <button
+                key={p.name}
+                type="button"
+                onClick={() => addPresetFormula(p)}
+                className="px-2 py-1 rounded-md bg-white border border-blue-200 hover:bg-blue-50 text-[#0F275C] text-[11px] font-semibold transition"
+              >
+                + {p.name}
+              </button>
+            ))}
+          </div>
+          <form onSubmit={handleCreateCustomFormula} className="flex flex-wrap items-end gap-2.5">
           <div>
             <label className="block text-[11px] font-semibold text-slate-600 mb-1">Tên cột mới</label>
             <input
@@ -751,11 +955,30 @@ export function AdsExcelTableSection({
             Đóng
           </button>
         </form>
+        </div>
       )}
 
-      {/* Thanh công thức Excel (Chọn ô A ÷ ô B bất kỳ trên bảng -> ra kết quả ngay) */}
+      {/* Thanh công thức Excel (Chọn nhiều ô tính SUM/AVG/Min/Max + Chọn ô A ÷ ô B) */}
       {calcActive && (
-        <div className="px-4 py-2.5 bg-blue-50/90 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+        <div className="px-4 py-2.5 bg-blue-50/90 border-b border-blue-200 space-y-2 text-xs">
+          {multiPickStats && (
+            <div className="flex flex-wrap items-center gap-2 pb-1.5 border-b border-blue-200/70 text-[11px]">
+              <span className="px-2 py-0.5 rounded-md bg-[#0F275C] text-white font-bold tabular-nums">
+                Đã chọn {multiPickStats.count} ô
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-800 tabular-nums">
+                SUM: <strong>{multiPickStats.sum.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-800 tabular-nums">
+                AVG: <strong>{multiPickStats.avg.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
+              </span>
+              <span className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-600 tabular-nums">
+                Min: {multiPickStats.min.toLocaleString('vi-VN', { maximumFractionDigits: 2 })} · Max:{' '}
+                {multiPickStats.max.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}
+              </span>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-bold text-[#0F275C] inline-flex items-center gap-1">
               <Calculator className="w-3.5 h-3.5" />
@@ -843,12 +1066,13 @@ export function AdsExcelTableSection({
                 + Lưu thành cột cho cả bảng
               </button>
             )}
-            {(cellA || cellB) && (
+            {(cellA || cellB || pickedList.length > 0) && (
               <button
                 type="button"
                 onClick={() => {
                   setCellA(null);
                   setCellB(null);
+                  setPickedList([]);
                 }}
                 className="h-7 px-2 rounded-md bg-white border border-slate-200 hover:bg-slate-50 text-slate-600"
               >
@@ -856,21 +1080,100 @@ export function AdsExcelTableSection({
               </button>
             )}
           </div>
+          </div>
         </div>
       )}
 
-      {/* Bảng dữ liệu chính */}
-      <div tabIndex={0} role="region" aria-label="Bảng chiến dịch quảng cáo và link đích" className="overflow-x-auto">
-        <table className="w-full min-w-[1060px] text-left border-collapse text-xs">
-          <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+      {/* Thông báo trạng thái sắp xếp cho trình đọc màn hình */}
+      <div role="status" className="sr-only">
+        {sortAnnouncement}
+      </div>
+
+      {/* Bảng dữ liệu chính (Hỗ trợ lưới Excel A-Z, cố định tiêu đề & cột chiến dịch, sắp xếp cột) */}
+      <div
+        tabIndex={0}
+        role="region"
+        aria-label="Bảng chiến dịch quảng cáo và link đích kiểu Excel"
+        className="overflow-x-auto max-h-[72vh]"
+      >
+        <table
+          className={`w-full min-w-[1060px] text-left border-separate border-spacing-0 text-xs ${
+            excelGridCoords ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''
+          }`}
+        >
+          <thead className="bg-slate-100 text-slate-700 sticky top-0 z-20 shadow-[0_1px_0_#CBD5E1]">
+            {excelGridCoords && (() => {
+              const totalCols =
+                (viewMode === 'daily' ? 1 : 0) +
+                1 +
+                (isVisible('link') ? 1 : 0) +
+                (isVisible('website') ? 1 : 0) +
+                (isVisible('status') ? 1 : 0) +
+                METRIC_FIELDS.filter((mf) => isVisible(mf.key)).length +
+                customFormulas.length +
+                (isVisible('actions') ? 1 : 0);
+              return (
+                <tr className="bg-slate-200/80 text-[10px] font-mono text-slate-500 select-none">
+                  <th className="py-1 px-2 text-center w-9 bg-slate-200 sticky left-0 z-30">#</th>
+                  {Array.from({ length: totalCols }, (_, i) => {
+                    let temp = i;
+                    let letter = '';
+                    while (temp >= 0) {
+                      letter = String.fromCharCode((temp % 26) + 65) + letter;
+                      temp = Math.floor(temp / 26) - 1;
+                    }
+                    return (
+                      <th key={`xl-${letter}`} className="py-1 px-2 text-center font-bold">
+                        {letter}
+                      </th>
+                    );
+                  })}
+                </tr>
+              );
+            })()}
             <tr>
-              {viewMode === 'daily' && (
-                <th scope="col" className="py-2.5 px-3 font-semibold whitespace-nowrap">
-                  Ngày
+              {excelGridCoords && (
+                <th scope="col" className="py-2.5 px-2 text-center font-mono text-[11px] text-slate-500 bg-slate-100 sticky left-0 z-30 w-9">
+                  STT
                 </th>
               )}
-              <th scope="col" className="py-2.5 px-4 font-semibold">
-                Tên chiến dịch
+              {viewMode === 'daily' && (
+                <th
+                  scope="col"
+                  aria-sort={sortCol === 'date' ? sortDir : undefined}
+                  className="p-0 font-semibold whitespace-nowrap"
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleSort('date', 'Ngày')}
+                    className="w-full min-h-9 py-2 px-3 inline-flex items-center gap-1 hover:bg-slate-200/70 focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+                  >
+                    <span>Ngày</span>
+                    {sortCol === 'date' ? (
+                      sortDir === 'ascending' ? <ArrowUp aria-hidden="true" className="w-3 h-3" /> : <ArrowDown aria-hidden="true" className="w-3 h-3" />
+                    ) : (
+                      <ArrowUpDown aria-hidden="true" className="w-3 h-3 opacity-40" />
+                    )}
+                  </button>
+                </th>
+              )}
+              <th
+                scope="col"
+                aria-sort={sortCol === 'campaignName' ? sortDir : undefined}
+                className="p-0 font-semibold"
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleSort('campaignName', 'Tên chiến dịch')}
+                  className="w-full min-h-9 py-2 px-4 inline-flex items-center gap-1 hover:bg-slate-200/70 focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+                >
+                  <span>Tên chiến dịch</span>
+                  {sortCol === 'campaignName' ? (
+                    sortDir === 'ascending' ? <ArrowUp aria-hidden="true" className="w-3 h-3" /> : <ArrowDown aria-hidden="true" className="w-3 h-3" />
+                  ) : (
+                    <ArrowUpDown aria-hidden="true" className="w-3 h-3 opacity-40" />
+                  )}
+                </button>
               </th>
               {isVisible('link') && (
                 <th scope="col" className="py-2.5 px-3 font-semibold">
@@ -888,8 +1191,24 @@ export function AdsExcelTableSection({
                 </th>
               )}
               {METRIC_FIELDS.filter((mf) => isVisible(mf.key)).map((mf) => (
-                <th key={mf.key} scope="col" className="py-2.5 px-3 font-semibold text-right whitespace-nowrap">
-                  {mf.shortLabel}
+                <th
+                  key={mf.key}
+                  scope="col"
+                  aria-sort={sortCol === mf.key ? sortDir : undefined}
+                  className="p-0 font-semibold text-right whitespace-nowrap"
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggleSort(mf.key, mf.shortLabel)}
+                    className="w-full min-h-9 py-2 px-3 inline-flex items-center justify-end gap-1 hover:bg-slate-200/70 focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+                  >
+                    <span>{mf.shortLabel}</span>
+                    {sortCol === mf.key ? (
+                      sortDir === 'ascending' ? <ArrowUp aria-hidden="true" className="w-3 h-3 text-[#1E3A8A]" /> : <ArrowDown aria-hidden="true" className="w-3 h-3 text-[#1E3A8A]" />
+                    ) : (
+                      <ArrowUpDown aria-hidden="true" className="w-3 h-3 opacity-40" />
+                    )}
+                  </button>
                 </th>
               ))}
               {customFormulas.map((cf) => (
@@ -922,7 +1241,7 @@ export function AdsExcelTableSection({
           <tbody className="divide-y divide-slate-100">
             {displayRows.length === 0 ? (
               <tr>
-                <td colSpan={colSpanCount} className="py-10 px-4 text-center text-slate-500">
+                <td colSpan={colSpanCount + (excelGridCoords ? 1 : 0)} className="py-10 px-4 text-center text-slate-500">
                   {adsConnected
                     ? effectiveStatusFilter === 'ENABLED'
                       ? 'Không có chiến dịch đang chạy phát sinh số liệu trong phạm vi chọn.'
@@ -931,7 +1250,7 @@ export function AdsExcelTableSection({
                 </td>
               </tr>
             ) : (
-              displayRows.map((row) => {
+              displayRows.map((row, rowIndex) => {
                 const c = row.campaign;
                 const rowLabel = viewMode === 'daily' ? `${c.campaignName} (${row.date})` : c.campaignName;
                 const realUrls = c.finalUrls || [];
@@ -939,7 +1258,12 @@ export function AdsExcelTableSection({
                 const isDomainFallback = realUrls.length === 0 && Boolean(c.targetWebsiteDomain);
 
                 return (
-                  <tr key={row.rowId} className="hover:bg-slate-50/70">
+                  <tr key={row.rowId} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
+                    {excelGridCoords && (
+                      <td className="py-2 px-2 text-center font-mono text-[11px] text-slate-400 bg-slate-50 sticky left-0 z-10 tabular-nums">
+                        {rowIndex + 1}
+                      </td>
+                    )}
                     {viewMode === 'daily' && (
                       <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap tabular-nums">
                         {row.date}
@@ -1115,8 +1439,13 @@ export function AdsExcelTableSection({
           </tbody>
 
           {filteredCampaigns.length > 0 && (
-            <tfoot className="bg-slate-100/90 border-t-2 border-slate-200 font-bold text-slate-900">
+            <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0 z-10">
               <tr>
+                {excelGridCoords && (
+                  <td className="py-2.5 px-2 text-center font-mono text-[11px] bg-blue-100/80 sticky left-0 z-20">
+                    Σ
+                  </td>
+                )}
                 {viewMode === 'daily' && <td className="py-2.5 px-3">Tổng</td>}
                 <td className="py-2.5 px-4">
                   Tổng ({filteredCampaigns.length} chiến dịch)

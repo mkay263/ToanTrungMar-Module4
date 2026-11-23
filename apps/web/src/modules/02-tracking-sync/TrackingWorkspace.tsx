@@ -40,7 +40,7 @@ import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
-import { GooglePlatformSwitcher } from '@/components/common/GooglePlatformSwitcher';
+import { MktSpreadsheetCalcBar, useMktExcelSelection } from '@/components/common/MktSpreadsheetCalcBar';
 import { AdsExcelTableSection } from './AdsExcelTableSection';
 
 const MarketingTrafficChart = dynamic(
@@ -223,6 +223,7 @@ export function TrackingWorkspace() {
   });
   const [lpCategoryFilter, setLpCategoryFilter] = useState<string>('all');
   const [hideNoiseLp, setHideNoiseLp] = useState<boolean>(true);
+  const ga4ExcelCalc = useMktExcelSelection();
   const [showRealtimePicker, setShowRealtimePicker] = useState<boolean>(false);
   const [showOnlySelectedEvents, setShowOnlySelectedEvents] = useState<boolean>(false);
   const [selectedEvents, setSelectedEvents] = useState<string[]>(() => {
@@ -541,8 +542,6 @@ export function TrackingWorkspace() {
 
   return (
     <div className="space-y-4 text-sm">
-      <GooglePlatformSwitcher active={isAdsSection ? 'ads' : 'ga4'} platforms={['ga4', 'ads']} />
-
       <WebsiteDashboardHeader
         title={UI_VOCABULARY.menu.campaigns}
         scope={scope}
@@ -978,12 +977,12 @@ export function TrackingWorkspace() {
               )}
 
               {/* Biểu đồ Marketing Spline 8/12 + Cơ cấu Kênh thu hút 4/12 */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
                 <section
                   aria-labelledby="m02-traffic-chart-heading"
-                  className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
+                  className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col gap-3"
                 >
-                  <div className="mb-3">
+                  <div>
                     <h3 id="m02-traffic-chart-heading" className="text-sm sm:text-base font-bold text-slate-900">
                       Lưu lượng truy cập theo ngày
                     </h3>
@@ -1002,7 +1001,7 @@ export function TrackingWorkspace() {
 
                 <section
                   aria-labelledby="m02-top-channels-heading"
-                  className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
+                  className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col"
                 >
                   <div>
                     <h3 id="m02-top-channels-heading" className="text-sm sm:text-base font-bold text-slate-900">
@@ -1115,9 +1114,39 @@ export function TrackingWorkspace() {
                   </label>
                 </div>
 
-                <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                <MktSpreadsheetCalcBar
+                  title="Bảng Trang đích GA4 (Kiểu Excel)"
+                  excelMode={ga4ExcelCalc.excelMode}
+                  onToggleExcelMode={ga4ExcelCalc.toggleExcelMode}
+                  stats={ga4ExcelCalc.stats}
+                  onClear={ga4ExcelCalc.clearSelection}
+                  copiedOk={ga4ExcelCalc.copiedOk}
+                  onCopyTable={() => {
+                    const filteredLp = (lpTable?.rows || []).filter((row) => {
+                      if (hideNoiseLp && row.categoryKey === 'technical_noise') return false;
+                      if (lpCategoryFilter !== 'all' && row.categoryKey !== lpCategoryFilter) return false;
+                      if (searchTerm && !row.landingPage.toLowerCase().includes(searchTerm)) return false;
+                      return true;
+                    });
+                    void ga4ExcelCalc.copyTsv(
+                      ['Trang đích', 'Phân loại', 'User mới', 'Tỷ lệ khách mới (%)', 'Phiên truy cập', 'Tỷ lệ tương tác (%)', 'Sự kiện biểu mẫu', 'Lead CRM hợp lệ'],
+                      filteredLp.map((r) => [
+                        r.landingPage,
+                        r.categoryLabel || 'Trang khác',
+                        r.newUsers ?? '',
+                        r.newUserRatePct ?? '',
+                        r.sessions,
+                        r.engagementRatePct ?? '',
+                        r.successfulFormCount ?? '',
+                        r.validLeadCount,
+                      ]),
+                    );
+                  }}
+                />
+
+                <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto max-h-[68vh]">
+                  <table className={`w-full text-left border-separate border-spacing-0 text-xs ${ga4ExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                    <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 sticky top-0 z-10">
                       <tr>
                         <th scope="col" className="py-2.5 px-4 font-semibold">Trang đích (Landing Page)</th>
                         <th scope="col" className="py-2.5 px-3 font-semibold">Phân loại</th>
@@ -1147,7 +1176,7 @@ export function TrackingWorkspace() {
                           );
                         }
                         return filteredLp.map((row) => (
-                          <tr key={row.landingPage} className="hover:bg-slate-50/70">
+                          <tr key={row.landingPage} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                             <th
                               scope="row"
                               className="py-2.5 px-4 font-mono font-medium text-slate-800 max-w-[380px] break-words"
@@ -1159,34 +1188,79 @@ export function TrackingWorkspace() {
                                 {row.categoryLabel || 'Trang khác'}
                               </span>
                             </td>
-                            <td className="py-2.5 px-3 text-right font-bold text-emerald-700 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:nu`, 'User mới', row.newUsers)}
+                              className={`py-2.5 px-3 text-right font-bold text-emerald-700 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:nu`)}`}
+                            >
                               {row.newUsers !== null && row.newUsers !== undefined
                                 ? row.newUsers.toLocaleString('vi-VN')
                                 : '—'}
                             </td>
-                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:nur`, 'Tỷ lệ khách mới', row.newUserRatePct)}
+                              className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:nur`)}`}
+                            >
                               {row.newUserRatePct !== null && row.newUserRatePct !== undefined
                                 ? `${row.newUserRatePct}%`
                                 : '—'}
                             </td>
-                            <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:sess`, 'Phiên', row.sessions)}
+                              className={`py-2.5 px-3 text-right font-semibold tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:sess`)}`}
+                            >
                               {row.sessions.toLocaleString('vi-VN')}
                             </td>
-                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:eng`, 'Tỷ lệ tương tác', row.engagementRatePct)}
+                              className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:eng`)}`}
+                            >
                               {row.engagementRatePct !== null ? `${row.engagementRatePct}%` : '—'}
                             </td>
-                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:form`, 'Sự kiện form', row.successfulFormCount)}
+                              className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:form`)}`}
+                            >
                               {row.successfulFormCount !== null
                                 ? row.successfulFormCount.toLocaleString('vi-VN')
                                 : '—'}
                             </td>
-                            <td className="py-2.5 px-4 text-right font-bold text-[#0F275C] tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:lead`, 'Lead CRM', row.validLeadCount)}
+                              className={`py-2.5 px-4 text-right font-bold text-[#0F275C] tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:lead`)}`}
+                            >
                               {row.validLeadCount}
                             </td>
                           </tr>
                         ));
                       })()}
                     </tbody>
+                    {(() => {
+                      const filteredLp = (lpTable?.rows || []).filter((row) => {
+                        if (hideNoiseLp && row.categoryKey === 'technical_noise') return false;
+                        if (lpCategoryFilter !== 'all' && row.categoryKey !== lpCategoryFilter) return false;
+                        if (searchTerm && !row.landingPage.toLowerCase().includes(searchTerm)) return false;
+                        return true;
+                      });
+                      if (filteredLp.length === 0) return null;
+                      const sumNu = filteredLp.reduce((s, r) => s + (r.newUsers || 0), 0);
+                      const sumSess = filteredLp.reduce((s, r) => s + (r.sessions || 0), 0);
+                      const sumForm = filteredLp.reduce((s, r) => s + (r.successfulFormCount || 0), 0);
+                      const sumLead = filteredLp.reduce((s, r) => s + (r.validLeadCount || 0), 0);
+                      return (
+                        <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0">
+                          <tr>
+                            <td className="py-2.5 px-4">Σ TỔNG ({filteredLp.length} trang đích)</td>
+                            <td className="py-2.5 px-3 text-slate-400 font-normal">—</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">{sumNu.toLocaleString('vi-VN')}</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">—</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">{sumSess.toLocaleString('vi-VN')}</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">—</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">{sumForm.toLocaleString('vi-VN')}</td>
+                            <td className="py-2.5 px-4 text-right tabular-nums">{sumLead.toLocaleString('vi-VN')}</td>
+                          </tr>
+                        </tfoot>
+                      );
+                    })()}
                   </table>
                 </div>
 

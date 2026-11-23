@@ -2873,10 +2873,26 @@ export function AiDesignWorkspace() {
     }
   };
 
+  // Helper: auto-extract API key + optional Gateway URL if user pastes multi-line env/config text
+  const parseSmartPastedAiInput = (rawText: string): { key: string; url?: string } => {
+    const text = rawText.trim();
+    if (!text) return { key: '' };
+    const urlMatch = text.match(/https?:\/\/[^\s"'`,;]+/i);
+    const keyMatch = text.match(/\b(?:AIza[0-9A-Za-z\-_]{20,}|AQ\.[0-9A-Za-z\-_.]{20,}|sk-(?:proj-|svcacct-|or-|ant-)?[0-9A-Za-z\-_]{16,}|gsk_[0-9A-Za-z\-_]{16,}|xai-[0-9A-Za-z\-_]{16,})\b/);
+    if (urlMatch && keyMatch) {
+      return {
+        key: keyMatch[0],
+        url: urlMatch[0].replace(/[),.;'"]+$/, ''),
+      };
+    }
+    return { key: text };
+  };
+
   // Auto-detect provider from any pasted API Key & read all classified models supported by that Key
   const handleQuickConnectGmailGemini = async () => {
-    const trimmedKey = gmailGeminiKeyInput.trim();
-    let cleanEndpoint = quickCustomEndpoint.trim();
+    const parsedSmart = parseSmartPastedAiInput(gmailGeminiKeyInput);
+    const trimmedKey = parsedSmart.key.trim();
+    let cleanEndpoint = (quickCustomEndpoint.trim() || parsedSmart.url || '').trim();
     if (cleanEndpoint) {
       cleanEndpoint = cleanEndpoint
         .replace(/\.+$/, '')
@@ -2886,13 +2902,8 @@ export function AiDesignWorkspace() {
         .replace(/\/$/, '');
     }
 
-    // Auto-detect provider from pasted API Key prefix & server's configured gateway
-    const serverCustomGatewayUrl =
-      providerStatus?.availableProviders
-        ?.find((p) => p.providerId === 'custom_endpoint')
-        ?.apiEndpoint?.replace(/\/(images\/generations|chat\/completions|models)\/?$/i, '')
-        ?.replace(/\/$/, '') || '';
-
+    // Hint initial provider by key prefix, while leaving apiEndpoint blank when user didn't enter one
+    // so backend automatically probes OpenAI + configured gateways + saved relays + OpenRouter + DeepSeek in parallel.
     let detectedPid: AiProviderId = selectedProviderId || 'google_imagen';
     if (trimmedKey) {
       if (trimmedKey.startsWith('AIza') || trimmedKey.startsWith('AQ.')) {
@@ -2900,18 +2911,14 @@ export function AiDesignWorkspace() {
       } else if (
         trimmedKey.startsWith('sk-or-') ||
         trimmedKey.startsWith('gsk_') ||
-        trimmedKey.startsWith('sk-jy-') ||
-        trimmedKey.startsWith('sk-cx-') ||
-        Boolean(cleanEndpoint) ||
-        (trimmedKey.startsWith('sk-') &&
-          !trimmedKey.startsWith('sk-proj-') &&
-          !trimmedKey.startsWith('sk-svcacct-') &&
-          Boolean(serverCustomGatewayUrl))
+        trimmedKey.startsWith('xai-') ||
+        Boolean(cleanEndpoint)
       ) {
-        detectedPid = 'custom_endpoint';
-        if (!cleanEndpoint && serverCustomGatewayUrl) {
-          cleanEndpoint = serverCustomGatewayUrl;
-        }
+        detectedPid = cleanEndpoint && /generativelanguage\.googleapis\.com/i.test(cleanEndpoint)
+          ? 'google_imagen'
+          : cleanEndpoint && /^https:\/\/api\.openai\.com/i.test(cleanEndpoint)
+            ? 'openai_dalle'
+            : 'custom_endpoint';
       } else if (trimmedKey.startsWith('sk-')) {
         detectedPid = 'openai_dalle';
       }
@@ -2922,7 +2929,7 @@ export function AiDesignWorkspace() {
     );
     if (!trimmedKey && !anyConnectedCat?.hasApiKey) {
       setError(
-        'Vui lòng dán mã API Key (Google AIza... hoặc OpenAI/Codex sk-...) vào ô bên dưới để hệ thống tự đọc danh sách Model!'
+        'Vui lòng dán mã API Key (Google AIza..., OpenAI sk-..., OpenRouter sk-or-... hoặc Key Proxy/Relay) vào ô bên dưới để hệ thống tự nhận diện!'
       );
       return;
     }
@@ -6932,7 +6939,7 @@ export function AiDesignWorkspace() {
                     </div>
                   </div>
 
-                  <div className="space-y-2">
+                  <div className="space-y-2.5">
                     <div className="flex flex-col sm:flex-row gap-2">
                       <input
                         data-testid="gmail-gemini-key-input"
@@ -6940,10 +6947,14 @@ export function AiDesignWorkspace() {
                         autoComplete="off"
                         value={gmailGeminiKeyInput}
                         onChange={(e) => {
-                          const val = e.target.value;
-                          setGmailGeminiKeyInput(val);
+                          const raw = e.target.value;
+                          const parsed = parseSmartPastedAiInput(raw);
+                          setGmailGeminiKeyInput(parsed.key);
+                          if (parsed.url && !quickCustomEndpoint.trim()) {
+                            setQuickCustomEndpoint(parsed.url);
+                          }
                         }}
-                        placeholder="Dán mã API Key (VD: AIza... của Google, sk-... của OpenAI / Custom Gateway)"
+                        placeholder="Dán mã API Key (hoặc dán cả cặp URL + Key — hệ thống tự tách & nhận diện)"
                         className="flex-1 rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 focus:border-[#1553A2] focus:outline-none"
                       />
                       <button
@@ -6956,10 +6967,42 @@ export function AiDesignWorkspace() {
                         <Sparkles className="h-3.5 w-3.5" />
                         <span>
                           {testingAiConnection
-                            ? 'Đang nhận diện & đọc Model...'
+                            ? 'Đang tự dò cổng & đọc Model...'
                             : 'Kết nối & Tự đọc Model'}
                         </span>
                       </button>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                        Chọn nhanh cổng API:
+                      </span>
+                      {(
+                        [
+                          { label: 'Tự động dò', url: '' },
+                          { label: 'OpenAI', url: 'https://api.openai.com/v1' },
+                          { label: 'Google Gemini', url: 'https://generativelanguage.googleapis.com/v1beta' },
+                          { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1' },
+                          { label: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
+                          { label: 'Groq', url: 'https://api.groq.com/openai/v1' },
+                        ] as const
+                      ).map((preset) => {
+                        const isPicked = quickCustomEndpoint.trim() === preset.url;
+                        return (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => setQuickCustomEndpoint(preset.url)}
+                            className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold transition ${
+                              isPicked
+                                ? 'bg-[#1553A2] border-[#1553A2] text-white'
+                                : 'bg-white border-slate-200 text-slate-600 hover:border-blue-300 hover:text-[#1553A2]'
+                            }`}
+                          >
+                            {preset.label}
+                          </button>
+                        );
+                      })}
                     </div>
 
                     <div className="flex items-center gap-2 pt-0.5">
@@ -6968,10 +7011,13 @@ export function AiDesignWorkspace() {
                         type="text"
                         value={quickCustomEndpoint}
                         onChange={(e) => setQuickCustomEndpoint(e.target.value)}
-                        placeholder="Tự động nhận diện từ cấu hình máy chủ (hoặc nhập https://.../v1)"
-                        className="flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 font-mono text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none"
+                        placeholder="Để trống để tự dò (hoặc dán URL cổng Relay riêng VD: https://api.nhacungcap.com/v1)"
+                        className="flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none"
                       />
                     </div>
+                    <p className="text-[10.5px] text-slate-500 leading-relaxed">
+                      💡 <strong>Đổi Key không cần sửa code:</strong> Key hãng chính thức (Google, OpenAI, OpenRouter, DeepSeek, Groq) chỉ cần dán Key và bấm Kết nối. Nếu dùng Key từ cổng Proxy/Relay bên thứ 3, dán thêm <strong>Gateway URL</strong> 1 lần duy nhất — hệ thống sẽ tự mã hóa &amp; ghi nhớ cổng cho mọi lần đổi Key sau.
+                    </p>
                   </div>
 
                   {testAiResult && (

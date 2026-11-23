@@ -75,6 +75,16 @@ export function getInitials(name: string): string {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
+const shouldAutoCollapseSidebar = (path: string): boolean =>
+  path === '/dashboard' ||
+  path === '/leads' ||
+  path.startsWith('/leads/') ||
+  path === '/design' ||
+  path === '/ai-design' ||
+  path === '/tracking' ||
+  path === '/ads' ||
+  path === '/reports';
+
 export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname() || '/dashboard';
   const router = useRouter();
@@ -90,23 +100,10 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     logout,
   } = useSession();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () =>
-      pathname === '/design' ||
-      pathname === '/ai-design' ||
-      pathname === '/tracking' ||
-      pathname === '/ads' ||
-      pathname === '/reports',
-  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => shouldAutoCollapseSidebar(pathname));
 
   useEffect(() => {
-    setSidebarCollapsed(
-      pathname === '/design' ||
-        pathname === '/ai-design' ||
-        pathname === '/tracking' ||
-        pathname === '/ads' ||
-        pathname === '/reports',
-    );
+    setSidebarCollapsed(shouldAutoCollapseSidebar(pathname));
   }, [pathname]);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [globalSearchText, setGlobalSearchText] = useState('');
