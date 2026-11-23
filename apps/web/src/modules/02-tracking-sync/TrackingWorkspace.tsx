@@ -40,7 +40,7 @@ import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
-import { GooglePlatformSwitcher } from '@/components/common/GooglePlatformSwitcher';
+import { MktSpreadsheetCalcBar, useMktExcelSelection } from '@/components/common/MktSpreadsheetCalcBar';
 import { AdsExcelTableSection } from './AdsExcelTableSection';
 
 const MarketingTrafficChart = dynamic(
@@ -223,6 +223,7 @@ export function TrackingWorkspace() {
   });
   const [lpCategoryFilter, setLpCategoryFilter] = useState<string>('all');
   const [hideNoiseLp, setHideNoiseLp] = useState<boolean>(true);
+  const ga4ExcelCalc = useMktExcelSelection();
   const [showRealtimePicker, setShowRealtimePicker] = useState<boolean>(false);
   const [showOnlySelectedEvents, setShowOnlySelectedEvents] = useState<boolean>(false);
   const [selectedEvents, setSelectedEvents] = useState<string[]>(() => {
@@ -541,8 +542,6 @@ export function TrackingWorkspace() {
 
   return (
     <div className="space-y-4 text-sm">
-      <GooglePlatformSwitcher active={isAdsSection ? 'ads' : 'ga4'} platforms={['ga4', 'ads']} />
-
       <WebsiteDashboardHeader
         title={UI_VOCABULARY.menu.campaigns}
         scope={scope}
@@ -978,12 +977,12 @@ export function TrackingWorkspace() {
               )}
 
               {/* Biểu đồ Marketing Spline 8/12 + Cơ cấu Kênh thu hút 4/12 */}
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
                 <section
                   aria-labelledby="m02-traffic-chart-heading"
-                  className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
+                  className="lg:col-span-8 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col gap-3"
                 >
-                  <div className="mb-3">
+                  <div>
                     <h3 id="m02-traffic-chart-heading" className="text-sm sm:text-base font-bold text-slate-900">
                       Lưu lượng truy cập theo ngày
                     </h3>
@@ -1002,7 +1001,7 @@ export function TrackingWorkspace() {
 
                 <section
                   aria-labelledby="m02-top-channels-heading"
-                  className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col justify-between"
+                  className="lg:col-span-4 bg-white border border-slate-200/90 rounded-2xl p-4 shadow-2xs flex flex-col"
                 >
                   <div>
                     <h3 id="m02-top-channels-heading" className="text-sm sm:text-base font-bold text-slate-900">
@@ -1115,9 +1114,22 @@ export function TrackingWorkspace() {
                   </label>
                 </div>
 
-                <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                <MktSpreadsheetCalcBar
+                  title="Bảng Trang đích GA4"
+                  excelMode={ga4ExcelCalc.excelMode}
+                  onToggleExcelMode={ga4ExcelCalc.toggleExcelMode}
+                  stats={ga4ExcelCalc.stats}
+                  onClear={ga4ExcelCalc.clearSelection}
+                />
+
+                <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto max-h-[68vh]">
+                  <table className="w-full text-left border-separate border-spacing-0 text-xs [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
+                    <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 sticky top-0 z-10">
+                      <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                        {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((l) => (
+                          <th key={`lp-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                        ))}
+                      </tr>
                       <tr>
                         <th scope="col" className="py-2.5 px-4 font-semibold">Trang đích (Landing Page)</th>
                         <th scope="col" className="py-2.5 px-3 font-semibold">Phân loại</th>
@@ -1147,7 +1159,7 @@ export function TrackingWorkspace() {
                           );
                         }
                         return filteredLp.map((row) => (
-                          <tr key={row.landingPage} className="hover:bg-slate-50/70">
+                          <tr key={row.landingPage} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                             <th
                               scope="row"
                               className="py-2.5 px-4 font-mono font-medium text-slate-800 max-w-[380px] break-words"
@@ -1159,34 +1171,79 @@ export function TrackingWorkspace() {
                                 {row.categoryLabel || 'Trang khác'}
                               </span>
                             </td>
-                            <td className="py-2.5 px-3 text-right font-bold text-emerald-700 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:nu`, 'User mới', row.newUsers)}
+                              className={`py-2.5 px-3 text-right font-bold text-emerald-700 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:nu`)}`}
+                            >
                               {row.newUsers !== null && row.newUsers !== undefined
                                 ? row.newUsers.toLocaleString('vi-VN')
                                 : '—'}
                             </td>
-                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:nur`, 'Tỷ lệ khách mới', row.newUserRatePct)}
+                              className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:nur`)}`}
+                            >
                               {row.newUserRatePct !== null && row.newUserRatePct !== undefined
                                 ? `${row.newUserRatePct}%`
                                 : '—'}
                             </td>
-                            <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:sess`, 'Phiên', row.sessions)}
+                              className={`py-2.5 px-3 text-right font-semibold tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:sess`)}`}
+                            >
                               {row.sessions.toLocaleString('vi-VN')}
                             </td>
-                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:eng`, 'Tỷ lệ tương tác', row.engagementRatePct)}
+                              className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:eng`)}`}
+                            >
                               {row.engagementRatePct !== null ? `${row.engagementRatePct}%` : '—'}
                             </td>
-                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:form`, 'Sự kiện form', row.successfulFormCount)}
+                              className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:form`)}`}
+                            >
                               {row.successfulFormCount !== null
                                 ? row.successfulFormCount.toLocaleString('vi-VN')
                                 : '—'}
                             </td>
-                            <td className="py-2.5 px-4 text-right font-bold text-[#0F275C] tabular-nums">
+                            <td
+                              onClick={() => ga4ExcelCalc.toggleCell(`lp:${row.landingPage}:lead`, 'Lead CRM', row.validLeadCount)}
+                              className={`py-2.5 px-4 text-right font-bold text-[#0F275C] tabular-nums ${ga4ExcelCalc.cellClass(`lp:${row.landingPage}:lead`)}`}
+                            >
                               {row.validLeadCount}
                             </td>
                           </tr>
                         ));
                       })()}
                     </tbody>
+                    {(() => {
+                      const filteredLp = (lpTable?.rows || []).filter((row) => {
+                        if (hideNoiseLp && row.categoryKey === 'technical_noise') return false;
+                        if (lpCategoryFilter !== 'all' && row.categoryKey !== lpCategoryFilter) return false;
+                        if (searchTerm && !row.landingPage.toLowerCase().includes(searchTerm)) return false;
+                        return true;
+                      });
+                      if (filteredLp.length === 0) return null;
+                      const sumNu = filteredLp.reduce((s, r) => s + (r.newUsers || 0), 0);
+                      const sumSess = filteredLp.reduce((s, r) => s + (r.sessions || 0), 0);
+                      const sumForm = filteredLp.reduce((s, r) => s + (r.successfulFormCount || 0), 0);
+                      const sumLead = filteredLp.reduce((s, r) => s + (r.validLeadCount || 0), 0);
+                      return (
+                        <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0">
+                          <tr>
+                            <td className="py-2.5 px-4">Σ TỔNG ({filteredLp.length} trang đích)</td>
+                            <td className="py-2.5 px-3 text-slate-400 font-normal">—</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">{sumNu.toLocaleString('vi-VN')}</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">—</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">{sumSess.toLocaleString('vi-VN')}</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">—</td>
+                            <td className="py-2.5 px-3 text-right tabular-nums">{sumForm.toLocaleString('vi-VN')}</td>
+                            <td className="py-2.5 px-4 text-right tabular-nums">{sumLead.toLocaleString('vi-VN')}</td>
+                          </tr>
+                        </tfoot>
+                      );
+                    })()}
                   </table>
                 </div>
 
@@ -1233,9 +1290,21 @@ export function TrackingWorkspace() {
               )}
 
               <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <MktSpreadsheetCalcBar
+                  title="Bảng Hiệu suất kênh GA4"
+                  excelMode={ga4ExcelCalc.excelMode}
+                  onToggleExcelMode={ga4ExcelCalc.toggleExcelMode}
+                  stats={ga4ExcelCalc.stats}
+                  onClear={ga4ExcelCalc.clearSelection}
+                />
                 <div tabIndex={0} role="region" aria-label="Bảng theo kênh" className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                  <table className="w-full text-left border-separate border-spacing-0 text-xs [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
+                    <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 sticky top-0">
+                      <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                        {['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((l) => (
+                          <th key={`ch-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                        ))}
+                      </tr>
                       <tr>
                         <th scope="col" className="py-2.5 px-4 font-semibold">Kênh marketing</th>
                         <th scope="col" className="py-2.5 px-3 font-semibold">Nguồn / phương thức</th>
@@ -1259,30 +1328,45 @@ export function TrackingWorkspace() {
                             (r) => !searchTerm || r.channelLabel.toLowerCase().includes(searchTerm),
                           )
                           .map((r) => (
-                            <tr key={r.channelKey} className="hover:bg-slate-50/70">
+                            <tr key={r.channelKey} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                               <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
                                 {r.channelLabel}
                               </th>
                               <td className="py-3 px-3 text-slate-600">
                                 {r.source || '—'} / {r.medium || '—'}
                               </td>
-                              <td className="py-3 px-3 text-right font-semibold tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:sess`, 'Phiên', r.sessions)}
+                                className={`py-3 px-3 text-right font-semibold tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:sess`)}`}
+                              >
                                 {r.sessions.toLocaleString('vi-VN')}
                               </td>
-                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:engS`, 'Phiên tương tác', r.engagedSessions)}
+                                className={`py-3 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:engS`)}`}
+                              >
                                 {r.engagedSessions !== null
                                   ? r.engagedSessions.toLocaleString('vi-VN')
                                   : '—'}
                               </td>
-                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:engR`, 'Tỷ lệ tương tác', r.engagementRatePct)}
+                                className={`py-3 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:engR`)}`}
+                              >
                                 {r.engagementRatePct !== null ? `${r.engagementRatePct}%` : '—'}
                               </td>
-                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:form`, 'Sự kiện form', r.formEvents)}
+                                className={`py-3 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:form`)}`}
+                              >
                                 {r.formEvents !== null && r.formEvents !== undefined
                                   ? r.formEvents.toLocaleString('vi-VN')
                                   : '—'}
                               </td>
-                              <td className="py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:lead`, 'Lead CRM', r.validLeadCount)}
+                                className={`py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:lead`)}`}
+                              >
                                 {r.validLeadCount}
                               </td>
                             </tr>
@@ -2329,48 +2413,64 @@ export function TrackingWorkspace() {
         </div>
       </div>
 
-      {/* Drawer chi tiết chiến dịch (Ad group / Keyword / Thiết bị / Khu vực) */}
+      {/* Hộp thoại giữa màn hình chi tiết chiến dịch (giống Tạo Lead) */}
       {drawerCampaign && (
-        <div className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex justify-end">
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5"
+          onClick={() => setDrawerCampaign(null)}
+        >
           <div
             role="dialog"
+            aria-modal="true"
             aria-label={`Chi tiết chiến dịch ${drawerCampaign.campaignName}`}
-            className="w-full max-w-xl bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl max-h-[88vh] rounded-2xl bg-white shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
           >
-            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-base font-bold text-slate-900">
-                  {drawerCampaign.campaignName}
-                </h2>
+            <div className="px-5 py-4 bg-slate-50/80 border-b border-slate-200 flex items-start justify-between gap-3 shrink-0">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base sm:text-lg font-bold text-slate-900 truncate">
+                    {drawerCampaign.campaignName}
+                  </h2>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                      drawerCampaign.status === 'ENABLED'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-slate-100 text-slate-600 border border-slate-200'
+                    }`}
+                  >
+                    {drawerCampaign.status === 'ENABLED' ? 'Đang chạy' : 'Tạm dừng'}
+                  </span>
+                </div>
                 <p className="text-xs text-slate-500 mt-0.5">{drawerCampaign.attributionNote}</p>
               </div>
               <button
                 type="button"
-                aria-label="Đóng ngăn chi tiết"
+                aria-label="Đóng chi tiết chiến dịch"
                 onClick={() => setDrawerCampaign(null)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 shrink-0"
               >
                 <X aria-hidden="true" className="w-5 h-5" />
               </button>
             </div>
 
             <div className="flex-1 overflow-y-auto p-5 space-y-5 text-xs">
-              <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-[10px] bg-slate-50 border border-slate-200 p-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3.5">
                   <div className="text-slate-500">Chi phí thực tế</div>
-                  <div className="text-base font-bold text-slate-900 mt-1 tabular-nums">
+                  <div className="text-base sm:text-lg font-extrabold text-slate-900 mt-1 tabular-nums">
                     {drawerCampaign.cost.toLocaleString('vi-VN')} ₫
                   </div>
                 </div>
-                <div className="rounded-[10px] bg-slate-50 border border-slate-200 p-3">
-                  <div className="text-slate-500">Lead CRM hợp lệ</div>
-                  <div className="text-base font-bold text-[#0F275C] mt-1 tabular-nums">
+                <div className="rounded-xl bg-blue-50/60 border border-blue-200/80 p-3.5">
+                  <div className="text-slate-600">Lead CRM hợp lệ</div>
+                  <div className="text-base sm:text-lg font-extrabold text-[#0F275C] mt-1 tabular-nums">
                     {drawerCampaign.validAttributedLeadCount}
                   </div>
                 </div>
-                <div className="rounded-[10px] bg-slate-50 border border-slate-200 p-3">
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3.5">
                   <div className="text-slate-500">CPL thực tế</div>
-                  <div className="text-base font-bold text-slate-900 mt-1 tabular-nums">
+                  <div className="text-base sm:text-lg font-extrabold text-slate-900 mt-1 tabular-nums">
                     {drawerCampaign.costPerValidLead !== null
                       ? `${drawerCampaign.costPerValidLead.toLocaleString('vi-VN')} ₫`
                       : 'Chưa đủ đối soát'}
@@ -2384,7 +2484,7 @@ export function TrackingWorkspace() {
                   Link đích chiến dịch ({drawerCampaign.finalUrls?.length || (drawerCampaign.primaryDestinationUrl ? 1 : 0)})
                 </h3>
                 {(drawerCampaign.finalUrls && drawerCampaign.finalUrls.length > 0) ? (
-                  <div className="space-y-1.5 rounded-[10px] bg-blue-50/50 border border-blue-200/80 p-3">
+                  <div className="space-y-1.5 rounded-xl bg-blue-50/50 border border-blue-200/80 p-3.5 max-h-52 overflow-y-auto">
                     {drawerCampaign.finalUrls.map((u) => (
                       <a
                         key={u}
@@ -2403,13 +2503,13 @@ export function TrackingWorkspace() {
                     href={drawerCampaign.primaryDestinationUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-[10px] bg-slate-50 border border-slate-200 px-3 py-2 text-slate-700 font-mono text-[11px] hover:underline"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-slate-700 font-mono text-[11px] hover:underline"
                   >
                     <span>{drawerCampaign.primaryDestinationUrl}</span>
                     <ExternalLink className="w-3 h-3 shrink-0" />
                   </a>
                 ) : (
-                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-[10px] p-3">
+                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
                     Chưa có URL đích chi tiết từ chiến dịch này.
                   </p>
                 )}
@@ -2423,7 +2523,7 @@ export function TrackingWorkspace() {
                 {(ads?.breakdowns.adGroups || []).filter(
                   (ag) => ag.campaignName === drawerCampaign.campaignName,
                 ).length === 0 ? (
-                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-[10px] p-3">
+                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
                     {ads?.breakdowns.keywordAvailabilityNote ||
                       'Nguồn hiện chưa trả dữ liệu phân rã nhóm quảng cáo / từ khóa / thiết bị / khu vực cho chiến dịch này.'}
                   </p>
@@ -2434,10 +2534,10 @@ export function TrackingWorkspace() {
                       .map((ag) => (
                         <li
                           key={ag.adGroupId}
-                          className="rounded-[10px] border border-slate-200 p-3 flex items-center justify-between"
+                          className="rounded-xl border border-slate-200 p-3 flex items-center justify-between hover:bg-slate-50/70 transition"
                         >
                           <span className="font-semibold text-slate-800">{ag.adGroupName}</span>
-                          <span className="tabular-nums text-slate-600">
+                          <span className="tabular-nums text-slate-600 font-medium">
                             {ag.clicks} click · {ag.cost.toLocaleString('vi-VN')} ₫
                           </span>
                         </li>
@@ -2445,6 +2545,16 @@ export function TrackingWorkspace() {
                   </ul>
                 )}
               </div>
+            </div>
+
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setDrawerCampaign(null)}
+                className="h-9 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold transition"
+              >
+                Đóng
+              </button>
             </div>
           </div>
         </div>

@@ -202,15 +202,22 @@ const globalForLeadSeq = globalThis as unknown as {
 
 export async function generateNextLeadCode(): Promise<string> {
   const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  const count = await prisma.lead.count();
-  globalForLeadSeq.__toantrungLeadSeqCounter = ((globalForLeadSeq.__toantrungLeadSeqCounter ?? 0) + 1) % 900;
-  const monotonicSuffix = String(100 + globalForLeadSeq.__toantrungLeadSeqCounter);
-  const seq = String(count + 1).padStart(4, '0');
-  const rand = String(Math.floor(10 + Math.random() * 89));
-  return `TT-${y}${m}${d}-${seq}${monotonicSuffix}${rand}`;
+  const yy = String(now.getFullYear()).slice(-2);
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const baseCount = await prisma.lead.count();
+  for (let attempt = 0; attempt < 25; attempt++) {
+    globalForLeadSeq.__toantrungLeadSeqCounter = ((globalForLeadSeq.__toantrungLeadSeqCounter ?? 0) + 1) % 9000;
+    const seqNum = baseCount + 1 + attempt + (attempt > 0 ? globalForLeadSeq.__toantrungLeadSeqCounter % 97 : 0);
+    const seq = String(seqNum).padStart(4, '0');
+    const candidate = `TT-${yy}${mm}-${seq}`;
+    const collision = await prisma.lead.findUnique({
+      where: { leadCode: candidate },
+      select: { id: true },
+    });
+    if (!collision) return candidate;
+  }
+  const fallbackRand = String(Math.floor(1000 + Math.random() * 8999));
+  return `TT-${yy}${mm}-${fallbackRand}`;
 }
 
 export async function inspectDuplicateAndPriceCheck(params: {
@@ -429,6 +436,7 @@ export async function listLeadsForUser(
     pageSize?: number;
     limit?: number;
     cursorId?: number;
+    bypassCache?: boolean;
   },
 ): Promise<{
   leads: LeadItemDto[];
@@ -569,6 +577,7 @@ export async function listLeadsForUser(
     key: `m01-leads:${filterKey}`,
     domains: ['leads', 'design', 'auth'],
     ttlMs: 15_000,
+    bypassCache: filters?.bypassCache,
     compute: async () => {
       const [rows, totalCount, { products, salesOptions }, alertRows, gmailCfgRow] = await Promise.all([
         prisma.lead.findMany({
@@ -760,26 +769,62 @@ export async function listLeadsForUser(
       };
     });
 
-    const activities: LeadActivityDto[] = r.activities.map((act) => ({
-      id: act.id,
-      leadId: act.leadId,
-      actionType: act.actionType,
-      actorType: (act.actorType.toUpperCase() as 'USER' | 'WEBHOOK' | 'SYSTEM') || 'USER',
-      actorName: act.actionBy?.fullName || act.actorRef || 'Hệ thống tự động',
-      fromStatus: act.oldStatus,
-      toStatus: act.newStatus,
-      fromSalesName: act.fromSales?.fullName || null,
-      toSalesName: act.toSales?.fullName || null,
-      reason: act.transferReason,
-      noteContent: isAnonymized
-        ? '[Nội dung chi tiết ẩn danh theo UC01]'
-        : act.actionType === 'quote_version' && !canSeePrivateQuote
-          ? '[Tiến độ gửi báo giá — chỉ Kinh doanh phụ trách và Quản lý xem chi tiết]'
-          : containsMonetaryAmountText(act.note)
-            ? '[Nội dung có số tiền đã được ẩn theo quy định không công khai giá]'
-            : act.note,
-      createdAt: act.createdAt.toISOString(),
-    }));
+    const activities: LeadActivityDto[] = r.activities.map((act) => {
+      let archivedAttachment: LeadActivityDto['archivedAttachment'] = null;
+      if (!isAnonymized && act.actionType === 'upload_attachment' && act.oldValueJson) {
+        try {
+          const parsed = JSON.parse(act.oldValueJson) as {
+            archivedAttachment?: {
+              fileName?: string;
+              fileUrl?: string;
+              fileSizeKb?: number | null;
+              attachmentType?: string;
+              deletedByName?: string | null;
+            };
+          };
+          const arch = parsed?.archivedAttachment;
+          if (arch?.fileName && arch?.fileUrl && arch.attachmentType !== 'quote_doc') {
+            archivedAttachment = {
+              activityId: act.id,
+              fileName: arch.fileName,
+              fileType:
+                arch.attachmentType === 'site_photo'
+                  ? 'site_photo'
+                  : arch.attachmentType === 'customer_drawing_doc'
+                    ? 'cad_drawing'
+                    : 'other',
+              fileSizeKb: typeof arch.fileSizeKb === 'number' ? arch.fileSizeKb : null,
+              downloadUrl: `/api/v1/leads/${act.leadId}/attachments?archivedActivityId=${act.id}`,
+              deletedByName: arch.deletedByName || act.actionBy?.fullName || null,
+            };
+          }
+        } catch {
+          // ignore non-archive JSON
+        }
+      }
+
+      return {
+        id: act.id,
+        leadId: act.leadId,
+        actionType: act.actionType,
+        actorType: (act.actorType.toUpperCase() as 'USER' | 'WEBHOOK' | 'SYSTEM') || 'USER',
+        actorName: act.actionBy?.fullName || act.actorRef || 'Hệ thống tự động',
+        fromStatus: act.oldStatus,
+        toStatus: act.newStatus,
+        fromSalesName: act.fromSales?.fullName || null,
+        toSalesName: act.toSales?.fullName || null,
+        reason: act.transferReason,
+        noteContent: isAnonymized
+          ? '[Nội dung chi tiết ẩn danh theo UC01]'
+          : act.actionType === 'quote_version' && !canSeePrivateQuote
+            ? '[Tiến độ gửi báo giá — chỉ Kinh doanh phụ trách và Quản lý xem chi tiết]'
+            : containsMonetaryAmountText(act.note)
+              ? '[Nội dung có số tiền đã được ẩn theo quy định không công khai giá]'
+              : act.note,
+        archivedAttachment,
+        createdAt: act.createdAt.toISOString(),
+      };
+    });
 
     const rawCleanedProject = r.projectName
       ? r.projectName.replace(/\s*\(Dữ liệu tổng hợp\)/gi, '')
@@ -964,6 +1009,7 @@ export async function exportAllLeadsForUser(
   const BATCH_SIZE = 500;
   const MAX_BATCHES = 200; // up to 100,000 records in bounded chunks
   const allLeads: LeadItemDto[] = [];
+  const seenIds = new Set<number>();
   let currentPage = 1;
   let totalCount = 0;
 
@@ -972,13 +1018,25 @@ export async function exportAllLeadsForUser(
       ...filters,
       page: currentPage,
       pageSize: BATCH_SIZE,
+      bypassCache: true,
     });
     totalCount = batch.totalCount;
-    allLeads.push(...batch.leads);
+    for (const item of batch.leads) {
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        allLeads.push(item);
+      }
+    }
     if (batch.leads.length < BATCH_SIZE || allLeads.length >= batch.totalCount) {
       break;
     }
     currentPage += 1;
+  }
+
+  if (totalCount > BATCH_SIZE * MAX_BATCHES && allLeads.length < totalCount) {
+    throw new Error(
+      `LEAD_EXPORT_LIMIT_EXCEEDED: Bộ lọc hiện khớp ${totalCount.toLocaleString('vi-VN')} Lead, vượt ngưỡng xuất 1 lần (${(BATCH_SIZE * MAX_BATCHES).toLocaleString('vi-VN')} Lead). Vui lòng thu hẹp bộ lọc trước khi tải.`,
+    );
   }
 
   return { leads: allLeads, totalCount };
@@ -1141,7 +1199,9 @@ export async function createManualLead(actor: SessionUserDto, input: CreateManua
         },
       })
       .catch(() => null);
-    bumpDomainRevisions(['leads', 'notifications'], 'lead_created_and_reassigned');
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads', 'notifications'], 'lead_created_and_reassigned');
+  } else {
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_created');
   }
 
   return ingested.lead;
@@ -1344,7 +1404,7 @@ export async function transitionLeadPipeline(
     !existing.receivedAt && (input.toStatus === 'quoting' || input.toStatus === 'lost');
 
   // Không ghi quoteValueVnd/dealValueVnd: quy tắc không công khai giá. Giá trị cũ trong DB được giữ nguyên.
-  return transitionLeadWithVersion(prisma, {
+  const updated = await transitionLeadWithVersion(prisma, {
     leadId,
     expectedVersion: input.expectedVersion,
     patch: {
@@ -1379,6 +1439,8 @@ export async function transitionLeadPipeline(
           : `Chuyển trạng thái Pipeline từ ${existing.pipelineStatus} sang ${input.toStatus}`),
     },
   });
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_pipeline_transition');
+  return updated;
 }
 
 export async function reassignLeadSales(
@@ -1493,7 +1555,7 @@ export async function markLeadSpam(
     input.spamReason === 'Nhầm máy' ||
     input.spamReason === 'Sai số';
 
-  return transitionLeadWithVersion(prisma, {
+  const updated = await transitionLeadWithVersion(prisma, {
     leadId,
     expectedVersion: input.expectedVersion,
     patch: {
@@ -1512,6 +1574,8 @@ export async function markLeadSpam(
         }${input.noteContent ? ` · ${input.noteContent}` : ''}`,
     },
   });
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_marked_spam');
+  return updated;
 }
 
 export async function createPrivateQuoteVersion(
@@ -1566,7 +1630,7 @@ export async function createPrivateQuoteVersion(
     bypassPriceCheckConfirmed: Boolean(input.bypassPriceCheckConfirmed),
   });
 
-  return transitionLeadWithVersion(prisma, {
+  const updated = await transitionLeadWithVersion(prisma, {
     leadId,
     expectedVersion: input.expectedVersion,
     patch: {
@@ -1586,6 +1650,8 @@ export async function createPrivateQuoteVersion(
       note: `Ghi nhận báo giá ${quoteCode} (Lần ${versionNumber}): ${input.scopeSummary.trim()}`,
     },
   });
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_quote_version_created');
+  return updated;
 }
 
 export async function uploadLeadAttachment(params: {
@@ -1720,19 +1786,30 @@ export async function deleteLeadAttachment(params: {
     where: { id: existing.id },
   });
 
-  deletePrivateBusinessFile(existing.fileUrl);
-
+  // Giữ nguyên tệp vật lý trong kho riêng tư và lưu tham chiếu vào Lịch sử hồ sơ để vẫn tra cứu / tải lại khi cần.
   await prisma.leadActivity.create({
     data: {
       leadId: existing.leadId,
       actionType: 'upload_attachment',
       actionById: params.actor.id,
       actorType: 'user',
-      note: `Đã xóa tệp đính kèm "${existing.fileName}"`,
+      oldValueJson: JSON.stringify({
+        archivedAttachment: {
+          originalAttachmentId: existing.id,
+          fileName: existing.fileName,
+          fileUrl: existing.fileUrl,
+          fileSizeKb: existing.fileSizeKb,
+          attachmentType: existing.attachmentType,
+          deletedById: params.actor.id,
+          deletedByName: params.actor.fullName,
+          deletedAt: new Date().toISOString(),
+        },
+      }),
+      note: `Đã xóa tệp đính kèm "${existing.fileName}" khỏi danh sách hiện hành (tệp vẫn được lưu trữ tại mục Lịch sử)`,
     },
   });
 
-  return { id: existing.id, fileName: existing.fileName };
+  return { id: existing.id, fileName: existing.fileName, archivedInHistory: true };
 }
 
 export async function createCompetitorPriceCheckAlert(params: {

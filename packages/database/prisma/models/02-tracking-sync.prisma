@@ -182,3 +182,21 @@ model WebhookIntakeErrorLog {
   @@index([sourcePlatform, createdAt])
   @@map("webhook_intake_error_logs")
 }
+
+model TrackingTouchpoint {
+  id            Int      @id @default(autoincrement())
+  eventId       String   @unique @map("event_id")
+  eventType     String   @map("event_type")
+  sourceWebsite String   @map("source_website")
+  pageUrl       String?  @map("page_url")
+  leadCode      String?  @map("lead_code")
+  submissionId  String?  @map("submission_id")
+  visitorId     String?  @map("visitor_id")
+  occurredAt    DateTime @default(now()) @map("occurred_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@index([sourceWebsite, occurredAt])
+  @@index([occurredAt])
+  @@index([submissionId])
+  @@map("tracking_touchpoints")
+}

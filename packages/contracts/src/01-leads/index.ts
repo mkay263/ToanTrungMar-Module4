@@ -190,6 +190,15 @@ export interface LeadAttachmentDto {
   createdAt: string;
 }
 
+export interface LeadArchivedAttachmentDto {
+  activityId: number;
+  fileName: string;
+  fileType: 'site_photo' | 'cad_drawing' | 'other';
+  fileSizeKb: number | null;
+  downloadUrl: string;
+  deletedByName?: string | null;
+}
+
 export interface LeadActivityDto {
   id: number;
   leadId: number;
@@ -202,6 +211,7 @@ export interface LeadActivityDto {
   toSalesName: string | null;
   reason: string | null;
   noteContent: string | null;
+  archivedAttachment?: LeadArchivedAttachmentDto | null;
   createdAt: string;
 }
 

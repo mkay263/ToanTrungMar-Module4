@@ -3,12 +3,15 @@
 import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Archive,
   ArrowRight,
   ArrowRightLeft,
   Ban,
   Calendar,
   CheckCircle2,
   Clock,
+  Download,
+  ExternalLink,
   FileCheck2,
   Inbox,
   Info,
@@ -155,6 +158,7 @@ export function LeadActivityTimeline({ activities }: { activities: LeadActivityD
             toLbl,
             act.fromSalesName || '',
             act.toSalesName || '',
+            act.archivedAttachment?.fileName || '',
           ]
             .join(' ')
             .toLowerCase();
@@ -350,6 +354,43 @@ export function LeadActivityTimeline({ activities }: { activities: LeadActivityD
                   )}
                   {note && note !== reason && (
                     <p className="mt-1.5 text-xs sm:text-sm text-slate-700 leading-relaxed">{note}</p>
+                  )}
+
+                  {act.archivedAttachment && (
+                    <div className="mt-2.5 p-2.5 rounded-xl bg-amber-50/75 border border-amber-200/90 flex flex-wrap items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="w-7 h-7 rounded-lg bg-amber-100 text-amber-800 grid place-items-center shrink-0">
+                          <Archive className="w-3.5 h-3.5" />
+                        </span>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-900 truncate" title={act.archivedAttachment.fileName}>
+                            {act.archivedAttachment.fileName}
+                          </div>
+                          <div className="text-[11px] text-amber-800">
+                            Tệp đã xóa khỏi mục Tệp đính kèm · Lưu trữ an toàn trong Lịch sử
+                            {act.archivedAttachment.fileSizeKb ? ` · ${act.archivedAttachment.fileSizeKb} KB` : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <a
+                          href={act.archivedAttachment.downloadUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="h-7 px-2.5 rounded-lg bg-white hover:bg-amber-100/60 border border-amber-300 text-amber-950 font-semibold inline-flex items-center gap-1 transition"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span>Xem tệp</span>
+                        </a>
+                        <a
+                          href={`${act.archivedAttachment.downloadUrl}&download=1`}
+                          className="h-7 px-2.5 rounded-lg bg-[#1E3A8A] hover:bg-blue-900 text-white font-semibold inline-flex items-center gap-1 transition"
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>Tải về</span>
+                        </a>
+                      </div>
+                    </div>
                   )}
                 </div>
               </li>

@@ -6,6 +6,8 @@ build/
 coverage/
 *.log
 *.tsbuildinfo
+# Prisma generated Postgres client (regenerated per target OS by npm run db:generate)
+packages/database/generated/
 # Local database & protected upload storage
 *.db
 *.db-journal
@@ -20,12 +22,22 @@ coverage/
 /storage/
 /storage_independent_v2/
 /storage*/
-# Local credentials; retain a non-secret template
+# Local credentials & runtime integration configs (never push to GitHub)
 .env
 .env.*
 !.env.example
-# Local report documents & internal handover docs (kept on local machine only)
+**/google-realtime-config.json
+# Local report documents, internal BA/Design archives & audits (kept on local machine only)
 *.docx
+*.doc
+*.pdf
+*.xlsx
+*.xls
+*.zip
+performance-freshness-audit.md
+tests/benchmark-results.json
+docs/sources/
+docs/design/
 docs/BAO_CAO_DU_LIEU_MODULE_02_03_TOAN_TRUNG_V2.md
 docs/UPGRADE_PROGRESS.md
 docs/UPGRADE_SCOPE.md

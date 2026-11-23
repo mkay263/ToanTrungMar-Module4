@@ -1346,29 +1346,82 @@ export async function generateScopedReportExportBuffer(
       metadata: [
         { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate} (Asia/Ho_Chi_Minh)` },
         { label: 'Phạm vi website', value: m04Spec.scope.websiteLabel },
-        { label: 'Chi phí quảng cáo', value: m04Spec.metrics.attributedAdCost !== null && m04Spec.metrics.attributedAdCost !== undefined ? `${m04Spec.metrics.attributedAdCost.toLocaleString('vi-VN')} ₫` : 'Chưa tách riêng' },
-        { label: 'Lead tiếp nhận / Hợp lệ', value: `${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount} / ${m04Spec.metrics.validLeadCount}` },
-        { label: 'CPL quảng cáo hợp lệ', value: m04Spec.metrics.costPerValidAdLead !== null ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} ₫ (${m04Spec.metrics.validAttributedAdLeadCount ?? 0} Lead từ quảng cáo)` : 'Chưa đủ dữ liệu' },
-        { label: 'Chốt thành công / Tỷ lệ chốt', value: `${m04Spec.metrics.wonLeadCount} (${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'})` },
+      ],
+      kpiSummary: [
+        {
+          label: 'Chi phí Ads',
+          value:
+            m04Spec.metrics.attributedAdCost !== null && m04Spec.metrics.attributedAdCost !== undefined
+              ? `${m04Spec.metrics.attributedAdCost.toLocaleString('vi-VN')} ₫`
+              : 'Chưa tách riêng',
+        },
+        {
+          label: 'Lead L1 / Hợp lệ',
+          value: `${m04Spec.metrics.receivedLeadCount ?? m04Spec.metrics.totalLeadCount} / ${m04Spec.metrics.validLeadCount}`,
+        },
+        {
+          label: 'CPL Ads hợp lệ',
+          value:
+            m04Spec.metrics.costPerValidAdLead !== null
+              ? `${Math.round(m04Spec.metrics.costPerValidAdLead).toLocaleString('vi-VN')} ₫`
+              : 'Chưa đủ dữ liệu',
+        },
+        {
+          label: 'Chốt Won / Tỷ lệ',
+          value: `${m04Spec.metrics.wonLeadCount} (${m04Spec.metrics.winRatePct !== null ? `${m04Spec.metrics.winRatePct}%` : '—'})`,
+        },
       ],
       columns: [
         { header: 'Website', key: 'website', width: 26, type: 'string' },
-        { header: 'Lead tiếp nhận', key: 'leadCount', width: 15, type: 'number' },
-        { header: 'Lead hợp lệ', key: 'validCount', width: 15, type: 'number' },
-        { header: 'Lead từ Ads', key: 'adLeadCount', width: 15, type: 'number' },
-        { header: 'Chi phí Ads (VND)', key: 'adCost', width: 18, type: 'number' },
-        { header: 'CPL Ads (VND)', key: 'cpl', width: 16, type: 'number' },
-        { header: 'Chốt thành công', key: 'wonCount', width: 15, type: 'number' },
+        { header: 'Lead tiếp nhận', key: 'leadCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Lead hợp lệ', key: 'validCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Lead từ Ads', key: 'adLeadCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Chi phí Ads (VNĐ)', key: 'adCost', width: 22, type: 'currency', summaryAgg: 'sum' },
+        {
+          header: 'CPL Ads (VNĐ)',
+          key: 'cpl',
+          width: 20,
+          type: 'currency',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IF(${colLetters.adLeadCount}${rowNum}>0,ROUND(${colLetters.adCost}${rowNum}/${colLetters.adLeadCount}${rowNum},0),"")`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IF(${colLetters.adLeadCount}${summaryRowNum}>0,ROUND(${colLetters.adCost}${summaryRowNum}/${colLetters.adLeadCount}${summaryRowNum},0),"")`,
+        },
+        { header: 'Chốt thành công', key: 'wonCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'Tỷ lệ chốt (%)',
+          key: 'winRate',
+          width: 16,
+          type: 'percent',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonCount}${rowNum}/${colLetters.validCount}${rowNum},0)`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonCount}${summaryRowNum}/${colLetters.validCount}${summaryRowNum},0)`,
+        },
       ],
       rows: m04Spec.tables.byWebsite.map((w) => ({
         website: w.website,
         leadCount: w.leadCount,
         validCount: w.validCount,
         adLeadCount: w.adLeadCount,
-        adCost: w.adCost ?? null,
-        cpl: w.cpl ? Math.round(w.cpl) : null,
+        adCost: w.adCost ?? 0,
+        cpl: w.cpl !== null && w.cpl !== undefined ? Math.round(w.cpl) : null,
         wonCount: w.wonCount,
+        winRate: w.validCount > 0 ? Number((w.wonCount / w.validCount).toFixed(4)) : 0,
       })),
+      summaryRow: {
+        website: 'TỔNG CỘNG TOÀN PHẠM VI',
+        leadCount: m04Spec.tables.byWebsite.reduce((s, w) => s + w.leadCount, 0),
+        validCount: m04Spec.tables.byWebsite.reduce((s, w) => s + w.validCount, 0),
+        adLeadCount: m04Spec.tables.byWebsite.reduce((s, w) => s + w.adLeadCount, 0),
+        adCost: m04Spec.tables.byWebsite.reduce((s, w) => s + (w.adCost ?? 0), 0),
+        cpl: m04Spec.metrics.costPerValidAdLead !== null ? Math.round(m04Spec.metrics.costPerValidAdLead) : null,
+        wonCount: m04Spec.tables.byWebsite.reduce((s, w) => s + w.wonCount, 0),
+        winRate: m04Spec.metrics.winRatePct !== null ? Number((m04Spec.metrics.winRatePct / 100).toFixed(4)) : 0,
+      },
+      footerNotes: [
+        'Công thức Excel tự động tính lại trực tiếp khi chỉnh sửa số liệu: CPL = Chi phí / Lead từ Ads; Tỷ lệ chốt = Won / Lead hợp lệ.',
+      ],
     },
     {
       name: 'KenhVaChienDich',
@@ -1381,20 +1434,53 @@ export async function generateScopedReportExportBuffer(
         { header: 'Chiến dịch', key: 'campaignName', width: 34, type: 'string' },
         { header: 'Website gắn', key: 'websiteDomain', width: 22, type: 'string' },
         { header: 'Phân bổ', key: 'attributionStatus', width: 24, type: 'string' },
-        { header: 'Chi phí (VND)', key: 'adCost', width: 18, type: 'number' },
-        { header: 'Clicks', key: 'clicks', width: 12, type: 'number' },
-        { header: 'Lead từ quảng cáo', key: 'validAdLeads', width: 16, type: 'number' },
-        { header: 'CPL (VND)', key: 'cpl', width: 16, type: 'number' },
+        { header: 'Chi phí (VNĐ)', key: 'adCost', width: 22, type: 'currency', summaryAgg: 'sum' },
+        { header: 'Clicks', key: 'clicks', width: 14, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'CPC (VNĐ)',
+          key: 'cpc',
+          width: 18,
+          type: 'currency',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IFERROR(ROUND(${colLetters.adCost}${rowNum}/${colLetters.clicks}${rowNum},0),0)`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IFERROR(ROUND(${colLetters.adCost}${summaryRowNum}/${colLetters.clicks}${summaryRowNum},0),0)`,
+        },
+        { header: 'Lead từ quảng cáo', key: 'validAdLeads', width: 18, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'CPL (VNĐ)',
+          key: 'cpl',
+          width: 20,
+          type: 'currency',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IF(${colLetters.validAdLeads}${rowNum}>0,ROUND(${colLetters.adCost}${rowNum}/${colLetters.validAdLeads}${rowNum},0),"")`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IF(${colLetters.validAdLeads}${summaryRowNum}>0,ROUND(${colLetters.adCost}${summaryRowNum}/${colLetters.validAdLeads}${summaryRowNum},0),"")`,
+        },
       ],
       rows: (m04Spec.tables.byCampaign || []).map((c) => ({
         campaignName: c.campaignName,
         websiteDomain: c.websiteDomain || 'Chung/Chưa tách',
         attributionStatus: attributionLabels[c.attributionStatus] || c.attributionStatus,
-        adCost: c.adCost ?? null,
+        adCost: c.adCost ?? 0,
         clicks: c.clicks,
+        cpc: c.clicks > 0 && c.adCost ? Math.round(c.adCost / c.clicks) : 0,
         validAdLeads: c.validAttributedAdLeadCount,
-        cpl: c.costPerValidAdLead ? Math.round(c.costPerValidAdLead) : null,
+        cpl:
+          c.costPerValidAdLead !== null && c.costPerValidAdLead !== undefined
+            ? Math.round(c.costPerValidAdLead)
+            : null,
       })),
+      summaryRow: {
+        campaignName: `TỔNG (${(m04Spec.tables.byCampaign || []).length} chiến dịch)`,
+        websiteDomain: '',
+        attributionStatus: '',
+        adCost: (m04Spec.tables.byCampaign || []).reduce((s, c) => s + (c.adCost ?? 0), 0),
+        clicks: (m04Spec.tables.byCampaign || []).reduce((s, c) => s + c.clicks, 0),
+        cpc: 0,
+        validAdLeads: (m04Spec.tables.byCampaign || []).reduce((s, c) => s + c.validAttributedAdLeadCount, 0),
+        cpl: null,
+      },
     },
     {
       name: 'TongHopSales',
@@ -1405,12 +1491,22 @@ export async function generateScopedReportExportBuffer(
       ],
       columns: [
         { header: 'Nhân sự / Nhóm đối soát', key: 'salesName', width: 34, type: 'string' },
-        { header: 'Lead hợp lệ', key: 'totalLeads', width: 14, type: 'number' },
-        { header: 'Vừa nhận thông tin', key: 'newLeads', width: 18, type: 'number' },
-        { header: 'Đang soạn báo giá', key: 'quotingLeads', width: 18, type: 'number' },
-        { header: 'Đã gửi báo giá', key: 'quoteSentLeads', width: 16, type: 'number' },
-        { header: 'Quá hạn >7 ngày', key: 'overdue7d', width: 16, type: 'number' },
-        { header: 'Chốt thành công', key: 'wonLeads', width: 16, type: 'number' },
+        { header: 'Lead hợp lệ', key: 'totalLeads', width: 15, type: 'number', summaryAgg: 'sum' },
+        { header: 'Vừa nhận thông tin', key: 'newLeads', width: 18, type: 'number', summaryAgg: 'sum' },
+        { header: 'Đang soạn báo giá', key: 'quotingLeads', width: 18, type: 'number', summaryAgg: 'sum' },
+        { header: 'Đã gửi báo giá', key: 'quoteSentLeads', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Quá hạn >7 ngày', key: 'overdue7d', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Chốt thành công', key: 'wonLeads', width: 16, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'Tỷ lệ chốt (%)',
+          key: 'winRate',
+          width: 16,
+          type: 'percent',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonLeads}${rowNum}/${colLetters.totalLeads}${rowNum},0)`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonLeads}${summaryRowNum}/${colLetters.totalLeads}${summaryRowNum},0)`,
+        },
       ],
       rows: dashboard.salesPerformance.map((sp) => ({
         salesName: sp.salesFullName,
@@ -1420,7 +1516,18 @@ export async function generateScopedReportExportBuffer(
         quoteSentLeads: sp.quoteSentLeads,
         overdue7d: sp.unansweredOverdue7d,
         wonLeads: sp.wonLeads,
+        winRate: sp.totalLeads > 0 ? Number((sp.wonLeads / sp.totalLeads).toFixed(4)) : 0,
       })),
+      summaryRow: {
+        salesName: 'TỔNG CỘNG ĐỘI NGŨ SALES',
+        totalLeads: dashboard.salesPerformance.reduce((s, sp) => s + sp.totalLeads, 0),
+        newLeads: dashboard.salesPerformance.reduce((s, sp) => s + sp.newLeads, 0),
+        quotingLeads: dashboard.salesPerformance.reduce((s, sp) => s + sp.quotingLeads, 0),
+        quoteSentLeads: dashboard.salesPerformance.reduce((s, sp) => s + sp.quoteSentLeads, 0),
+        overdue7d: dashboard.salesPerformance.reduce((s, sp) => s + sp.unansweredOverdue7d, 0),
+        wonLeads: dashboard.salesPerformance.reduce((s, sp) => s + sp.wonLeads, 0),
+        winRate: 0,
+      },
     },
     {
       name: 'NhuCauSanPham',
@@ -1430,10 +1537,20 @@ export async function generateScopedReportExportBuffer(
       ],
       columns: [
         { header: 'Sản phẩm', key: 'productName', width: 32, type: 'string' },
-        { header: 'Lead quan tâm', key: 'leadCount', width: 16, type: 'number' },
-        { header: 'Lead hợp lệ', key: 'validCount', width: 14, type: 'number' },
-        { header: 'Đã báo giá', key: 'quotedCount', width: 14, type: 'number' },
-        { header: 'Chốt thành công', key: 'wonCount', width: 16, type: 'number' },
+        { header: 'Lead quan tâm', key: 'leadCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Lead hợp lệ', key: 'validCount', width: 15, type: 'number', summaryAgg: 'sum' },
+        { header: 'Đã báo giá', key: 'quotedCount', width: 15, type: 'number', summaryAgg: 'sum' },
+        { header: 'Chốt thành công', key: 'wonCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'Tỷ lệ chốt (%)',
+          key: 'winRate',
+          width: 16,
+          type: 'percent',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonCount}${rowNum}/${colLetters.validCount}${rowNum},0)`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonCount}${summaryRowNum}/${colLetters.validCount}${summaryRowNum},0)`,
+        },
       ],
       rows: (m04Spec.tables.byProduct || []).map((p) => ({
         productName: p.productName,
@@ -1441,7 +1558,16 @@ export async function generateScopedReportExportBuffer(
         validCount: p.validCount,
         quotedCount: p.quotedCount,
         wonCount: p.wonCount,
+        winRate: p.validCount > 0 ? Number((p.wonCount / p.validCount).toFixed(4)) : 0,
       })),
+      summaryRow: {
+        productName: 'TỔNG CỘNG SẢN PHẨM',
+        leadCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.leadCount, 0),
+        validCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.validCount, 0),
+        quotedCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.quotedCount, 0),
+        wonCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.wonCount, 0),
+        winRate: 0,
+      },
     },
     {
       name: 'ChiTietLead',

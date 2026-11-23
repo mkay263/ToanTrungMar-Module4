@@ -43,12 +43,12 @@ const config: Config = {
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       fontSize: {
-        xs: ['0.8125rem', { lineHeight: '1.45' }],
-        sm: ['0.9375rem', { lineHeight: '1.5' }],
-        base: ['1.03125rem', { lineHeight: '1.55' }],
-        lg: ['1.1875rem', { lineHeight: '1.45' }],
-        xl: ['1.3125rem', { lineHeight: '1.4' }],
-        '2xl': ['1.5625rem', { lineHeight: '1.3' }],
+        xs: ['0.875rem', { lineHeight: '1.45' }],
+        sm: ['0.975rem', { lineHeight: '1.5' }],
+        base: ['1.0625rem', { lineHeight: '1.55' }],
+        lg: ['1.225rem', { lineHeight: '1.45' }],
+        xl: ['1.375rem', { lineHeight: '1.4' }],
+        '2xl': ['1.625rem', { lineHeight: '1.3' }],
       },
       borderRadius: {
         xl: '12px',

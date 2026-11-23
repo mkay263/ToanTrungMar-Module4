@@ -21,6 +21,7 @@ import type {
 } from '@toantrung/contracts';
 import { bumpDomainRevisions } from '../../../core/cache/server-data-cache';
 import { APP_CONFIG } from '../../../core/config';
+import { decryptSecret, encryptSecret } from '../../../core/security/vault';
 import { GoogleImagenProvider } from './google-imagen.provider';
 import { OpenAiImageProvider } from './openai-image.provider';
 import { UniversalCloudAiProvider } from './universal-cloud.provider';
@@ -63,6 +64,7 @@ interface StoredMultiAiConfig {
   defaultProviderId: AiProviderId;
   defaultModelId?: string;
   autoFallbackToLocal: boolean;
+  savedGateways?: string[];
   providers: Partial<Record<AiProviderId, StoredProviderEntry>>;
 }
 
@@ -70,6 +72,7 @@ const DEFAULT_MULTI_AI_CONFIG: StoredMultiAiConfig = {
   defaultProviderId: 'google_imagen',
   defaultModelId: 'imagen-3.0-generate-002',
   autoFallbackToLocal: true,
+  savedGateways: [],
   providers: {},
 };
 
@@ -84,6 +87,38 @@ const globalForMultiAiConfig = globalThis as unknown as {
 function getConfigFilePath(): string {
   const dir = path.join(APP_CONFIG.getStorageRoot(), 'config');
   return path.join(dir, 'multi-ai-providers.json');
+}
+
+function decryptStoredProviders(
+  providers: Partial<Record<AiProviderId, StoredProviderEntry>> | undefined,
+): Partial<Record<AiProviderId, StoredProviderEntry>> {
+  const out: Partial<Record<AiProviderId, StoredProviderEntry>> = {};
+  if (!providers || typeof providers !== 'object') return out;
+  for (const [k, entry] of Object.entries(providers)) {
+    if (!entry) continue;
+    const decryptedKey = entry.apiKey ? decryptSecret(entry.apiKey) || entry.apiKey : entry.apiKey;
+    out[k as AiProviderId] = {
+      ...entry,
+      ...(decryptedKey ? { apiKey: decryptedKey } : {}),
+    };
+  }
+  return out;
+}
+
+function encryptStoredProviders(
+  providers: Partial<Record<AiProviderId, StoredProviderEntry>> | undefined,
+): Partial<Record<AiProviderId, StoredProviderEntry>> {
+  const out: Partial<Record<AiProviderId, StoredProviderEntry>> = {};
+  if (!providers || typeof providers !== 'object') return out;
+  for (const [k, entry] of Object.entries(providers)) {
+    if (!entry) continue;
+    const rawKey = (entry.apiKey || '').trim();
+    out[k as AiProviderId] = {
+      ...entry,
+      ...(rawKey ? { apiKey: encryptSecret(rawKey) } : {}),
+    };
+  }
+  return out;
 }
 
 function readStoredConfig(): StoredMultiAiConfig {
@@ -102,7 +137,10 @@ function readStoredConfig(): StoredMultiAiConfig {
       defaultProviderId: parsed.defaultProviderId || 'google_imagen',
       defaultModelId: parsed.defaultModelId || 'imagen-3.0-generate-002',
       autoFallbackToLocal: parsed.autoFallbackToLocal ?? true,
-      providers: parsed.providers || {},
+      savedGateways: Array.isArray(parsed.savedGateways)
+        ? parsed.savedGateways.filter((u): u is string => typeof u === 'string' && u.trim().length > 0).slice(0, 10)
+        : [],
+      providers: decryptStoredProviders(parsed.providers),
     };
     globalForMultiAiConfig.__toantrungMultiAiConfigCache = {
       filePath: file,
@@ -119,7 +157,11 @@ function writeStoredConfig(config: StoredMultiAiConfig): void {
   try {
     const file = getConfigFilePath();
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8');
+    const encryptedDiskPayload: StoredMultiAiConfig = {
+      ...config,
+      providers: encryptStoredProviders(config.providers),
+    };
+    fs.writeFileSync(file, JSON.stringify(encryptedDiskPayload, null, 2), 'utf-8');
     const stat = fs.statSync(file);
     globalForMultiAiConfig.__toantrungMultiAiConfigCache = {
       filePath: file,
@@ -130,6 +172,30 @@ function writeStoredConfig(config: StoredMultiAiConfig): void {
   } catch {
     // Ignore write failure in read-only test environments
   }
+}
+
+export function migrateStoredAiKeysToVault(): {
+  migratedCount: number;
+  alreadyEncryptedCount: number;
+} {
+  const file = getConfigFilePath();
+  if (!fs.existsSync(file)) {
+    return { migratedCount: 0, alreadyEncryptedCount: 0 };
+  }
+  const rawParsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<StoredMultiAiConfig>;
+  let migratedCount = 0;
+  let alreadyEncryptedCount = 0;
+  for (const entry of Object.values(rawParsed.providers || {})) {
+    const k = (entry?.apiKey || '').trim();
+    if (!k) continue;
+    if (k.startsWith('vault$v1$')) alreadyEncryptedCount += 1;
+    else migratedCount += 1;
+  }
+  if (migratedCount > 0) {
+    const normalized = readStoredConfig();
+    writeStoredConfig(normalized);
+  }
+  return { migratedCount, alreadyEncryptedCount };
 }
 
 function maskKey(key: string | null | undefined): string | null {
@@ -847,19 +913,34 @@ export class AiDesignProviderFactory {
       };
     }
 
-    const explicitEndpoint =
-      input.apiEndpoint?.trim() ||
-      storedEntry?.apiEndpoint ||
-      resolveEffectiveProviderCredential(explicitPid, config).apiEndpoint ||
-      (explicitPid === 'google_imagen'
-        ? 'https://generativelanguage.googleapis.com/v1beta'
-        : explicitPid === 'openai_dalle'
-          ? 'https://api.openai.com/v1'
-          : '');
+    const rawInputEndpoint = input.apiEndpoint?.trim() || '';
+    const normalizeCandidateUrl = (u: string): string =>
+      u
+        .trim()
+        .replace(/\.+$/, '')
+        .replace(/\/(images\/generations|images\/edits|chat\/completions|models(?:\/.*)?|predict|generateContent)\/?$/i, '')
+        .replace(/\/+$/, '');
 
-    if (explicitEndpoint) {
-      const safeCheck = validateSafeHttpUrl(explicitEndpoint);
-      if (!safeCheck.valid) {
+    interface DiscoveryCandidate {
+      providerId: AiProviderId;
+      endpoint: string;
+      label: string;
+    }
+
+    const candidates: DiscoveryCandidate[] = [];
+    const seenEndpoints = new Set<string>();
+    const pushCandidate = (providerId: AiProviderId, endpoint: string, label: string) => {
+      const clean = normalizeCandidateUrl(endpoint);
+      if (!clean) return;
+      const dedupeKey = `${providerId}::${clean.toLowerCase()}`;
+      if (seenEndpoints.has(dedupeKey)) return;
+      seenEndpoints.add(dedupeKey);
+      candidates.push({ providerId, endpoint: clean, label });
+    };
+
+    if (rawInputEndpoint) {
+      const safeCheck = validateSafeHttpUrl(rawInputEndpoint);
+      if (!safeCheck.valid || !safeCheck.normalizedBaseUrl) {
         return {
           ok: false,
           connected: false,
@@ -870,109 +951,130 @@ export class AiDesignProviderFactory {
           maskedKey: maskSecretValue(effectiveKey),
         };
       }
-    }
-
-    let activePid: AiProviderId = explicitPid;
-    let activeEndpoint = explicitEndpoint;
-
-    // Build candidate config explicitly for the requested provider
-    let testConfig: StoredMultiAiConfig = {
-      ...config,
-      providers: {
-        ...config.providers,
-        [activePid]: {
-          ...storedEntry,
-          apiKey: effectiveKey,
-          apiEndpoint: activeEndpoint || storedEntry?.apiEndpoint || null,
-        },
-      },
-    };
-
-    let snapshot = await AiModelRegistryService.getModelRegistrySnapshot(testConfig, {
-      forceRefresh: true,
-      onlyProviderId: activePid,
-    });
-    let conn = snapshot.connections.find((c) => c.providerId === activePid);
-
-    // Smart fallback between openai_dalle and custom_endpoint when user pastes an sk-... key without typing Gateway URL
-    if (
-      conn &&
-      conn.listApiStatus === 'error' &&
-      !input.apiEndpoint?.trim() &&
-      effectiveKey.startsWith('sk-')
-    ) {
+      const normUrl = safeCheck.normalizedBaseUrl;
+      const isGoogleHost = /generativelanguage\.googleapis\.com/i.test(normUrl);
+      const isOpenAiOfficial = /^https:\/\/api\.openai\.com(\/|$)/i.test(normUrl);
+      const targetPidForUrl: AiProviderId = isGoogleHost
+        ? 'google_imagen'
+        : isOpenAiOfficial
+          ? 'openai_dalle'
+          : 'custom_endpoint';
+      pushCandidate(targetPidForUrl, normUrl, normUrl);
+      // If user pasted bare proxy host without /v1 (e.g. https://proxy.example.com), auto-add /v1 fallback
+      if (!isGoogleHost && !/\/v\d+(beta)?$/i.test(normUrl)) {
+        pushCandidate(targetPidForUrl, `${normUrl}/v1`, `${normUrl}/v1`);
+      }
+    } else {
+      // Zero-code-fix universal multi-provider auto-discovery based on key format + configured & saved gateways
       const configuredCustomEndpoint =
         config.providers.custom_endpoint?.apiEndpoint ||
         resolveEffectiveProviderCredential('custom_endpoint', config).apiEndpoint ||
         '';
-      if (activePid === 'openai_dalle' && configuredCustomEndpoint) {
-        const altPid: AiProviderId = 'custom_endpoint';
-        const altConfig: StoredMultiAiConfig = {
-          ...config,
-          providers: {
-            ...config.providers,
-            [altPid]: {
-              ...config.providers[altPid],
-              apiKey: effectiveKey,
-              apiEndpoint: configuredCustomEndpoint,
-            },
-          },
-        };
-        const altSnap = await AiModelRegistryService.getModelRegistrySnapshot(altConfig, {
-          forceRefresh: true,
-          onlyProviderId: altPid,
-        });
-        const altConn = altSnap.connections.find((c) => c.providerId === altPid);
-        if (altConn && altConn.listApiStatus === 'ok') {
-          activePid = altPid;
-          activeEndpoint = configuredCustomEndpoint;
-          testConfig = altConfig;
-          snapshot = altSnap;
-          conn = altConn;
+      const savedGateways = config.savedGateways || [];
+
+      if (effectiveKey.startsWith('AIza') || effectiveKey.startsWith('AQ.')) {
+        pushCandidate('google_imagen', 'https://generativelanguage.googleapis.com/v1beta', 'Google Gemini/Imagen');
+        if (configuredCustomEndpoint) {
+          pushCandidate('custom_endpoint', configuredCustomEndpoint, 'Gateway đã cấu hình');
         }
-      } else if (activePid === 'custom_endpoint') {
-        const altPid: AiProviderId = 'openai_dalle';
-        const altEndpoint = 'https://api.openai.com/v1';
-        const altConfig: StoredMultiAiConfig = {
-          ...config,
-          providers: {
-            ...config.providers,
-            [altPid]: {
-              ...config.providers[altPid],
-              apiKey: effectiveKey,
-              apiEndpoint: altEndpoint,
-            },
-          },
-        };
-        const altSnap = await AiModelRegistryService.getModelRegistrySnapshot(altConfig, {
-          forceRefresh: true,
-          onlyProviderId: altPid,
-        });
-        const altConn = altSnap.connections.find((c) => c.providerId === altPid);
-        if (altConn && altConn.listApiStatus === 'ok') {
-          activePid = altPid;
-          activeEndpoint = altEndpoint;
-          testConfig = altConfig;
-          snapshot = altSnap;
-          conn = altConn;
+      } else if (effectiveKey.startsWith('sk-or-')) {
+        pushCandidate('custom_endpoint', 'https://openrouter.ai/api/v1', 'OpenRouter');
+        if (configuredCustomEndpoint) {
+          pushCandidate('custom_endpoint', configuredCustomEndpoint, 'Gateway đã cấu hình');
         }
+      } else if (effectiveKey.startsWith('gsk_')) {
+        pushCandidate('custom_endpoint', 'https://api.groq.com/openai/v1', 'Groq Cloud');
+      } else if (effectiveKey.startsWith('xai-')) {
+        pushCandidate('custom_endpoint', 'https://api.x.ai/v1', 'xAI Grok');
+      } else if (effectiveKey.startsWith('sk-proj-') || effectiveKey.startsWith('sk-svcacct-')) {
+        pushCandidate('openai_dalle', 'https://api.openai.com/v1', 'OpenAI Official');
+        if (configuredCustomEndpoint) {
+          pushCandidate('custom_endpoint', configuredCustomEndpoint, 'Gateway đã cấu hình');
+        }
+        for (const gw of savedGateways) {
+          pushCandidate('custom_endpoint', gw, gw);
+        }
+      } else {
+        // Generic key (sk-... / relay / custom): probe OpenAI + configured gateway + saved gateways + popular OpenAI-compatible clouds
+        if (explicitPid === 'google_imagen') {
+          pushCandidate('google_imagen', 'https://generativelanguage.googleapis.com/v1beta', 'Google Gemini/Imagen');
+        }
+        if (configuredCustomEndpoint) {
+          pushCandidate('custom_endpoint', configuredCustomEndpoint, 'Gateway đã cấu hình');
+        }
+        pushCandidate('openai_dalle', 'https://api.openai.com/v1', 'OpenAI Official');
+        for (const gw of savedGateways) {
+          pushCandidate('custom_endpoint', gw, gw);
+        }
+        pushCandidate('custom_endpoint', 'https://openrouter.ai/api/v1', 'OpenRouter');
+        pushCandidate('custom_endpoint', 'https://api.deepseek.com/v1', 'DeepSeek');
+        pushCandidate('google_imagen', 'https://generativelanguage.googleapis.com/v1beta', 'Google Gemini/Imagen');
       }
     }
 
-    if (conn && conn.listApiStatus === 'error') {
+    let activePid: AiProviderId = candidates[0]?.providerId || explicitPid;
+    let activeEndpoint = candidates[0]?.endpoint || '';
+    let snapshot: AiModelRegistrySnapshotDto | null = null;
+    let conn: AiModelRegistrySnapshotDto['connections'][number] | undefined;
+    const probeFailures: string[] = [];
+
+    // Probe candidates in parallel batches (max 6) so discovery finishes in ~400-800ms instead of sequential timeouts
+    const probeResults = await Promise.all(
+      candidates.slice(0, 6).map(async (cand) => {
+        const candConfig: StoredMultiAiConfig = {
+          ...config,
+          providers: {
+            ...config.providers,
+            [cand.providerId]: {
+              ...config.providers[cand.providerId],
+              apiKey: effectiveKey,
+              apiEndpoint: cand.endpoint,
+            },
+          },
+        };
+        const candSnap = await AiModelRegistryService.getModelRegistrySnapshot(candConfig, {
+          forceRefresh: true,
+          onlyProviderId: cand.providerId,
+        });
+        const candConn = candSnap.connections.find((c) => c.providerId === cand.providerId);
+        return { cand, candSnap, candConn };
+      }),
+    );
+
+    const winner = probeResults.find((r) => r.candConn && r.candConn.listApiStatus === 'ok');
+    if (winner) {
+      activePid = winner.cand.providerId;
+      activeEndpoint = winner.cand.endpoint;
+      snapshot = winner.candSnap;
+      conn = winner.candConn;
+    } else {
+      const firstResult = probeResults[0];
+      snapshot = firstResult?.candSnap || null;
+      conn = firstResult?.candConn;
+      for (const r of probeResults) {
+        const shortErr = (r.candConn?.listApiDetail || 'Lỗi kết nối').replace(/\s+/g, ' ').slice(0, 85);
+        probeFailures.push(`${r.cand.label}: ${shortErr}`);
+      }
+    }
+
+    if (!snapshot || (conn && conn.listApiStatus === 'error')) {
+      const triedSummary =
+        !rawInputEndpoint && probeFailures.length > 1
+          ? ` Đã tự động dò ${probeFailures.length} cổng (${probeFailures.slice(0, 3).join(' | ')}). Nếu Key thuộc Proxy/Relay riêng (OneAPI/NewAPI/...), hãy dán thêm Gateway URL (VD: https://.../v1) vào ô bên dưới — hệ thống sẽ tự ghi nhớ cổng này cho mọi lần đổi Key sau.`
+          : '';
       return {
         ok: false,
         connected: false,
         providerId: activePid,
         modelTested: input.modelId || 'none',
         latencyMs: Date.now() - started,
-        replyText: conn.listApiDetail,
+        replyText: `${conn?.listApiDetail || 'Không thể kết nối API Key.'}${triedSummary}`,
         maskedKey: maskSecretValue(effectiveKey),
       };
     }
 
     const providerModels = snapshot.models.filter((m) => m.providerId === activePid);
-    const discoveredModels: AiModelOptionDto[] = providerModels.slice(0, 20).map((m) => {
+    const discoveredModels: AiModelOptionDto[] = providerModels.slice(0, 30).map((m) => {
       const supportsImage =
         m.supportedOperations.includes('image_generation') ||
         m.supportedOperations.includes('image_editing_ref');
@@ -1002,6 +1104,17 @@ export class AiDesignProviderFactory {
       activeModel: chosenModel,
       ...(discoveredModels.length > 0 ? { discoveredModels } : {}),
     };
+    if (
+      activePid === 'custom_endpoint' &&
+      activeEndpoint &&
+      !/^https:\/\/(api\.openai\.com|generativelanguage\.googleapis\.com)/i.test(activeEndpoint)
+    ) {
+      const prevGateways = currentCfg.savedGateways || [];
+      currentCfg.savedGateways = [
+        activeEndpoint,
+        ...prevGateways.filter((g) => g.toLowerCase() !== activeEndpoint.toLowerCase()),
+      ].slice(0, 10);
+    }
     currentCfg.defaultProviderId = activePid;
     currentCfg.defaultModelId = chosenModel;
     writeStoredConfig(currentCfg);

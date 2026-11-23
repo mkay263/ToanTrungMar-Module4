@@ -36,6 +36,7 @@ import {
 } from '@toantrung/contracts';
 import { apiRequest } from '@/core/http/client';
 import { VietnamAddressFields } from './VietnamAddressFields';
+import { formatCompactLeadCode } from './leads-helpers';
 
 interface ProductCheckboxGridProps {
   products: ProductCatalogDto[];
@@ -781,8 +782,8 @@ export function ManualLeadModal({
                               <Crown className="w-3.5 h-3.5 fill-slate-950 text-slate-950" />
                               <span>👑 KHÁCH CŨ ĐÃ TỪNG MUA THÀNH CÔNG (VIP)</span>
                             </span>
-                            <span className="font-mono font-bold text-[#1E3A8A]">
-                              {m.leadCode}
+                            <span className="font-mono font-bold text-[#1E3A8A]" title={m.leadCode}>
+                              {formatCompactLeadCode(m.leadCode)}
                             </span>
                             <span className="font-bold truncate">
                               · {m.companyName || m.contactName || m.phone}
@@ -810,7 +811,7 @@ export function ManualLeadModal({
                               className="h-8 px-2.5 rounded-lg bg-white hover:bg-slate-50 border border-amber-300 text-amber-900 font-bold inline-flex items-center gap-1 shadow-2xs transition"
                             >
                               <Eye className="w-3.5 h-3.5 text-amber-700" />
-                              <span>Xem hồ sơ ({m.leadCode})</span>
+                              <span title={m.leadCode}>Xem hồ sơ ({formatCompactLeadCode(m.leadCode)})</span>
                             </button>
                             <button
                               type="button"
@@ -870,8 +871,8 @@ export function ManualLeadModal({
                             <span className={`px-2 py-0.5 rounded font-bold text-[11px] ${pillStyle}`}>
                               {badgeText}
                             </span>
-                            <span className="font-mono font-bold text-[#1E3A8A]">
-                              {m.leadCode}
+                            <span className="font-mono font-bold text-[#1E3A8A]" title={m.leadCode}>
+                              {formatCompactLeadCode(m.leadCode)}
                             </span>
                             <span className="font-bold truncate">
                               · {m.companyName || m.contactName || m.phone}
@@ -892,7 +893,7 @@ export function ManualLeadModal({
                             className="h-8 px-2.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-[#1E3A8A] font-bold inline-flex items-center gap-1 shadow-2xs transition"
                           >
                             <Eye className="w-3.5 h-3.5 text-[#1E3A8A]" />
-                            <span>Xem hồ sơ ({m.leadCode})</span>
+                            <span title={m.leadCode}>Xem hồ sơ ({formatCompactLeadCode(m.leadCode)})</span>
                           </button>
                           {onOpenExistingLead && (
                             <button
@@ -1166,8 +1167,8 @@ export function ManualLeadModal({
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <span className="font-mono font-bold text-[#1E3A8A] text-sm">
-                        {previewLead.leadCode}
+                      <span className="font-mono font-bold text-[#1E3A8A] text-sm" title={previewLead.leadCode}>
+                        {formatCompactLeadCode(previewLead.leadCode)}
                       </span>
                       <span
                         className={`px-2 py-0.5 rounded text-[11px] font-bold ${

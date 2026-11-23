@@ -53,13 +53,32 @@ export async function GET(req: Request) {
         columns: [
           { header: 'STT', key: 'stt', width: 8, type: 'number' },
           { header: 'Nguồn / Kênh Marketing', key: 'source', width: 28, type: 'string' },
-          { header: 'Tổng Lead Thu Nhận (L1)', key: 'l1Count', width: 22, type: 'number' },
-          { header: 'Lead Hợp Lệ (L2)', key: 'l2Count', width: 20, type: 'number' },
-          { header: 'Lead Hiệu Quả Ads (L3)', key: 'l3Count', width: 22, type: 'number' },
-          { header: 'Lead Quay Lại', key: 'repeatCount', width: 16, type: 'number' },
-          { header: 'Đã Gửi Báo Giá', key: 'quoteSentCount', width: 18, type: 'number' },
-          { header: 'Thành Công (Won)', key: 'wonCount', width: 18, type: 'number' },
-          { header: 'Tỷ Lệ Hợp Lệ (L2/L1)', key: 'validRatio', width: 20, type: 'percent' },
+          { header: 'Tổng Lead Thu Nhận (L1)', key: 'l1Count', width: 22, type: 'number', summaryAgg: 'sum' },
+          { header: 'Lead Hợp Lệ (L2)', key: 'l2Count', width: 20, type: 'number', summaryAgg: 'sum' },
+          { header: 'Lead Hiệu Quả Ads (L3)', key: 'l3Count', width: 22, type: 'number', summaryAgg: 'sum' },
+          { header: 'Lead Quay Lại', key: 'repeatCount', width: 16, type: 'number', summaryAgg: 'sum' },
+          { header: 'Đã Gửi Báo Giá', key: 'quoteSentCount', width: 18, type: 'number', summaryAgg: 'sum' },
+          { header: 'Thành Công (Won)', key: 'wonCount', width: 18, type: 'number', summaryAgg: 'sum' },
+          {
+            header: 'Tỷ Lệ Hợp Lệ (L2/L1)',
+            key: 'validRatio',
+            width: 20,
+            type: 'percent',
+            rowFormula: ({ rowNum, colLetters }) =>
+              `IFERROR(${colLetters.l2Count}${rowNum}/${colLetters.l1Count}${rowNum},0)`,
+            summaryAgg: ({ summaryRowNum, colLetters }) =>
+              `IFERROR(${colLetters.l2Count}${summaryRowNum}/${colLetters.l1Count}${summaryRowNum},0)`,
+          },
+          {
+            header: 'Tỷ Lệ Chốt (Won/L2)',
+            key: 'winRate',
+            width: 20,
+            type: 'percent',
+            rowFormula: ({ rowNum, colLetters }) =>
+              `IFERROR(${colLetters.wonCount}${rowNum}/${colLetters.l2Count}${rowNum},0)`,
+            summaryAgg: ({ summaryRowNum, colLetters }) =>
+              `IFERROR(${colLetters.wonCount}${summaryRowNum}/${colLetters.l2Count}${summaryRowNum},0)`,
+          },
         ],
         rows: data.bySource.map((s, idx) => ({
           stt: idx + 1,
@@ -71,6 +90,7 @@ export async function GET(req: Request) {
           quoteSentCount: s.quoteSentCount,
           wonCount: s.wonCount,
           validRatio: s.rawLeadsL1 > 0 ? Number((s.validLeadsL2 / s.rawLeadsL1).toFixed(4)) : 0,
+          winRate: s.validLeadsL2 > 0 ? Number((s.wonCount / s.validLeadsL2).toFixed(4)) : 0,
         })),
         summaryRow: {
           stt: '',
@@ -82,6 +102,10 @@ export async function GET(req: Request) {
           quoteSentCount: data.bySource.reduce((acc, s) => acc + s.quoteSentCount, 0),
           wonCount: data.bySource.reduce((acc, s) => acc + s.wonCount, 0),
           validRatio: validRate,
+          winRate:
+            totalL2 > 0
+              ? Number((data.bySource.reduce((acc, s) => acc + s.wonCount, 0) / totalL2).toFixed(4))
+              : 0,
         },
         footerNotes: [
           'Định nghĩa BA (UC02 & UC03): L1 = Tổng Lead thu nhận; L2 = Lead hợp lệ (!isSpam); L3 = Lead hiệu quả truyền về Ads & tính CPL (trừ Spam tự động & Spam đã xác nhận).',

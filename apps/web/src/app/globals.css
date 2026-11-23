@@ -27,8 +27,8 @@ body {
   background-color: var(--bg-canvas);
   color: var(--text-ink);
   font-family: var(--font-unified);
-  font-size: 1.03125rem;
-  line-height: 1.5;
+  font-size: 1.0625rem;
+  line-height: 1.52;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -59,17 +59,17 @@ textarea,
 
 /* Nâng sàn các cỡ chữ siêu nhỏ bằng rem để đồng bộ độ dễ đọc và tôn trọng tỷ lệ trình duyệt */
 .text-\[10px\] {
-  font-size: 0.75rem !important;
-  line-height: 1.4 !important;
+  font-size: 0.78125rem !important;
+  line-height: 1.42 !important;
 }
 
 .text-\[11px\] {
-  font-size: 0.8125rem !important;
+  font-size: 0.84375rem !important;
   line-height: 1.45 !important;
 }
 
 .text-\[13px\] {
-  font-size: 0.89rem !important;
+  font-size: 0.9375rem !important;
   line-height: 1.5 !important;
 }
 

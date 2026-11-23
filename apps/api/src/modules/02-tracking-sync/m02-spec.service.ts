@@ -32,6 +32,7 @@ import {
   getGoogleAdsApiConfig,
   getGoogleConnection,
 } from './google-oauth.service';
+import { computeCostPerValidAdLead } from '../03-keywords-ads/m03-spec.service';
 import { getStoredTouchpoints } from './service';
 
 function mapGa4ChannelGroup(rawChannelGroup: string): {
@@ -1222,8 +1223,8 @@ export async function getM02TrafficInteractionSpec(params?: {
       costPerConversion: conversions > 0 ? Number((cost / conversions).toFixed(0)) : null,
       attributedLeadCount: attrTotal,
       validAttributedLeadCount: attrValid,
-      wonAttributedLeadCount: attrWon,
-      costPerValidLead: attrValid > 0 && cost > 0 ? Number((cost / attrValid).toFixed(0)) : null,
+      wonAttributedLeadCount: wonScopedAdLeads.length ? attrWon : attrWon,
+      costPerValidLead: computeCostPerValidAdLead(cost, attrValid),
       attributionStatus: !resolvedWebsite
         ? 'UNATTRIBUTED_WEBSITE'
         : attrValid > 0
@@ -1278,10 +1279,7 @@ export async function getM02TrafficInteractionSpec(params?: {
     adsTotalCost !== null && adsTotalConv !== null && adsTotalConv > 0
       ? Number((adsTotalCost / adsTotalConv).toFixed(0))
       : null;
-  const crmCpl =
-    adsTotalCost !== null && adsTotalCost > 0 && validScopedAdLeads.length > 0
-      ? Number((adsTotalCost / validScopedAdLeads.length).toFixed(0))
-      : null;
+  const crmCpl = computeCostPerValidAdLead(adsTotalCost, validScopedAdLeads.length);
 
   // Chuỗi ngày cho Quảng cáo (lấy từ dailyRows đã hợp nhất live+DB của đúng các chiến dịch thuộc phạm vi đang xem)
   const adsDayMap = new Map<

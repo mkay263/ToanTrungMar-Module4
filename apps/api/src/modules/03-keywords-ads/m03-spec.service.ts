@@ -33,6 +33,13 @@ import {
   getSerpApiTrendsKey,
 } from './google-trends.service';
 
+/**
+ * T10: Công thức CPL chuẩn duy nhất trên toàn hệ thống (M02, M03, M04, Excel Export):
+ * - Mẫu số = số Lead quảng cáo hợp lệ (L2/attributed valid ad leads)
+ * - Nếu chưa có Lead hợp lệ (validAdLeadCount <= 0) hoặc chưa tách được chi phí (adCost === null) -> null (không hiện 0đ giả)
+ * - Nếu chi phí = 0đ và có >= 1 Lead hợp lệ -> trả về 0
+ * - Làm tròn theo VNĐ nguyên (Math.round) để khớp 100% giữa API M02/M03/M04, UI và file Excel
+ */
 export function computeCostPerValidAdLead(
   adCost: number | null,
   validAdLeadCount: number,
@@ -40,7 +47,7 @@ export function computeCostPerValidAdLead(
   if (adCost === null || !Number.isFinite(adCost) || validAdLeadCount <= 0) {
     return null;
   }
-  return Number((adCost / validAdLeadCount).toFixed(2));
+  return Math.round(adCost / validAdLeadCount);
 }
 
 function mapSeoWorkflowLabel(status: string, hasError: boolean): string {
