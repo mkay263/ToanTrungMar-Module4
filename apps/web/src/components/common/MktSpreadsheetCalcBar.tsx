@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useMemo, useState } from 'react';
-import { Calculator, Check, Copy, RotateCcw } from 'lucide-react';
+import { Calculator, RotateCcw } from 'lucide-react';
 
 export interface ExcelSelectedCell {
   id: string;
@@ -12,7 +12,6 @@ export interface ExcelSelectedCell {
 export function useMktExcelSelection() {
   const [excelMode, setExcelMode] = useState(false);
   const [selectedCells, setSelectedCells] = useState<ExcelSelectedCell[]>([]);
-  const [copiedOk, setCopiedOk] = useState(false);
 
   const toggleCell = useCallback(
     (id: string, label: string, value: number | null | undefined) => {
@@ -44,7 +43,7 @@ export function useMktExcelSelection() {
     (id: string) => {
       if (!excelMode) return '';
       return selectedCells.some((c) => c.id === id)
-        ? 'ring-2 ring-inset ring-[#1A73E8] bg-blue-100/80 cursor-cell font-bold'
+        ? 'ring-2 ring-inset ring-[#1A73E8] bg-blue-100/85 cursor-cell font-bold'
         : 'cursor-cell hover:bg-blue-50/70';
     },
     [excelMode, selectedCells],
@@ -74,20 +73,6 @@ export function useMktExcelSelection() {
     };
   }, [selectedCells]);
 
-  const copyTsv = useCallback(async (headers: string[], rows: Array<Array<string | number | null | undefined>>) => {
-    try {
-      const lines = [
-        headers.join('\t'),
-        ...rows.map((r) => r.map((v) => (v === null || v === undefined ? '' : String(v))).join('\t')),
-      ];
-      await navigator.clipboard.writeText(lines.join('\n'));
-      setCopiedOk(true);
-      window.setTimeout(() => setCopiedOk(false), 2000);
-    } catch {
-      // ignore clipboard errors in restricted environments
-    }
-  }, []);
-
   return {
     excelMode,
     toggleExcelMode,
@@ -97,8 +82,6 @@ export function useMktExcelSelection() {
     isSelected,
     cellClass,
     stats,
-    copiedOk,
-    copyTsv,
   };
 }
 
@@ -108,8 +91,6 @@ interface MktSpreadsheetCalcBarProps {
   onToggleExcelMode: () => void;
   stats: ReturnType<typeof useMktExcelSelection>['stats'];
   onClear: () => void;
-  onCopyTable?: () => void;
-  copiedOk?: boolean;
 }
 
 export function MktSpreadsheetCalcBar({
@@ -118,8 +99,6 @@ export function MktSpreadsheetCalcBar({
   onToggleExcelMode,
   stats,
   onClear,
-  onCopyTable,
-  copiedOk,
 }: MktSpreadsheetCalcBarProps) {
   return (
     <div className="px-4 py-2.5 bg-slate-50/90 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -129,35 +108,15 @@ export function MktSpreadsheetCalcBar({
           type="button"
           aria-pressed={excelMode}
           onClick={onToggleExcelMode}
-          className={`h-7 px-2.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition ${
+          className={`h-7 px-3 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition ${
             excelMode
               ? 'bg-emerald-600 border-emerald-600 text-white shadow-2xs'
               : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
           }`}
         >
           <Calculator className="w-3.5 h-3.5" />
-          <span>{excelMode ? 'Đang bật Tính ô Excel' : 'Tính ô kiểu Excel (SUM / AVG / A÷B)'}</span>
+          <span>{excelMode ? 'Đang bật Tính Nhanh' : 'Tính Nhanh'}</span>
         </button>
-
-        {onCopyTable && (
-          <button
-            type="button"
-            onClick={onCopyTable}
-            className="h-7 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 transition"
-          >
-            {copiedOk ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-600" />
-                <span className="text-emerald-700">Đã copy (Dán Ctrl+V vào Excel)</span>
-              </>
-            ) : (
-              <>
-                <Copy className="w-3.5 h-3.5" />
-                <span>Copy sang Excel</span>
-              </>
-            )}
-          </button>
-        )}
       </div>
 
       {excelMode && (
@@ -168,10 +127,10 @@ export function MktSpreadsheetCalcBar({
                 Đã chọn: {stats.count} ô
               </span>
               <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-800 tabular-nums">
-                SUM: <strong>{stats.sum.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
+                Tổng: <strong>{stats.sum.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
               </span>
               <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-800 tabular-nums">
-                AVG: <strong>{stats.avg.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
+                TB: <strong>{stats.avg.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
               </span>
               <span className="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-slate-600 tabular-nums">
                 Min/Max: {stats.min.toLocaleString('vi-VN', { maximumFractionDigits: 2 })} /{' '}
@@ -193,7 +152,7 @@ export function MktSpreadsheetCalcBar({
             </>
           ) : (
             <span className="text-emerald-800 font-medium">
-              Bấm chọn bất kỳ ô số nào trên bảng để tính nhanh SUM · AVG · Min/Max · Tỷ lệ Ô1 ÷ Ô2
+              Bấm chọn các ô số bất kỳ trên bảng để tính nhanh Tổng · TB · Min/Max · Tỷ lệ Ô1 ÷ Ô2
             </span>
           )}
         </div>

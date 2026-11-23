@@ -7,16 +7,11 @@ import {
   ArrowUp,
   ArrowUpDown,
   Calculator,
-  Check,
   ChevronDown,
   Columns3,
-  Copy,
   ExternalLink,
   Globe,
-  Plus,
   RotateCcw,
-  Table2,
-  Trash2,
 } from 'lucide-react';
 import { UI_VOCABULARY, type M02CampaignRowDto } from '@toantrung/contracts';
 
@@ -87,27 +82,15 @@ const DEFAULT_VISIBLE_COLS: StandardColKey[] = [
   'actions',
 ];
 
-interface CustomFormulaColumn {
-  id: string;
-  name: string;
-  colA: MetricColKey;
-  op: FormulaOp;
-  bMode: 'column' | 'const';
-  colB: MetricColKey;
-  constB: number;
-  format: FormulaFormat;
-}
-
 interface PickedCell {
   rowId: string;
   rowLabel: string;
-  colKey: MetricColKey | 'custom';
+  colKey: MetricColKey;
   colLabel: string;
   value: number;
 }
 
 const COLS_STORAGE_KEY = 'tt_ads_visible_cols_v1';
-const FORMULAS_STORAGE_KEY = 'tt_ads_custom_formulas_v1';
 
 function formatCompactUrl(rawUrl: string): string {
   try {
@@ -128,15 +111,6 @@ function evalBinaryOp(a: number | null, op: FormulaOp, b: number | null): number
   if (op === '*') return a * b;
   if (op === '+') return a + b;
   return a - b;
-}
-
-function formatComputedValue(val: number | null, fmt: FormulaFormat): string {
-  if (val === null || !Number.isFinite(val)) return '—';
-  if (fmt === 'vnd') return `${Math.round(val).toLocaleString('vi-VN')} ₫`;
-  if (fmt === 'percent') return `${val.toFixed(2)}%`;
-  return Number.isInteger(val)
-    ? val.toLocaleString('vi-VN')
-    : val.toLocaleString('vi-VN', { maximumFractionDigits: 2 });
 }
 
 interface TableDisplayRow {
@@ -211,20 +185,6 @@ export function AdsExcelTableSection({
     return DEFAULT_VISIBLE_COLS;
   });
 
-  const [customFormulas, setCustomFormulas] = useState<CustomFormulaColumn[]>(() => {
-    if (typeof window === 'undefined') return [];
-    try {
-      const saved = window.localStorage.getItem(FORMULAS_STORAGE_KEY);
-      if (saved) {
-        const arr = JSON.parse(saved) as CustomFormulaColumn[];
-        if (Array.isArray(arr)) return arr;
-      }
-    } catch {
-      // ignore
-    }
-    return [];
-  });
-
   useEffect(() => {
     try {
       window.localStorage.setItem(COLS_STORAGE_KEY, JSON.stringify(visibleCols));
@@ -233,35 +193,15 @@ export function AdsExcelTableSection({
     }
   }, [visibleCols]);
 
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(FORMULAS_STORAGE_KEY, JSON.stringify(customFormulas));
-    } catch {
-      // ignore
-    }
-  }, [customFormulas]);
-
   const [showColMenu, setShowColMenu] = useState(false);
-  const [showFormulaCreator, setShowFormulaCreator] = useState(false);
   const [openUrlsCampId, setOpenUrlsCampId] = useState<string | null>(null);
 
-  // Formula Creator state
-  const [fName, setFName] = useState('Chi phí / Click');
-  const [fColA, setFColA] = useState<MetricColKey>('cost');
-  const [fOp, setFOp] = useState<FormulaOp>('/');
-  const [fBMode, setFBMode] = useState<'column' | 'const'>('column');
-  const [fColB, setFColB] = useState<MetricColKey>('clicks');
-  const [fConstB, setFConstB] = useState('1');
-  const [fFormat, setFFormat] = useState<FormulaFormat>('vnd');
-
-  // Excel interactive cell-pick calculator + multi-cell SUM/AVG + sorting + grid coordinates
+  // Tính Nhanh (chọn nhiều ô tính Tổng / TB / Min-Max + phép tính A ÷ B)
   const [calcActive, setCalcActive] = useState(false);
-  const [excelGridCoords, setExcelGridCoords] = useState(true);
   const [pickedList, setPickedList] = useState<PickedCell[]>([]);
   const [cellA, setCellA] = useState<PickedCell | null>(null);
   const [cellB, setCellB] = useState<PickedCell | null>(null);
   const [pickOp, setPickOp] = useState<FormulaOp>('/');
-  const [copiedTableOk, setCopiedTableOk] = useState(false);
   const [sortCol, setSortCol] = useState<string | null>(null);
   const [sortDir, setSortDir] = useState<'ascending' | 'descending'>('descending');
   const [sortAnnouncement, setSortAnnouncement] = useState('');
@@ -290,7 +230,6 @@ export function AdsExcelTableSection({
     [campaigns],
   );
 
-  // Fallback gracefully if 'ENABLED' is empty while there ARE campaigns with cost
   const effectiveStatusFilter: AdsStatusFilter =
     statusFilter === 'ENABLED' && enabledCount === 0 && campaigns.length > 0
       ? 'HAS_COST'
@@ -316,6 +255,24 @@ export function AdsExcelTableSection({
   }, [campaigns, effectiveStatusFilter, searchTerm]);
 
   const displayRows = useMemo<TableDisplayRow[]>(() => {
+    const sortList = (list: TableDisplayRow[]): TableDisplayRow[] => {
+      if (!sortCol) return list;
+      const factor = sortDir === 'ascending' ? 1 : -1;
+      return [...list].sort((a, b) => {
+        if (sortCol === 'campaignName') {
+          return factor * textCollator.compare(a.campaign.campaignName, b.campaign.campaignName);
+        }
+        if (sortCol === 'date') {
+          return factor * textCollator.compare(a.date || '', b.date || '');
+        }
+        const va = a[sortCol as MetricColKey];
+        const vb = b[sortCol as MetricColKey];
+        const na = va === null || va === undefined ? -Infinity : Number(va);
+        const nb = vb === null || vb === undefined ? -Infinity : Number(vb);
+        return factor * (na - nb);
+      });
+    };
+
     if (viewMode === 'daily') {
       const flat: TableDisplayRow[] = [];
       for (const c of filteredCampaigns) {
@@ -353,27 +310,12 @@ export function AdsExcelTableSection({
           });
         }
       }
-      flat.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.cost - a.cost);
-      return flat;
+      if (!sortCol) {
+        flat.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.cost - a.cost);
+        return flat;
+      }
+      return sortList(flat);
     }
-
-    const sortDisplayRows = (list: TableDisplayRow[]): TableDisplayRow[] => {
-      if (!sortCol) return list;
-      const factor = sortDir === 'ascending' ? 1 : -1;
-      return [...list].sort((a, b) => {
-        if (sortCol === 'campaignName') {
-          return factor * textCollator.compare(a.campaign.campaignName, b.campaign.campaignName);
-        }
-        if (sortCol === 'date') {
-          return factor * textCollator.compare(a.date || '', b.date || '');
-        }
-        const va = a[sortCol as MetricColKey];
-        const vb = b[sortCol as MetricColKey];
-        const na = va === null || va === undefined ? -Infinity : Number(va);
-        const nb = vb === null || vb === undefined ? -Infinity : Number(vb);
-        return factor * (na - nb);
-      });
-    };
 
     const rows: TableDisplayRow[] = filteredCampaigns.map((c) => ({
       rowId: c.campaignId,
@@ -389,7 +331,7 @@ export function AdsExcelTableSection({
       costPerValidLead: c.costPerValidLead,
     }));
 
-    return sortDisplayRows(rows);
+    return sortList(rows);
   }, [filteredCampaigns, viewMode, sortCol, sortDir, textCollator]);
 
   const summaryTotals = useMemo(() => {
@@ -412,24 +354,20 @@ export function AdsExcelTableSection({
     };
   }, [filteredCampaigns]);
 
-  const getRowMetric = (row: TableDisplayRow, col: MetricColKey): number | null => {
-    return row[col];
-  };
+  const getRowMetric = (row: TableDisplayRow, col: MetricColKey): number | null => row[col];
 
   const handleCellPick = (
     rowId: string,
     rowLabel: string,
-    colKey: MetricColKey | 'custom',
+    colKey: MetricColKey,
     colLabel: string,
     val: number | null,
   ) => {
     if (!calcActive || val === null || !Number.isFinite(val)) return;
     const picked: PickedCell = { rowId, rowLabel, colKey, colLabel, value: val };
     setPickedList((prev) => {
-      const exists = prev.some((p) => p.rowId === rowId && p.colKey === colKey && p.colLabel === colLabel);
-      if (exists) {
-        return prev.filter((p) => !(p.rowId === rowId && p.colKey === colKey && p.colLabel === colLabel));
-      }
+      const exists = prev.some((p) => p.rowId === rowId && p.colKey === colKey);
+      if (exists) return prev.filter((p) => !(p.rowId === rowId && p.colKey === colKey));
       return [...prev, picked];
     });
     if (!cellA) {
@@ -458,57 +396,6 @@ export function AdsExcelTableSection({
     };
   }, [pickedList]);
 
-  const handleCopyAdsTableToExcel = async () => {
-    try {
-      const activeMetrics = METRIC_FIELDS.filter((mf) => isVisible(mf.key));
-      const headers = [
-        ...(viewMode === 'daily' ? ['Ngày'] : []),
-        'Tên chiến dịch',
-        ...(isVisible('website') ? ['Website'] : []),
-        ...(isVisible('status') ? ['Trạng thái'] : []),
-        ...activeMetrics.map((m) => m.label),
-        ...customFormulas.map((cf) => cf.name),
-      ];
-      const rows = displayRows.map((row) => [
-        ...(viewMode === 'daily' ? [row.date || ''] : []),
-        row.campaign.campaignName,
-        ...(isVisible('website') ? [row.campaign.targetWebsiteDomain || ''] : []),
-        ...(isVisible('status') ? [row.campaign.status === 'ENABLED' ? 'Đang chạy' : 'Tạm dừng'] : []),
-        ...activeMetrics.map((m) => {
-          const v = getRowMetric(row, m.key);
-          return v === null ? '' : v;
-        }),
-        ...customFormulas.map((cf) => {
-          const a = getRowMetric(row, cf.colA);
-          const b = cf.bMode === 'const' ? cf.constB : getRowMetric(row, cf.colB);
-          const r = evalBinaryOp(a, cf.op, b);
-          return r === null ? '' : Number(r.toFixed(2));
-        }),
-      ]);
-      const tsv = [headers.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n');
-      await navigator.clipboard.writeText(tsv);
-      setCopiedTableOk(true);
-      window.setTimeout(() => setCopiedTableOk(false), 2000);
-    } catch {
-      // ignore clipboard errors
-    }
-  };
-
-  const addPresetFormula = (preset: {
-    name: string;
-    colA: MetricColKey;
-    op: FormulaOp;
-    bMode: 'column' | 'const';
-    colB: MetricColKey;
-    constB: number;
-    format: FormulaFormat;
-  }) => {
-    setCustomFormulas((prev) => {
-      if (prev.some((f) => f.name === preset.name)) return prev;
-      return [...prev, { id: `cf-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, ...preset }];
-    });
-  };
-
   const pickedResult = useMemo(() => {
     if (!cellA || !cellB) return null;
     return evalBinaryOp(cellA.value, pickOp, cellB.value);
@@ -520,45 +407,6 @@ export function AdsExcelTableSection({
     setVisibleCols((prev) =>
       prev.includes(k) ? prev.filter((x) => x !== k) : [...prev, k],
     );
-  };
-
-  const handleCreateCustomFormula = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!fName.trim()) return;
-    const newCol: CustomFormulaColumn = {
-      id: `cf-${Date.now()}`,
-      name: fName.trim(),
-      colA: fColA,
-      op: fOp,
-      bMode: fBMode,
-      colB: fColB,
-      constB: Number(fConstB) || 1,
-      format: fFormat,
-    };
-    setCustomFormulas((prev) => [...prev, newCol]);
-    setShowFormulaCreator(false);
-  };
-
-  const handleSavePickedAsColumn = () => {
-    if (!cellA || !cellB || cellA.colKey === 'custom' || cellB.colKey === 'custom') return;
-    const opLabel =
-      pickOp === '/' ? '÷' : pickOp === 'pct' ? '%' : pickOp === '*' ? '×' : pickOp;
-    const newCol: CustomFormulaColumn = {
-      id: `cf-${Date.now()}`,
-      name: `${cellA.colLabel} ${opLabel} ${cellB.colLabel}`,
-      colA: cellA.colKey,
-      op: pickOp,
-      bMode: 'column',
-      colB: cellB.colKey,
-      constB: 1,
-      format:
-        pickOp === 'pct'
-          ? 'percent'
-          : cellA.colKey === 'cost' && pickOp === '/'
-            ? 'vnd'
-            : 'number',
-    };
-    setCustomFormulas((prev) => [...prev, newCol]);
   };
 
   const cellHighlightClass = (rowId: string, colKey: string) => {
@@ -576,15 +424,14 @@ export function AdsExcelTableSection({
   const colSpanCount =
     1 +
     (viewMode === 'daily' ? 1 : 0) +
-    STANDARD_COLUMN_META.filter((m) => isVisible(m.key)).length +
-    customFormulas.length;
+    STANDARD_COLUMN_META.filter((m) => isVisible(m.key)).length;
 
   return (
     <section
       className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden"
       style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 420px' }}
     >
-      {/* Thanh công cụ tổng hợp Ads đa website + Tuỳ chỉnh cột + Excel Formula */}
+      {/* Thanh công cụ gọn sạch: Phạm vi · Trạng thái · Tổng hợp/Ngày · Tính Nhanh · Cột */}
       <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-sm font-bold text-slate-900">
@@ -596,7 +443,6 @@ export function AdsExcelTableSection({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Chọn gom tất cả website đang chạy hoặc chỉ web đang chọn */}
           <div
             role="group"
             aria-label="Phạm vi website phần Quảng cáo"
@@ -612,7 +458,7 @@ export function AdsExcelTableSection({
               }`}
             >
               <Globe className="w-3 h-3" />
-              <span>Tất cả web (Gộp chi phí)</span>
+              <span>Tất cả web</span>
             </button>
             <button
               type="button"
@@ -633,7 +479,6 @@ export function AdsExcelTableSection({
             </button>
           </div>
 
-          {/* Lọc nhanh Đang chạy / Có chi phí / Tất cả */}
           <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200/80 text-[11px]">
             {(
               [
@@ -657,7 +502,6 @@ export function AdsExcelTableSection({
             ))}
           </div>
 
-          {/* Tổng hợp vs Theo từng ngày (Ngày | Tên chiến dịch | Cost | CTR | CPC...) */}
           <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200/80 text-[11px]">
             <button
               type="button"
@@ -679,7 +523,7 @@ export function AdsExcelTableSection({
             </button>
           </div>
 
-          {/* Nút Chọn ô tính SUM/AVG/A÷B kiểu Excel */}
+          {/* Nút Tính Nhanh đồng bộ toàn hệ thống */}
           <button
             type="button"
             aria-pressed={calcActive}
@@ -691,72 +535,21 @@ export function AdsExcelTableSection({
                 setPickedList([]);
               }
             }}
-            className={`h-8 px-2.5 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition ${
+            className={`h-8 px-3 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1.5 transition ${
               calcActive
                 ? 'bg-emerald-600 border-emerald-600 text-white shadow-xs'
                 : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
             }`}
           >
             <Calculator className="w-3.5 h-3.5" />
-            <span>Tính ô Excel (SUM / A÷B)</span>
-          </button>
-
-          {/* Copy thẳng bảng sang Excel / Google Sheets */}
-          <button
-            type="button"
-            onClick={() => void handleCopyAdsTableToExcel()}
-            className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1.5 transition"
-          >
-            {copiedTableOk ? (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-600" />
-                <span className="text-emerald-700">Đã copy (Ctrl+V vào Excel)</span>
-              </>
-            ) : (
-              <>
-                <Copy className="w-3.5 h-3.5" />
-                <span>Copy bảng Excel</span>
-              </>
-            )}
-          </button>
-
-          {/* Bật/Tắt toạ độ cột A, B, C kiểu Excel */}
-          <button
-            type="button"
-            aria-pressed={excelGridCoords}
-            onClick={() => setExcelGridCoords((p) => !p)}
-            title="Hiển thị ký hiệu cột A, B, C và số dòng như trang tính Excel"
-            className={`h-8 px-2 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1 transition ${
-              excelGridCoords
-                ? 'bg-slate-900 border-slate-900 text-white'
-                : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
-            }`}
-          >
-            <Table2 className="w-3.5 h-3.5" />
-            <span>Lưới A-Z</span>
-          </button>
-
-          {/* Nút thêm Cột công thức */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowFormulaCreator((p) => !p);
-              setShowColMenu(false);
-            }}
-            className="h-8 px-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-[#1E3A8A] text-[11px] font-semibold inline-flex items-center gap-1"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>Cột công thức</span>
+            <span>{calcActive ? 'Đang bật Tính Nhanh' : 'Tính Nhanh'}</span>
           </button>
 
           {/* Menu Cột hiển thị tuỳ chỉnh */}
           <div className="relative">
             <button
               type="button"
-              onClick={() => {
-                setShowColMenu((p) => !p);
-                setShowFormulaCreator(false);
-              }}
+              onClick={() => setShowColMenu((p) => !p)}
               className="h-8 px-2.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-[11px] font-semibold inline-flex items-center gap-1"
             >
               <Columns3 className="w-3.5 h-3.5" />
@@ -802,163 +595,7 @@ export function AdsExcelTableSection({
         </div>
       </div>
 
-      {/* Form thêm Cột Công Thức (kiểu Excel = Cột A [phép tính] Cột B) + Công thức MKT cài sẵn */}
-      {showFormulaCreator && (
-        <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 space-y-2.5 text-xs">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="text-[11px] font-bold text-slate-600">Công thức MKT 1 chạm:</span>
-            {[
-              {
-                name: 'Tỷ lệ Lead/Click (%)',
-                colA: 'validAttributedLeadCount' as const,
-                op: 'pct' as const,
-                bMode: 'column' as const,
-                colB: 'clicks' as const,
-                constB: 1,
-                format: 'percent' as const,
-              },
-              {
-                name: 'Tỷ lệ CĐ/Click (%)',
-                colA: 'conversions' as const,
-                op: 'pct' as const,
-                bMode: 'column' as const,
-                colB: 'clicks' as const,
-                constB: 1,
-                format: 'percent' as const,
-              },
-              {
-                name: 'Dự toán tháng (×30)',
-                colA: 'cost' as const,
-                op: '*' as const,
-                bMode: 'const' as const,
-                colB: 'cost' as const,
-                constB: 30,
-                format: 'vnd' as const,
-              },
-              {
-                name: 'Chi phí / 1 Hiển thị',
-                colA: 'cost' as const,
-                op: '/' as const,
-                bMode: 'column' as const,
-                colB: 'impressions' as const,
-                constB: 1,
-                format: 'vnd' as const,
-              },
-            ].map((p) => (
-              <button
-                key={p.name}
-                type="button"
-                onClick={() => addPresetFormula(p)}
-                className="px-2 py-1 rounded-md bg-white border border-blue-200 hover:bg-blue-50 text-[#0F275C] text-[11px] font-semibold transition"
-              >
-                + {p.name}
-              </button>
-            ))}
-          </div>
-          <form onSubmit={handleCreateCustomFormula} className="flex flex-wrap items-end gap-2.5">
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Tên cột mới</label>
-            <input
-              type="text"
-              required
-              value={fName}
-              onChange={(e) => setFName(e.target.value)}
-              placeholder="VD: Chi phí / Click"
-              className="h-8 px-2.5 rounded-lg border border-slate-300 bg-white w-40 font-medium"
-            />
-          </div>
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Ô / Cột A</label>
-            <select
-              value={fColA}
-              onChange={(e) => setFColA(e.target.value as MetricColKey)}
-              className="h-8 px-2 rounded-lg border border-slate-300 bg-white font-medium"
-            >
-              {METRIC_FIELDS.map((mf) => (
-                <option key={mf.key} value={mf.key}>
-                  {mf.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Phép tính</label>
-            <select
-              value={fOp}
-              onChange={(e) => setFOp(e.target.value as FormulaOp)}
-              className="h-8 px-2 rounded-lg border border-slate-300 bg-white font-bold"
-            >
-              <option value="/">÷ Chia (A / B)</option>
-              <option value="pct">% Tỷ lệ (A / B × 100%)</option>
-              <option value="*">× Nhân (A × B)</option>
-              <option value="+">+ Cộng (A + B)</option>
-              <option value="-">− Trừ (A − B)</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Chia cho / Cột B</label>
-            <div className="flex items-center gap-1">
-              <select
-                value={fBMode}
-                onChange={(e) => setFBMode(e.target.value as 'column' | 'const')}
-                className="h-8 px-2 rounded-lg border border-slate-300 bg-white"
-              >
-                <option value="column">Theo Cột</option>
-                <option value="const">Hằng số</option>
-              </select>
-              {fBMode === 'column' ? (
-                <select
-                  value={fColB}
-                  onChange={(e) => setFColB(e.target.value as MetricColKey)}
-                  className="h-8 px-2 rounded-lg border border-slate-300 bg-white font-medium"
-                >
-                  {METRIC_FIELDS.map((mf) => (
-                    <option key={mf.key} value={mf.key}>
-                      {mf.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  type="number"
-                  step="any"
-                  value={fConstB}
-                  onChange={(e) => setFConstB(e.target.value)}
-                  className="h-8 px-2 rounded-lg border border-slate-300 bg-white w-24"
-                />
-              )}
-            </div>
-          </div>
-          <div>
-            <label className="block text-[11px] font-semibold text-slate-600 mb-1">Định dạng</label>
-            <select
-              value={fFormat}
-              onChange={(e) => setFFormat(e.target.value as FormulaFormat)}
-              className="h-8 px-2 rounded-lg border border-slate-300 bg-white"
-            >
-              <option value="vnd">Tiền (₫)</option>
-              <option value="percent">Phần trăm (%)</option>
-              <option value="number">Số thập phân</option>
-            </select>
-          </div>
-          <button
-            type="submit"
-            className="h-8 px-3.5 rounded-lg bg-[#0F275C] hover:bg-[#1E3A8A] text-white font-semibold"
-          >
-            Thêm cột
-          </button>
-          <button
-            type="button"
-            onClick={() => setShowFormulaCreator(false)}
-            className="h-8 px-2.5 rounded-lg text-slate-500 hover:bg-slate-200"
-          >
-            Đóng
-          </button>
-        </form>
-        </div>
-      )}
-
-      {/* Thanh công thức Excel (Chọn nhiều ô tính SUM/AVG/Min/Max + Chọn ô A ÷ ô B) */}
+      {/* Thanh Tính Nhanh (Chọn nhiều ô tính Tổng / TB / Min-Max + phép tính A ÷ B) */}
       {calcActive && (
         <div className="px-4 py-2.5 bg-blue-50/90 border-b border-blue-200 space-y-2 text-xs">
           {multiPickStats && (
@@ -967,10 +604,10 @@ export function AdsExcelTableSection({
                 Đã chọn {multiPickStats.count} ô
               </span>
               <span className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-800 tabular-nums">
-                SUM: <strong>{multiPickStats.sum.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
+                Tổng: <strong>{multiPickStats.sum.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
               </span>
               <span className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-800 tabular-nums">
-                AVG: <strong>{multiPickStats.avg.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
+                TB: <strong>{multiPickStats.avg.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}</strong>
               </span>
               <span className="px-2 py-0.5 rounded-md bg-white border border-blue-200 text-slate-600 tabular-nums">
                 Min: {multiPickStats.min.toLocaleString('vi-VN', { maximumFractionDigits: 2 })} · Max:{' '}
@@ -978,165 +615,122 @@ export function AdsExcelTableSection({
               </span>
             </div>
           )}
+
           <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-bold text-[#0F275C] inline-flex items-center gap-1">
-              <Calculator className="w-3.5 h-3.5" />
-              <span>Máy tính ô Excel:</span>
-            </span>
-
-            {cellA ? (
-              <span className="px-2 py-1 rounded-lg bg-emerald-100 border border-emerald-300 text-emerald-950 font-semibold">
-                Ô A: {cellA.rowLabel} · {cellA.colLabel} ={' '}
-                <strong className="tabular-nums">{cellA.value.toLocaleString('vi-VN')}</strong>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-bold text-[#0F275C] inline-flex items-center gap-1">
+                <Calculator className="w-3.5 h-3.5" />
+                <span>Tính Nhanh:</span>
               </span>
-            ) : (
-              <span className="px-2.5 py-1 rounded-lg bg-white border border-dashed border-emerald-400 text-emerald-800">
-                1. Bấm chọn Ô A bất kỳ trên bảng
-              </span>
-            )}
 
-            <div className="inline-flex rounded-lg bg-white border border-slate-200 p-0.5">
-              {(
-                [
-                  { id: '/', label: '÷' },
-                  { id: 'pct', label: '%' },
-                  { id: '*', label: '×' },
-                  { id: '+', label: '+' },
-                  { id: '-', label: '−' },
-                ] as const
-              ).map((op) => (
-                <button
-                  key={op.id}
-                  type="button"
-                  onClick={() => setPickOp(op.id)}
-                  className={`w-6 h-6 rounded font-bold transition ${
-                    pickOp === op.id
-                      ? 'bg-[#0F275C] text-white'
-                      : 'text-slate-600 hover:bg-slate-100'
-                  }`}
-                >
-                  {op.label}
-                </button>
-              ))}
+              {cellA ? (
+                <span className="px-2 py-1 rounded-lg bg-emerald-100 border border-emerald-300 text-emerald-950 font-semibold">
+                  Ô A: {cellA.rowLabel} · {cellA.colLabel} ={' '}
+                  <strong className="tabular-nums">{cellA.value.toLocaleString('vi-VN')}</strong>
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 rounded-lg bg-white border border-dashed border-emerald-400 text-emerald-800">
+                  1. Bấm chọn Ô A bất kỳ trên bảng
+                </span>
+              )}
+
+              <div className="inline-flex rounded-lg bg-white border border-slate-200 p-0.5">
+                {(
+                  [
+                    { id: '/', label: '÷' },
+                    { id: 'pct', label: '%' },
+                    { id: '*', label: '×' },
+                    { id: '+', label: '+' },
+                    { id: '-', label: '−' },
+                  ] as const
+                ).map((op) => (
+                  <button
+                    key={op.id}
+                    type="button"
+                    onClick={() => setPickOp(op.id)}
+                    className={`w-6 h-6 rounded font-bold transition ${
+                      pickOp === op.id
+                        ? 'bg-[#0F275C] text-white'
+                        : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {op.label}
+                  </button>
+                ))}
+              </div>
+
+              {cellB ? (
+                <span className="px-2 py-1 rounded-lg bg-violet-100 border border-violet-300 text-violet-950 font-semibold">
+                  Ô B: {cellB.rowLabel} · {cellB.colLabel} ={' '}
+                  <strong className="tabular-nums">{cellB.value.toLocaleString('vi-VN')}</strong>
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 rounded-lg bg-white border border-dashed border-violet-400 text-violet-800">
+                  2. Bấm chọn Ô B bất kỳ trên bảng
+                </span>
+              )}
+
+              {cellA && cellB && (
+                <span className="px-3 py-1 rounded-lg bg-[#0F275C] text-white font-bold tabular-nums shadow-xs">
+                  ={' '}
+                  {pickedResult === null
+                    ? 'Không chia được cho 0'
+                    : pickOp === 'pct'
+                      ? `${pickedResult.toFixed(2)}%`
+                      : pickedResult.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}
+                </span>
+              )}
             </div>
 
-            {cellB ? (
-              <span className="px-2 py-1 rounded-lg bg-violet-100 border border-violet-300 text-violet-950 font-semibold">
-                Ô B: {cellB.rowLabel} · {cellB.colLabel} ={' '}
-                <strong className="tabular-nums">{cellB.value.toLocaleString('vi-VN')}</strong>
-              </span>
-            ) : (
-              <span className="px-2.5 py-1 rounded-lg bg-white border border-dashed border-violet-400 text-violet-800">
-                2. Bấm chọn Ô B bất kỳ trên bảng
-              </span>
-            )}
-
-            {cellA && cellB && (
-              <span className="px-3 py-1 rounded-lg bg-[#0F275C] text-white font-bold tabular-nums shadow-xs">
-                ={' '}
-                {pickedResult === null
-                  ? 'Không chia được cho 0'
-                  : pickOp === 'pct'
-                    ? `${pickedResult.toFixed(2)}%`
-                    : pickedResult.toLocaleString('vi-VN', { maximumFractionDigits: 2 })}
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            {cellA && cellB && (
-              <button
-                type="button"
-                onClick={() => {
-                  setCellA(cellB);
-                  setCellB(cellA);
-                }}
-                className="h-7 px-2 rounded-md bg-white border border-slate-300 hover:bg-slate-50 font-semibold text-slate-700"
-              >
-                Đảo A↔B
-              </button>
-            )}
-            {cellA && cellB && cellA.colKey !== 'custom' && cellB.colKey !== 'custom' && (
-              <button
-                type="button"
-                onClick={handleSavePickedAsColumn}
-                className="h-7 px-2.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
-              >
-                + Lưu thành cột cho cả bảng
-              </button>
-            )}
-            {(cellA || cellB || pickedList.length > 0) && (
-              <button
-                type="button"
-                onClick={() => {
-                  setCellA(null);
-                  setCellB(null);
-                  setPickedList([]);
-                }}
-                className="h-7 px-2 rounded-md bg-white border border-slate-200 hover:bg-slate-50 text-slate-600"
-              >
-                Chọn lại
-              </button>
-            )}
-          </div>
+            <div className="flex items-center gap-1.5">
+              {cellA && cellB && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCellA(cellB);
+                    setCellB(cellA);
+                  }}
+                  className="h-7 px-2 rounded-md bg-white border border-slate-300 hover:bg-slate-50 font-semibold text-slate-700"
+                >
+                  Đảo A↔B
+                </button>
+              )}
+              {(cellA || cellB || pickedList.length > 0) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCellA(null);
+                    setCellB(null);
+                    setPickedList([]);
+                  }}
+                  className="h-7 px-2 rounded-md bg-white border border-slate-200 hover:bg-slate-50 text-slate-600"
+                >
+                  Xóa chọn
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Thông báo trạng thái sắp xếp cho trình đọc màn hình */}
       <div role="status" className="sr-only">
         {sortAnnouncement}
       </div>
 
-      {/* Bảng dữ liệu chính (Hỗ trợ lưới Excel A-Z, cố định tiêu đề & cột chiến dịch, sắp xếp cột) */}
+      {/* Bảng dữ liệu chính */}
       <div
         tabIndex={0}
         role="region"
-        aria-label="Bảng chiến dịch quảng cáo và link đích kiểu Excel"
+        aria-label="Bảng chiến dịch quảng cáo và link đích"
         className="overflow-x-auto max-h-[72vh]"
       >
         <table
-          className={`w-full min-w-[1060px] text-left border-separate border-spacing-0 text-xs ${
-            excelGridCoords ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''
+          className={`w-full min-w-[1040px] text-left border-separate border-spacing-0 text-xs ${
+            calcActive ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''
           }`}
         >
           <thead className="bg-slate-100 text-slate-700 sticky top-0 z-20 shadow-[0_1px_0_#CBD5E1]">
-            {excelGridCoords && (() => {
-              const totalCols =
-                (viewMode === 'daily' ? 1 : 0) +
-                1 +
-                (isVisible('link') ? 1 : 0) +
-                (isVisible('website') ? 1 : 0) +
-                (isVisible('status') ? 1 : 0) +
-                METRIC_FIELDS.filter((mf) => isVisible(mf.key)).length +
-                customFormulas.length +
-                (isVisible('actions') ? 1 : 0);
-              return (
-                <tr className="bg-slate-200/80 text-[10px] font-mono text-slate-500 select-none">
-                  <th className="py-1 px-2 text-center w-9 bg-slate-200 sticky left-0 z-30">#</th>
-                  {Array.from({ length: totalCols }, (_, i) => {
-                    let temp = i;
-                    let letter = '';
-                    while (temp >= 0) {
-                      letter = String.fromCharCode((temp % 26) + 65) + letter;
-                      temp = Math.floor(temp / 26) - 1;
-                    }
-                    return (
-                      <th key={`xl-${letter}`} className="py-1 px-2 text-center font-bold">
-                        {letter}
-                      </th>
-                    );
-                  })}
-                </tr>
-              );
-            })()}
             <tr>
-              {excelGridCoords && (
-                <th scope="col" className="py-2.5 px-2 text-center font-mono text-[11px] text-slate-500 bg-slate-100 sticky left-0 z-30 w-9">
-                  STT
-                </th>
-              )}
               {viewMode === 'daily' && (
                 <th
                   scope="col"
@@ -1211,25 +805,6 @@ export function AdsExcelTableSection({
                   </button>
                 </th>
               ))}
-              {customFormulas.map((cf) => (
-                <th
-                  key={cf.id}
-                  scope="col"
-                  className="py-2.5 px-3 font-semibold text-right whitespace-nowrap bg-blue-50/50 text-[#0F275C]"
-                >
-                  <div className="inline-flex items-center justify-end gap-1">
-                    <span>{cf.name}</span>
-                    <button
-                      type="button"
-                      title="Xóa cột công thức"
-                      onClick={() => setCustomFormulas((prev) => prev.filter((x) => x.id !== cf.id))}
-                      className="text-slate-400 hover:text-rose-600"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
-                </th>
-              ))}
               {isVisible('actions') && (
                 <th scope="col" className="py-2.5 px-4 font-semibold text-right">
                   Thao tác
@@ -1241,7 +816,7 @@ export function AdsExcelTableSection({
           <tbody className="divide-y divide-slate-100">
             {displayRows.length === 0 ? (
               <tr>
-                <td colSpan={colSpanCount + (excelGridCoords ? 1 : 0)} className="py-10 px-4 text-center text-slate-500">
+                <td colSpan={colSpanCount} className="py-10 px-4 text-center text-slate-500">
                   {adsConnected
                     ? effectiveStatusFilter === 'ENABLED'
                       ? 'Không có chiến dịch đang chạy phát sinh số liệu trong phạm vi chọn.'
@@ -1250,7 +825,7 @@ export function AdsExcelTableSection({
                 </td>
               </tr>
             ) : (
-              displayRows.map((row, rowIndex) => {
+              displayRows.map((row) => {
                 const c = row.campaign;
                 const rowLabel = viewMode === 'daily' ? `${c.campaignName} (${row.date})` : c.campaignName;
                 const realUrls = c.finalUrls || [];
@@ -1259,11 +834,6 @@ export function AdsExcelTableSection({
 
                 return (
                   <tr key={row.rowId} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
-                    {excelGridCoords && (
-                      <td className="py-2 px-2 text-center font-mono text-[11px] text-slate-400 bg-slate-50 sticky left-0 z-10 tabular-nums">
-                        {rowIndex + 1}
-                      </td>
-                    )}
                     {viewMode === 'daily' && (
                       <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap tabular-nums">
                         {row.date}
@@ -1383,24 +953,6 @@ export function AdsExcelTableSection({
                       );
                     })}
 
-                    {customFormulas.map((cf) => {
-                      const a = getRowMetric(row, cf.colA);
-                      const b = cf.bMode === 'const' ? cf.constB : getRowMetric(row, cf.colB);
-                      const res = evalBinaryOp(a, cf.op, b);
-                      return (
-                        <td
-                          key={cf.id}
-                          onClick={() => handleCellPick(row.rowId, rowLabel, 'custom', cf.name, res)}
-                          className={`py-2.5 px-3 text-right tabular-nums whitespace-nowrap bg-blue-50/25 font-semibold text-[#0F275C] ${cellHighlightClass(
-                            row.rowId,
-                            'custom',
-                          )}`}
-                        >
-                          {formatComputedValue(res, cf.format)}
-                        </td>
-                      );
-                    })}
-
                     {isVisible('actions') && (
                       <td className="py-2.5 px-4 text-right whitespace-nowrap">
                         <div className="inline-flex items-center justify-end gap-1.5">
@@ -1441,14 +993,9 @@ export function AdsExcelTableSection({
           {filteredCampaigns.length > 0 && (
             <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0 z-10">
               <tr>
-                {excelGridCoords && (
-                  <td className="py-2.5 px-2 text-center font-mono text-[11px] bg-blue-100/80 sticky left-0 z-20">
-                    Σ
-                  </td>
-                )}
                 {viewMode === 'daily' && <td className="py-2.5 px-3">Tổng</td>}
                 <td className="py-2.5 px-4">
-                  Tổng ({filteredCampaigns.length} chiến dịch)
+                  Σ Tổng ({filteredCampaigns.length} chiến dịch)
                 </td>
                 {isVisible('link') && <td className="py-2.5 px-3 text-slate-400 font-normal">—</td>}
                 {isVisible('website') && <td className="py-2.5 px-3 text-slate-400 font-normal">—</td>}
@@ -1473,23 +1020,6 @@ export function AdsExcelTableSection({
                             : Number.isInteger(val)
                               ? val.toLocaleString('vi-VN')
                               : val.toFixed(2)}
-                    </td>
-                  );
-                })}
-                {customFormulas.map((cf) => {
-                  const a = summaryTotals[cf.colA];
-                  const b = cf.bMode === 'const' ? cf.constB : summaryTotals[cf.colB];
-                  const res = evalBinaryOp(a, cf.op, b);
-                  return (
-                    <td
-                      key={`tot-${cf.id}`}
-                      onClick={() => handleCellPick('__TOTAL__', 'Dòng Tổng', 'custom', cf.name, res)}
-                      className={`py-2.5 px-3 text-right tabular-nums whitespace-nowrap bg-blue-50/60 text-[#0F275C] ${cellHighlightClass(
-                        '__TOTAL__',
-                        'custom',
-                      )}`}
-                    >
-                      {formatComputedValue(res, cf.format)}
                     </td>
                   );
                 })}

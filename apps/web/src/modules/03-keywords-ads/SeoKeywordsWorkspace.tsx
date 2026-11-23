@@ -1146,24 +1146,11 @@ export function SeoKeywordsWorkspace() {
               </div>
             )}
             <MktSpreadsheetCalcBar
-              title="Bảng Từ khóa SEO (Kiểu Excel)"
+              title="Bảng Từ khóa tìm kiếm"
               excelMode={seoExcelCalc.excelMode}
               onToggleExcelMode={seoExcelCalc.toggleExcelMode}
               stats={seoExcelCalc.stats}
               onClear={seoExcelCalc.clearSelection}
-              copiedOk={seoExcelCalc.copiedOk}
-              onCopyTable={() =>
-                void seoExcelCalc.copyTsv(
-                  ['Từ khóa tìm kiếm', 'Click tìm kiếm', 'Hiển thị', 'CTR (%)', 'Vị trí TB'],
-                  queryRowsFiltered.map((r) => [
-                    r.key,
-                    r.clicks,
-                    r.impressions,
-                    r.ctrPct ?? '',
-                    r.averagePosition ?? '',
-                  ]),
-                )
-              }
             />
             <div tabIndex={0} role="region" aria-label="Bảng từ khóa tìm kiếm kiểu Excel" className="overflow-x-auto max-h-[68vh]">
               <table className={`w-full text-xs border-separate border-spacing-0 ${seoExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
@@ -1298,10 +1285,17 @@ export function SeoKeywordsWorkspace() {
                 </button>
               </div>
             )}
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs border-collapse">
-                <thead>
-                  <tr className="bg-slate-50 border-b border-slate-200 text-slate-600">
+            <MktSpreadsheetCalcBar
+              title="Bảng Trang đích SEO"
+              excelMode={seoExcelCalc.excelMode}
+              onToggleExcelMode={seoExcelCalc.toggleExcelMode}
+              stats={seoExcelCalc.stats}
+              onClear={seoExcelCalc.clearSelection}
+            />
+            <div tabIndex={0} role="region" aria-label="Bảng trang đích SEO" className="overflow-x-auto max-h-[68vh]">
+              <table className={`w-full text-xs border-separate border-spacing-0 ${seoExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
+                  <tr className="border-b border-slate-200">
                     <th scope="col" className="py-2.5 px-4 text-left font-semibold">URL trang đích</th>
                     <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
                     <th scope="col" className="py-2.5 px-3 text-right font-semibold">Hiển thị tìm kiếm</th>
@@ -1324,20 +1318,32 @@ export function SeoKeywordsWorkspace() {
                     pageRowsFiltered.map((r) => {
                       const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
                       return (
-                        <tr key={r.key} className="hover:bg-slate-50/70">
+                        <tr key={r.key} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                           <td className="py-2.5 px-4 font-mono text-[11px] text-slate-800 max-w-[420px] truncate" title={r.key}>
                             {r.key}
                           </td>
-                          <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`p:${r.key}:clicks`, 'Click', r.clicks)}
+                            className={`py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums ${seoExcelCalc.cellClass(`p:${r.key}:clicks`)}`}
+                          >
                             {r.clicks.toLocaleString('vi-VN')}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`p:${r.key}:impr`, 'Hiển thị', r.impressions)}
+                            className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${seoExcelCalc.cellClass(`p:${r.key}:impr`)}`}
+                          >
                             {r.impressions.toLocaleString('vi-VN')}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`p:${r.key}:ctr`, 'CTR', r.ctrPct)}
+                            className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${seoExcelCalc.cellClass(`p:${r.key}:ctr`)}`}
+                          >
                             {r.ctrPct !== null ? `${r.ctrPct}%` : '—'}
                           </td>
-                          <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                          <td
+                            onClick={() => seoExcelCalc.toggleCell(`p:${r.key}:pos`, 'Vị trí TB', r.averagePosition)}
+                            className={`py-2.5 px-3 text-right text-slate-600 tabular-nums ${seoExcelCalc.cellClass(`p:${r.key}:pos`)}`}
+                          >
                             {r.averagePosition !== null ? r.averagePosition : '—'}
                           </td>
                           <td className="py-2.5 px-3 text-right text-[11px] text-slate-600 tabular-nums">

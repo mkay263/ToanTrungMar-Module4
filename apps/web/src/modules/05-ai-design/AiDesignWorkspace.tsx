@@ -4476,29 +4476,28 @@ export function AiDesignWorkspace() {
         onChange={handleUploadProductPhotos}
       />
 
-      {/* 1. TOP MODULE HEADER BAR (CLEAN SINGLE-ROW STUDIO TOOLBAR) */}
-      <div className="relative z-40 flex min-h-12 w-full shrink-0 flex-nowrap items-center justify-between gap-2 overflow-visible border-b border-[#D8E2F0] bg-white px-3 py-1.5 shadow-2xs">
-        {/* Left Section: Nút bật/tắt Dự án & Hình công trình (bìa trái) + Tab chuyển đổi màn hình */}
-        <div className="flex shrink-0 items-center gap-2">
-          {/* Nút bật/tắt Cột Dự án & Hình công trình (chia bố cục, không che màn hình) */}
+      {/* 1. TOP MODULE HEADER BAR (CLEAN EXECUTIVE STUDIO TOOLBAR) */}
+      <div className="relative z-40 flex min-h-12 w-full shrink-0 flex-nowrap items-center justify-between gap-2 overflow-visible border-b border-slate-200/90 bg-white/95 backdrop-blur-md px-3.5 py-1.5 shadow-[0_1px_3px_rgba(15,23,42,0.04)]">
+        {/* Left Section: Dự án & Ảnh + Tên dự án đang mở + Thông số + Lead */}
+        <div className="flex min-w-0 items-center gap-2">
           <div className="shrink-0">
             <button
               type="button"
               data-testid="toggle-projects-panel-btn"
               onClick={toggleProjectsPanel}
-              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-bold transition shadow-2xs ${
+              className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-xl px-3 py-1.5 text-xs font-bold transition shadow-2xs ${
                 showProjectsPanel
-                  ? 'bg-[#1553A2] text-white shadow-xs'
-                  : 'border border-blue-200 bg-blue-50/80 text-[#1553A2] hover:bg-blue-100 hover:border-blue-300'
+                  ? 'bg-[#0B1D48] text-white shadow-xs'
+                  : 'border border-blue-200 bg-blue-50/80 text-[#0B1D48] hover:bg-blue-100 hover:border-blue-300'
               }`}
               title={
                 showProjectsPanel
-                  ? 'Bấm để thu gọn cột Dự án & Hình công trình (Mở rộng tối đa màn hình)'
-                  : 'Bấm để mở cột Dự án & Hình công trình (Tự chia bố cục, không che màn hình)'
+                  ? 'Thu gọn cột Dự án & Hình công trình'
+                  : 'Mở cột Dự án & Hình công trình'
               }
             >
-              <Plus className="h-3.5 w-3.5 stroke-[2.5]" />
-              <span>Dự án &amp; Hình công trình</span>
+              <FolderKanban className="h-3.5 w-3.5" />
+              <span>Dự án &amp; Ảnh</span>
               <ChevronDown
                 className={`h-3.5 w-3.5 transition-transform duration-200 ${
                   showProjectsPanel ? 'rotate-180' : ''
@@ -4506,6 +4505,15 @@ export function AiDesignWorkspace() {
               />
             </button>
           </div>
+
+          {currentProject && (
+            <div className="hidden lg:flex items-center gap-1.5 min-w-0 max-w-[240px] rounded-xl bg-slate-100/90 border border-slate-200/80 px-2.5 py-1">
+              <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+              <span className="truncate text-xs font-bold text-slate-800" title={currentProject.projectName}>
+                {currentProject.projectName}
+              </span>
+            </div>
+          )}
 
           <div className="h-4 w-px bg-slate-200 shrink-0" />
 
@@ -4523,35 +4531,35 @@ export function AiDesignWorkspace() {
               onClick={() => {
                 setActiveWorkspaceArea((prev) => (prev === 'specs' ? 'perspective' : 'specs'));
               }}
-              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-bold transition ${
+              className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl px-2.5 py-1.5 text-xs font-bold transition ${
                 activeWorkspaceArea === 'specs'
-                  ? 'bg-[#1553A2] text-white shadow-2xs'
-                  : 'border border-[#D8E2F0] bg-white text-slate-700 hover:bg-slate-50'
+                  ? 'bg-[#1553A2] text-white shadow-xs'
+                  : 'border border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
               }`}
               title="Mở bảng cài đặt thông tin dự án & chuẩn đầu ra"
             >
               <Settings2 className="h-3.5 w-3.5" />
-              <span>Cài đặt thông số</span>
+              <span>Thông số</span>
             </button>
 
             {currentProject?.leadId && (
               <a
                 href={`/leads?leadId=${currentProject.leadId}`}
-                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs font-extrabold text-[#1553A2] hover:bg-blue-100 transition"
+                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-xl border border-blue-200 bg-blue-50/70 px-2.5 py-1.5 text-xs font-bold text-[#1553A2] hover:bg-blue-100 transition"
                 title={`Mở nhanh hồ sơ Lead ${currentProject.leadCode || currentProject.leadId} tại Module 01`}
               >
-                <span>🔗 Lead: {currentProject.leadCode || `#${currentProject.leadId}`}</span>
+                <span>Lead {currentProject.leadCode || `#${currentProject.leadId}`}</span>
               </a>
             )}
           </div>
         </div>
 
-        {/* Right Section: Staff Model Selector, Upload Final, Export ZIP, Approve & Handoff Sales */}
+        {/* Right Section: AI Engine Pill, Grouped File Actions, Primary Handoff CTA */}
         <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
             onClick={() => setTabletDrawerOpen((prev) => !prev)}
-            className="xl:hidden hidden md:inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-bold text-[#1E3A8A] shadow-2xs transition hover:bg-indigo-100"
+            className="xl:hidden hidden md:inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-bold text-[#1E3A8A] shadow-2xs transition hover:bg-indigo-100"
             title="Thu gọn / mở rộng bảng Trợ lý AI trên màn hình Tablet"
           >
             <MessageSquare className="h-3.5 w-3.5" />
@@ -4562,11 +4570,11 @@ export function AiDesignWorkspace() {
             type="button"
             data-testid="open-model-registry-btn"
             onClick={() => setShowModelRegistryModal(true)}
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 shadow-2xs transition hover:bg-slate-50"
+            className="hidden 2xl:inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
             title="Xem danh mục Model & trạng thái kiểm chứng trên máy chủ"
           >
-            <Sparkles className="h-3.5 w-3.5 text-[#1E3A8A]" />
-            <span>Model Registry</span>
+            <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+            <span>Registry</span>
           </button>
 
           <button
@@ -4584,57 +4592,55 @@ export function AiDesignWorkspace() {
               setAiModalTab('select_ai');
               setShowAiConfigModal(true);
             }}
-            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50/80 px-2.5 py-1.5 text-xs font-bold text-[#1553A2] shadow-2xs transition hover:bg-blue-100 max-w-[210px]"
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-indigo-200/90 bg-gradient-to-r from-indigo-50/90 to-blue-50/80 px-2.5 py-1.5 text-xs font-bold text-[#0B1D48] shadow-2xs transition hover:border-indigo-300 max-w-[205px]"
             title={`Chọn Model từ API đã gắn: ${consultantModelName}`}
           >
-            <Cpu className="h-3.5 w-3.5 shrink-0 text-[#1553A2]" />
-            <span className="truncate">Model: {consultantModelName}</span>
+            <span className={`h-2 w-2 rounded-full shrink-0 ${aiConnected ? 'bg-emerald-500' : 'bg-amber-400'}`} />
+            <Cpu className="h-3.5 w-3.5 shrink-0 text-indigo-600" />
+            <span className="truncate">{consultantModelName}</span>
           </button>
 
-          {canUseAiDesign && (
+          {/* Grouped Secondary File Actions */}
+          <div className="inline-flex items-center rounded-xl border border-slate-200 bg-slate-50 p-0.5 gap-0.5">
+            {canUseAiDesign && (
+              <button
+                type="button"
+                onClick={() => uploadFinalInputRef.current?.click()}
+                disabled={!currentProject || uploadingFinalFile}
+                className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-white hover:bg-blue-50 px-2.5 py-1 text-xs font-bold text-[#1553A2] transition disabled:opacity-45"
+                title="Designer tải bản thiết kế hoàn thiện (Final Render) lên hệ thống"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                <span>{uploadingFinalFile ? 'Đang tải...' : 'Tải Final'}</span>
+              </button>
+            )}
+
             <button
               type="button"
-              onClick={() => uploadFinalInputRef.current?.click()}
-              disabled={!currentProject || uploadingFinalFile}
-              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#1553A2] px-2.5 py-1.5 text-xs font-bold text-white shadow-2xs transition hover:bg-[#1E3A8A] disabled:opacity-50"
-              title="Designer tải bản thiết kế hoàn thiện (Final Render) lên hệ thống"
+              onClick={() => handleDownloadProjectZip('all')}
+              disabled={
+                !currentProject ||
+                ((currentProject.photos || []).length === 0 &&
+                  !(currentProject.assetVersions || []).some((v) => v.fileAvailable !== false))
+              }
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-white transition disabled:opacity-45 disabled:cursor-not-allowed"
+              title="Tải gói ZIP trọn bộ hồ sơ dự án"
             >
-              <Upload className="h-3.5 w-3.5" />
-              <span>{uploadingFinalFile ? 'Đang tải...' : 'Tải bản Final'}</span>
+              <FileArchive className="h-3.5 w-3.5 text-amber-600" />
+              <span>ZIP</span>
             </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => handleDownloadProjectZip('all')}
-            disabled={
-              !currentProject ||
-              ((currentProject.photos || []).length === 0 &&
-                !(currentProject.assetVersions || []).some((v) => v.fileAvailable !== false))
-            }
-            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#D8E2F0] bg-white px-2.5 py-1.5 text-xs font-bold text-[#17253F] shadow-2xs transition hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed"
-            title={
-              !currentProject ||
-              ((currentProject.photos || []).length === 0 &&
-                !(currentProject.assetVersions || []).some((v) => v.fileAvailable !== false))
-                ? 'Dự án chưa có tệp ảnh đầu ra hoặc ảnh hiện trạng thực tế để xuất gói ZIP'
-                : 'Tải gói ZIP trọn bộ hồ sơ dự án (chỉ đóng gói tệp thực tế tồn tại)'
-            }
-          >
-            <FileArchive className="h-3.5 w-3.5 text-amber-600" />
-            <span>Xuất .ZIP</span>
-          </button>
+          </div>
 
           {canUseAiDesign && (
             <button
               type="button"
               onClick={handleSaveFinished}
               disabled={!currentProject || !currentVersion || savingFinal}
-              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg bg-[#0BAF7C] px-3 py-1.5 text-xs font-bold text-white shadow-2xs transition hover:bg-emerald-700 disabled:opacity-50"
+              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-3.5 py-1.5 text-xs font-bold text-white shadow-sm shadow-emerald-600/20 transition hover:from-emerald-700 hover:to-teal-700 disabled:opacity-45"
               title="Phê duyệt phiên bản đang chọn và tự động bàn giao sang hồ sơ Lead cho Sales"
             >
-              <Check className="h-3.5 w-3.5" />
-              <span>{savingFinal ? 'Đang duyệt...' : 'Phê duyệt & Bàn giao Sales'}</span>
+              <Check className="h-3.5 w-3.5 stroke-[2.5]" />
+              <span>{savingFinal ? 'Đang duyệt...' : 'Duyệt & Bàn giao'}</span>
             </button>
           )}
         </div>
@@ -4816,18 +4822,18 @@ export function AiDesignWorkspace() {
               } flex-1 min-w-0 flex-col overflow-hidden bg-[#F5F7FC] p-1.5 pl-0 transition-all`}
             >
               <div className="flex flex-1 min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200/90 bg-white p-2.5 shadow-2xs">
-                {/* SINGLE-ROW COMPACT TOOLBAR (Option 1) */}
-                <div className="mb-2 flex items-center justify-between gap-2 shrink-0 flex-nowrap overflow-x-auto custom-scrollbar pb-0.5">
-                  {/* Left: 3-Segment View Switcher (Clean text without icons) */}
+                {/* SINGLE-ROW COMPACT CANVAS TOOLBAR */}
+                <div className="mb-2.5 flex items-center justify-between gap-2 shrink-0 flex-nowrap overflow-x-auto custom-scrollbar pb-0.5">
+                  {/* Left: 3-Segment View Switcher + Quick Spec Pill */}
                   <div className="flex items-center gap-2 shrink-0">
-                    <div className="inline-flex items-center rounded-xl border border-slate-200/90 bg-slate-100 p-0.5 text-[11px] font-bold shrink-0 shadow-2xs">
+                    <div className="inline-flex items-center rounded-xl border border-slate-200/90 bg-slate-100/90 p-0.5 text-[11px] font-bold shrink-0">
                       <button
                         type="button"
                         data-testid="view-mode-original"
                         onClick={() => setViewMode('original')}
                         className={`rounded-lg px-2.5 py-1 transition ${
                           (viewMode === 'original' || showHandles) && viewMode !== 'bom'
-                            ? 'bg-white text-[#1553A2] shadow-2xs'
+                            ? 'bg-white text-[#0B1D48] shadow-xs'
                             : 'text-slate-600 hover:text-slate-900'
                         }`}
                         title="Xem ảnh gốc / hiện trường công trình"
@@ -4843,12 +4849,12 @@ export function AiDesignWorkspace() {
                         }}
                         className={`rounded-lg px-2.5 py-1 transition ${
                           viewMode === 'result' && !showHandles
-                            ? 'bg-[#7846FF] text-white shadow-2xs'
+                            ? 'bg-gradient-to-r from-[#6D28D9] to-[#7846FF] text-white shadow-xs'
                             : 'text-slate-600 hover:text-slate-900'
                         }`}
                         title="Xem ảnh phương án thiết kế do AI tạo"
                       >
-                        Kết quả{currentVersion ? ` (v${currentVersion.versionNumber})` : ''}
+                        Kết quả{currentVersion ? ` v${currentVersion.versionNumber}` : ''}
                       </button>
                       {selectedPhoto && currentVersion && (
                         <button
@@ -4860,7 +4866,7 @@ export function AiDesignWorkspace() {
                           }}
                           className={`rounded-lg px-2.5 py-1 transition ${
                             viewMode === 'compare' && !showHandles
-                              ? 'bg-[#1553A2] text-white shadow-2xs'
+                              ? 'bg-[#0B1D48] text-white shadow-xs'
                               : 'text-slate-600 hover:text-slate-900'
                           }`}
                           title="Kéo thanh trượt để so sánh ảnh Trước và Sau"
@@ -4869,6 +4875,14 @@ export function AiDesignWorkspace() {
                         </button>
                       )}
                     </div>
+
+                    {currentProject && (
+                      <span className="hidden md:inline-flex items-center gap-1 rounded-lg bg-slate-100 px-2 py-1 text-[10.5px] font-semibold text-slate-600 border border-slate-200/70">
+                        <span>{paramForm.pixelPitch}</span>
+                        <span>·</span>
+                        <span>{paramForm.aspectRatio}</span>
+                      </span>
+                    )}
                   </div>
 
                   {/* Right: Zoom + Download + Point Marking */}
@@ -4990,8 +5004,8 @@ export function AiDesignWorkspace() {
                   </div>
                 </div>
 
-                {/* MAIN VIEWPORT: SHOWS 2D CABINET BOM, BEFORE/AFTER SPLIT, AI-EDITED IMAGE, SITE PHOTO, OR UPLOAD DROPZONE */}
-                <div className="relative flex-1 min-h-0 overflow-hidden flex items-center justify-center [container-type:size]">
+                {/* MAIN VIEWPORT: STUDIO STAGE */}
+                <div className="relative flex-1 min-h-0 overflow-hidden flex items-center justify-center rounded-xl bg-gradient-to-b from-slate-900 via-[#0E172A] to-slate-950 ring-1 ring-slate-900/10 [container-type:size]">
                   {viewMode === 'bom' ? (
                     /* INTERACTIVE 2D CAD CABINET MATRIX & BILL OF MATERIALS (BOM) VIEW */
                     <div className="flex h-full w-full flex-col overflow-y-auto bg-slate-950 p-4 text-white">
@@ -5730,12 +5744,30 @@ export function AiDesignWorkspace() {
                 isResizingChat ? 'transition-none select-none' : 'duration-75'
               }`}
             >
-              {/* Header & Dual-AI Badges */}
-              <div className="shrink-0 border-b border-slate-100 p-3.5 pb-2.5">
-                <div className="flex items-center justify-between gap-1">
-                  <h2 className="text-[13px] font-extrabold uppercase tracking-wide text-[#17253F]">
-                    Ô CHAT PHÂN TÍCH ẢNH &amp; ĐIỂM CHẠM VỚI AI
-                  </h2>
+              {/* Header & AI Co-pilot Status */}
+              <div className="shrink-0 border-b border-slate-100 bg-gradient-to-r from-slate-50/90 via-white to-indigo-50/40 px-3.5 py-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#0B1D48] to-[#7846FF] text-white shadow-xs">
+                      <Sparkles className="h-3.5 w-3.5" />
+                    </span>
+                    <div className="min-w-0">
+                      <h2 className="text-xs font-extrabold text-slate-900 leading-tight truncate">
+                        Trợ lý Thiết kế AI
+                      </h2>
+                      <p className="text-[10.5px] text-slate-500 leading-tight truncate">
+                        Phối cảnh LED · Ghép sản phẩm · Tạo Banner
+                      </p>
+                    </div>
+                  </div>
+                  <span className={`shrink-0 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold border ${
+                    aiConnected
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                  }`}>
+                    <span className={`h-1.5 w-1.5 rounded-full ${aiConnected ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+                    {aiConnected ? 'API Sẵn sàng' : 'Studio Nội bộ'}
+                  </span>
                   {/* Hidden test-compatible selects */}
                   <div className="sr-only">
                     <select
@@ -5769,9 +5801,8 @@ export function AiDesignWorkspace() {
                   </div>
                 </div>
 
-                <div className="mt-2 flex items-center justify-between gap-2 rounded-xl border border-[#D8E2F0] bg-[#F5F7FC] px-3 py-1.5 text-xs text-[#17253F]">
-                  <div className="flex min-w-0 flex-1 items-center gap-2">
-                    <span className="shrink-0 text-[11px] font-bold text-slate-600">Model:</span>
+                <div className="mt-2.5 flex items-center justify-between gap-1.5 rounded-xl border border-slate-200/90 bg-white px-2.5 py-1.5 text-xs shadow-2xs">
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5">
                     <select
                       data-testid="chat-header-model-select"
                       value={consultantModelId}
@@ -5787,7 +5818,7 @@ export function AiDesignWorkspace() {
                           setConsultantModelName(nextId);
                         }
                       }}
-                      className="min-w-0 flex-1 truncate rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-bold text-[#1553A2] focus:border-[#1553A2] focus:outline-none"
+                      className="min-w-0 flex-1 truncate bg-transparent text-xs font-bold text-[#0B1D48] focus:outline-none cursor-pointer"
                       title="Danh sách các Model đọc trực tiếp từ API Key đã gắn"
                     >
                       {autoDiscoveredModels.map((m) => (
@@ -5803,36 +5834,63 @@ export function AiDesignWorkspace() {
                       setAiModalTab('select_ai');
                       setShowAiConfigModal(true);
                     }}
-                    className="shrink-0 inline-flex items-center gap-1 rounded-lg bg-white px-2.5 py-1 text-[11px] font-bold text-[#1553A2] border border-blue-200 hover:bg-blue-50 shadow-2xs"
-                    title="Chọn Model đã phân loại hoặc gắn thêm API Key"
+                    className="shrink-0 inline-flex items-center gap-1 rounded-lg bg-indigo-50 px-2.5 py-1 text-[11px] font-bold text-[#1553A2] border border-indigo-200/80 hover:bg-indigo-100 transition"
+                    title="Chọn Model hoặc đổi API Key nhanh"
                   >
-                    <Settings2 className="h-3 w-3 text-[#1553A2]" />
-                    <span>Model &amp; Key</span>
+                    <Settings2 className="h-3 w-3" />
+                    <span>Đổi Key</span>
                   </button>
                 </div>
               </div>
 
-              {/* Chat Thread (Larger text-[13px] for comfortable reading + Auto-scroll) */}
+              {/* Chat Thread (Larger text-[13px] for comfortable reading + 1-click Quick Starters) */}
               <div
                 ref={chatThreadRef}
-                className="flex-1 min-h-0 space-y-3.5 overflow-y-auto p-4 text-[13px]"
+                className="flex-1 min-h-0 space-y-3.5 overflow-y-auto p-3.5 text-[13px] bg-slate-50/40"
               >
                 {(currentProject?.chatMessages.length || 0) === 0 && !pendingUserPrompt && (
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3.5 text-xs text-slate-600 leading-relaxed space-y-1.5">
-                    <div>
-                      👋 Chào bạn! Bạn có thể <strong>trò chuyện tự nhiên với AI</strong> giống như đang trao đổi trực tiếp với Designer:
+                  <div className="space-y-2.5">
+                    <div className="rounded-2xl border border-indigo-100 bg-white p-3.5 shadow-2xs">
+                      <div className="text-xs font-extrabold text-slate-900">
+                        Bắt đầu nhanh với Trợ lý Thiết kế AI
+                      </div>
+                      <p className="mt-1 text-[11.5px] text-slate-500 leading-relaxed">
+                        Chọn 1 thao tác bên dưới hoặc nhập yêu cầu tự nhiên như đang nhắn tin với Designer:
+                      </p>
+                      <div className="mt-2.5 grid grid-cols-1 gap-1.5">
+                        {[
+                          {
+                            title: 'Ghép LED / sản phẩm vào ảnh hiện trường',
+                            desc: 'Giữ nguyên kiến trúc phòng, cân đối ánh sáng tự nhiên',
+                            prompt:
+                              'Ghép màn hình LED Toàn Trung vào đúng vị trí đã chấm điểm trên ảnh hiện trường, giữ nguyên toàn bộ kiến trúc xung quanh và cân đối ánh sáng chân thực',
+                          },
+                          {
+                            title: 'Thiết kế Banner quảng cáo nổi bật',
+                            desc: `Tỷ lệ ${paramForm.aspectRatio} · Chuẩn ${paramForm.bannerWidthPx}×${paramForm.bannerHeightPx}px`,
+                            prompt: `Tạo banner quảng cáo chuyên nghiệp tỷ lệ ${paramForm.aspectRatio} cho dòng sản phẩm màn hình LED Toàn Trung, bố cục mạnh mẽ hiện đại`,
+                          },
+                          {
+                            title: 'Phân tích ảnh & Tư vấn kỹ thuật ($0)',
+                            desc: 'Gợi ý kích thước, góc nhìn & chủng loại module phù hợp',
+                            prompt:
+                              'Phân tích ảnh hiện trường hiện tại và gợi ý phương án lắp đặt màn hình LED tối ưu nhất giúp mình',
+                          },
+                        ].map((card) => (
+                          <button
+                            key={card.title}
+                            type="button"
+                            onClick={() => handlePromptChange(card.prompt)}
+                            className="group text-left rounded-xl border border-slate-200/90 bg-slate-50/70 hover:bg-indigo-50/60 hover:border-indigo-300 px-3 py-2 transition"
+                          >
+                            <div className="text-[11.5px] font-bold text-slate-800 group-hover:text-[#0B1D48]">
+                              {card.title}
+                            </div>
+                            <div className="text-[10.5px] text-slate-500 mt-0.5">{card.desc}</div>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <ul className="list-disc pl-4 space-y-1 text-[11px] text-slate-600">
-                      <li>
-                        <strong>Ghép sản phẩm công ty vào hiện trường:</strong> Bấm <strong>+ Ảnh SP công ty</strong> để chọn mẫu sản phẩm, rồi nhắn <em>&ldquo;Ghép sản phẩm này lên tường hiện trường giúp tôi&rdquo;</em>.
-                      </li>
-                      <li>
-                        <strong>Tạo Banner / Ấn phẩm có sản phẩm:</strong> Nhắn <em>&ldquo;Tạo banner quảng cáo có sản phẩm này&rdquo;</em>.
-                      </li>
-                      <li>
-                        <strong>Tư vấn &amp; Phân tích ảnh ($0):</strong> Hỏi bất kỳ câu hỏi nào về bố cục, kích thước, màu sắc.
-                      </li>
-                    </ul>
                   </div>
                 )}
 
@@ -6193,19 +6251,19 @@ export function AiDesignWorkspace() {
                         void executeChatSubmit(chatPrompt);
                       }
                     }}
-                    placeholder="Trò chuyện tự nhiên với AI: 'Ghép sản phẩm này lên tường', 'Tạo banner có sản phẩm này', hoặc hỏi tư vấn..."
-                    className="w-full resize-none rounded-xl border border-slate-300 bg-slate-50/70 p-2.5 pr-20 text-[13px] text-slate-900 placeholder-slate-400 focus:border-[#7846FF] focus:bg-white focus:outline-none"
+                    placeholder="Nhập yêu cầu tự nhiên: 'Ghép LED vào tường', 'Tạo banner sản phẩm', hoặc hỏi tư vấn..."
+                    className="w-full resize-none rounded-2xl border border-slate-300/90 bg-slate-50/70 p-3 pr-24 text-[13px] text-slate-900 placeholder-slate-400 focus:border-[#7846FF] focus:bg-white focus:ring-2 focus:ring-purple-500/15 focus:outline-none transition"
                   />
                   <button
                     type="submit"
                     data-testid="ai-chat-submit-btn"
                     disabled={!chatPrompt.trim() || submitting || Boolean(piiAlert)}
-                    className={`absolute bottom-2.5 right-2 inline-flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-extrabold text-white shadow-xs transition disabled:opacity-50 ${
+                    className={`absolute bottom-2.5 right-2.5 inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-extrabold text-white shadow-sm transition disabled:opacity-45 ${
                       /^\s*@(?:banner|baneer|taobanner|tạobanner|poster|taoanhposter)\b/i.test(chatPrompt)
-                        ? 'bg-pink-600 hover:bg-pink-700'
+                        ? 'bg-gradient-to-r from-pink-600 to-rose-600 hover:from-pink-700 hover:to-rose-700'
                         : /^\s*@tao[j]?anh\b/i.test(chatPrompt)
-                          ? 'bg-[#7846FF] hover:bg-[#6D28D9]'
-                          : 'bg-[#1553A2] hover:bg-[#1E40AF]'
+                          ? 'bg-gradient-to-r from-[#6D28D9] to-[#7846FF] hover:from-[#5B21B6] hover:to-[#6D28D9]'
+                          : 'bg-gradient-to-r from-[#0B1D48] to-[#1E3A8A] hover:from-[#1553A2] hover:to-[#2563EB]'
                     }`}
                   >
                     {submitting ? (

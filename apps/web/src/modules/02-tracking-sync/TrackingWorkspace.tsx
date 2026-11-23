@@ -1115,33 +1115,11 @@ export function TrackingWorkspace() {
                 </div>
 
                 <MktSpreadsheetCalcBar
-                  title="Bảng Trang đích GA4 (Kiểu Excel)"
+                  title="Bảng Trang đích GA4"
                   excelMode={ga4ExcelCalc.excelMode}
                   onToggleExcelMode={ga4ExcelCalc.toggleExcelMode}
                   stats={ga4ExcelCalc.stats}
                   onClear={ga4ExcelCalc.clearSelection}
-                  copiedOk={ga4ExcelCalc.copiedOk}
-                  onCopyTable={() => {
-                    const filteredLp = (lpTable?.rows || []).filter((row) => {
-                      if (hideNoiseLp && row.categoryKey === 'technical_noise') return false;
-                      if (lpCategoryFilter !== 'all' && row.categoryKey !== lpCategoryFilter) return false;
-                      if (searchTerm && !row.landingPage.toLowerCase().includes(searchTerm)) return false;
-                      return true;
-                    });
-                    void ga4ExcelCalc.copyTsv(
-                      ['Trang đích', 'Phân loại', 'User mới', 'Tỷ lệ khách mới (%)', 'Phiên truy cập', 'Tỷ lệ tương tác (%)', 'Sự kiện biểu mẫu', 'Lead CRM hợp lệ'],
-                      filteredLp.map((r) => [
-                        r.landingPage,
-                        r.categoryLabel || 'Trang khác',
-                        r.newUsers ?? '',
-                        r.newUserRatePct ?? '',
-                        r.sessions,
-                        r.engagementRatePct ?? '',
-                        r.successfulFormCount ?? '',
-                        r.validLeadCount,
-                      ]),
-                    );
-                  }}
                 />
 
                 <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto max-h-[68vh]">
@@ -1307,9 +1285,16 @@ export function TrackingWorkspace() {
               )}
 
               <section className="bg-white border border-slate-200/90 rounded-[12px] shadow-2xs overflow-hidden">
+                <MktSpreadsheetCalcBar
+                  title="Bảng Hiệu suất kênh GA4"
+                  excelMode={ga4ExcelCalc.excelMode}
+                  onToggleExcelMode={ga4ExcelCalc.toggleExcelMode}
+                  stats={ga4ExcelCalc.stats}
+                  onClear={ga4ExcelCalc.clearSelection}
+                />
                 <div tabIndex={0} role="region" aria-label="Bảng theo kênh" className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead className="bg-slate-50 text-slate-600 border-b border-slate-200 sticky top-0">
+                  <table className={`w-full text-left border-separate border-spacing-0 text-xs ${ga4ExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                    <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 sticky top-0">
                       <tr>
                         <th scope="col" className="py-2.5 px-4 font-semibold">Kênh marketing</th>
                         <th scope="col" className="py-2.5 px-3 font-semibold">Nguồn / phương thức</th>
@@ -1333,30 +1318,45 @@ export function TrackingWorkspace() {
                             (r) => !searchTerm || r.channelLabel.toLowerCase().includes(searchTerm),
                           )
                           .map((r) => (
-                            <tr key={r.channelKey} className="hover:bg-slate-50/70">
+                            <tr key={r.channelKey} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                               <th scope="row" className="py-3 px-4 font-semibold text-slate-900">
                                 {r.channelLabel}
                               </th>
                               <td className="py-3 px-3 text-slate-600">
                                 {r.source || '—'} / {r.medium || '—'}
                               </td>
-                              <td className="py-3 px-3 text-right font-semibold tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:sess`, 'Phiên', r.sessions)}
+                                className={`py-3 px-3 text-right font-semibold tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:sess`)}`}
+                              >
                                 {r.sessions.toLocaleString('vi-VN')}
                               </td>
-                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:engS`, 'Phiên tương tác', r.engagedSessions)}
+                                className={`py-3 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:engS`)}`}
+                              >
                                 {r.engagedSessions !== null
                                   ? r.engagedSessions.toLocaleString('vi-VN')
                                   : '—'}
                               </td>
-                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:engR`, 'Tỷ lệ tương tác', r.engagementRatePct)}
+                                className={`py-3 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:engR`)}`}
+                              >
                                 {r.engagementRatePct !== null ? `${r.engagementRatePct}%` : '—'}
                               </td>
-                              <td className="py-3 px-3 text-right text-slate-600 tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:form`, 'Sự kiện form', r.formEvents)}
+                                className={`py-3 px-3 text-right text-slate-600 tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:form`)}`}
+                              >
                                 {r.formEvents !== null && r.formEvents !== undefined
                                   ? r.formEvents.toLocaleString('vi-VN')
                                   : '—'}
                               </td>
-                              <td className="py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums">
+                              <td
+                                onClick={() => ga4ExcelCalc.toggleCell(`ch:${r.channelKey}:lead`, 'Lead CRM', r.validLeadCount)}
+                                className={`py-3 px-4 text-right font-bold text-[#0F275C] tabular-nums ${ga4ExcelCalc.cellClass(`ch:${r.channelKey}:lead`)}`}
+                              >
                                 {r.validLeadCount}
                               </td>
                             </tr>

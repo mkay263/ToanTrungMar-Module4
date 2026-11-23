@@ -45,6 +45,7 @@ import { useSession } from '@/core/session/SessionContext';
 import { useDashboardScope } from '@/core/dashboard/useDashboardScope';
 import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHeader';
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
+import { MktSpreadsheetCalcBar, useMktExcelSelection } from '@/components/common/MktSpreadsheetCalcBar';
 import {
   VerticalSectionNav,
   type VerticalNavGroup,
@@ -178,6 +179,7 @@ export function ReportsWorkspace() {
   );
   const [searchTerm, setSearchTerm] = useState('');
   const [reconcileSearch, setReconcileSearch] = useState('');
+  const quickCalc = useMktExcelSelection();
 
   const [activeTab, setActiveTab] = useState<ReconcileTabKey>(() => {
     if (typeof window !== 'undefined') {
@@ -1483,14 +1485,14 @@ export function ReportsWorkspace() {
                         type="button"
                         aria-pressed={ratioCalcOpen}
                         onClick={() => setRatioCalcOpen((v) => !v)}
-                        className={`h-8 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 transition ${
+                        className={`h-8 px-3 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 transition ${
                           ratioCalcOpen
-                            ? 'bg-blue-50 border-blue-400 text-[#1E3A8A]'
+                            ? 'bg-emerald-600 border-emerald-600 text-white shadow-2xs'
                             : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
                         }`}
                       >
                         <Calculator className="w-3.5 h-3.5" />
-                        <span>Tính tỷ lệ (A ÷ B)</span>
+                        <span>{ratioCalcOpen ? 'Đang bật Tính Nhanh' : 'Tính Nhanh'}</span>
                       </button>
 
                       <div
@@ -2271,14 +2273,16 @@ export function ReportsWorkspace() {
                   </section>
 
                   <section className="rounded-[16px] border border-slate-200 bg-white shadow-xs overflow-hidden">
-                    <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
-                      <h2 className="text-sm font-bold text-[#0F172A]">
-                        Chi tiết theo dòng sản phẩm ({data.tables.byProduct.length})
-                      </h2>
-                    </div>
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-xs text-left tabular-nums">
-                        <thead className="bg-slate-50 text-slate-600 uppercase border-b border-slate-200">
+                    <MktSpreadsheetCalcBar
+                      title={`Chi tiết theo dòng sản phẩm (${data.tables.byProduct.length})`}
+                      excelMode={quickCalc.excelMode}
+                      onToggleExcelMode={quickCalc.toggleExcelMode}
+                      stats={quickCalc.stats}
+                      onClear={quickCalc.clearSelection}
+                    />
+                    <div tabIndex={0} role="region" aria-label="Bảng nhu cầu sản phẩm" className="overflow-x-auto">
+                      <table className={`w-full text-xs text-left tabular-nums border-separate border-spacing-0 ${quickCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                        <thead className="bg-slate-100 text-slate-600 uppercase border-b border-slate-200">
                           <tr>
                             <th className="px-4 py-2.5">Sản phẩm</th>
                             <th className="px-3 py-2.5 text-right">Lead quan tâm</th>
@@ -2297,27 +2301,47 @@ export function ReportsWorkspace() {
                             </tr>
                           ) : (
                             data.tables.byProduct.map((p) => {
-                              const winPct =
-                                p.validCount > 0
-                                  ? `${((p.wonCount / p.validCount) * 100).toFixed(1)}%`
-                                  : '—';
+                              const winPctNum =
+                                p.validCount > 0 ? Number(((p.wonCount / p.validCount) * 100).toFixed(1)) : null;
+                              const winPct = winPctNum !== null ? `${winPctNum}%` : '—';
                               return (
                                 <tr
                                   key={`${p.productId}-${p.productName}`}
-                                  className="hover:bg-slate-50"
+                                  className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30"
                                 >
                                   <td className="px-4 py-2.5 font-medium text-slate-800">
                                     {p.productName}
                                   </td>
-                                  <td className="px-3 py-2.5 text-right">{p.leadCount}</td>
-                                  <td className="px-3 py-2.5 text-right font-semibold text-indigo-700">
+                                  <td
+                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:lead`, 'Lead quan tâm', p.leadCount)}
+                                    className={`px-3 py-2.5 text-right ${quickCalc.cellClass(`prod:${p.productId}:lead`)}`}
+                                  >
+                                    {p.leadCount}
+                                  </td>
+                                  <td
+                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:valid`, 'Hợp lệ', p.validCount)}
+                                    className={`px-3 py-2.5 text-right font-semibold text-indigo-700 ${quickCalc.cellClass(`prod:${p.productId}:valid`)}`}
+                                  >
                                     {p.validCount}
                                   </td>
-                                  <td className="px-3 py-2.5 text-right">{p.quotedCount}</td>
-                                  <td className="px-3 py-2.5 text-right font-semibold text-emerald-700">
+                                  <td
+                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:quoted`, 'Đã báo giá', p.quotedCount)}
+                                    className={`px-3 py-2.5 text-right ${quickCalc.cellClass(`prod:${p.productId}:quoted`)}`}
+                                  >
+                                    {p.quotedCount}
+                                  </td>
+                                  <td
+                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:won`, 'Chốt', p.wonCount)}
+                                    className={`px-3 py-2.5 text-right font-semibold text-emerald-700 ${quickCalc.cellClass(`prod:${p.productId}:won`)}`}
+                                  >
                                     {p.wonCount}
                                   </td>
-                                  <td className="px-4 py-2.5 text-right text-slate-600">{winPct}</td>
+                                  <td
+                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:win`, 'Tỷ lệ chốt', winPctNum)}
+                                    className={`px-4 py-2.5 text-right text-slate-600 ${quickCalc.cellClass(`prod:${p.productId}:win`)}`}
+                                  >
+                                    {winPct}
+                                  </td>
                                 </tr>
                               );
                             })
