@@ -1366,7 +1366,7 @@ export async function generateScopedReportExportBuffer(
         validCount: w.validCount,
         adLeadCount: w.adLeadCount,
         adCost: w.adCost ?? null,
-        cpl: w.cpl ? Math.round(w.cpl) : null,
+        cpl: w.cpl !== null && w.cpl !== undefined ? Math.round(w.cpl) : null,
         wonCount: w.wonCount,
       })),
     },
@@ -1393,7 +1393,10 @@ export async function generateScopedReportExportBuffer(
         adCost: c.adCost ?? null,
         clicks: c.clicks,
         validAdLeads: c.validAttributedAdLeadCount,
-        cpl: c.costPerValidAdLead ? Math.round(c.costPerValidAdLead) : null,
+        cpl:
+          c.costPerValidAdLead !== null && c.costPerValidAdLead !== undefined
+            ? Math.round(c.costPerValidAdLead)
+            : null,
       })),
     },
     {

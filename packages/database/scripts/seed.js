@@ -1025,18 +1025,42 @@ async function seedSyntheticModuleData(usersByEmail) {
   });
 }
 
-async function main() {
+const LEGACY_DEMO_ACCOUNT_EMAILS = [
+  'admin@toantrung.vn',
+  'sales@toantrung.vn',
+  'sales2@toantrung.vn',
+  'marketing@toantrung.vn',
+  'designer@toantrung.vn',
+  'ads@toantrung.vn',
+  'mkt.lead@toantrung.vn',
+  'sales.lead@toantrung.vn',
+  'bod@toantrung.vn',
+];
+
+function resolveSeedMode() {
+  const args = process.argv.slice(2);
+  if (args.includes('--catalog-only')) return 'catalog';
+  if (args.includes('--demo')) return 'demo';
+  const envMode = (process.env.SEED_MODE || '').trim().toLowerCase();
+  if (envMode === 'demo' || envMode === 'catalog') return envMode;
+  if (process.env.NODE_ENV === 'production' || process.env.SKIP_SEED_ACCOUNTS === 'true') {
+    return 'catalog';
+  }
+  return 'catalog';
+}
+
+async function seedCatalogOnly(client = prisma) {
   for (const r of BA_ROLES) {
-    await prisma.role.upsert({
+    await client.role.upsert({
       where: { roleCode: r.roleCode },
       update: { roleName: r.roleName, description: r.description },
       create: r,
     });
   }
 
-  await syncAuthoritativeProducts(prisma);
+  await syncAuthoritativeProducts(client);
 
-  await prisma.systemSetting.deleteMany({
+  await client.systemSetting.deleteMany({
     where: {
       key: { in: UNAPPROVED_SLA_KEYS },
       updatedById: null,
@@ -1060,17 +1084,35 @@ async function main() {
   ];
 
   for (const s of defaultSettings) {
-    await prisma.systemSetting.upsert({
+    await client.systemSetting.upsert({
       where: { key: s.key },
       update: {},
       create: s,
     });
   }
+}
+
+async function main() {
+  const seedMode = resolveSeedMode();
+  await seedCatalogOnly(prisma);
 
   const isProductionEnv = process.env.NODE_ENV === 'production';
   const allowProdSeedAccounts = process.env.ALLOW_PRODUCTION_SEED_ACCOUNTS === 'true';
-  const shouldSeedAccounts =
-    process.env.SKIP_SEED_ACCOUNTS !== 'true' && (!isProductionEnv || allowProdSeedAccounts);
+
+  if (seedMode !== 'demo') {
+    console.log(
+      `[db:seed:catalog] Đã nạp 8 vai trò BA, ${BA_PRODUCTS_AUTHORITATIVE.length} sản phẩm chuẩn BA và cấu hình mặc định (KHÔNG tạo tài khoản hay dữ liệu Lead/Thiết kế mẫu).`,
+    );
+    return;
+  }
+
+  if (isProductionEnv && !allowProdSeedAccounts) {
+    throw new Error(
+      'Demo seed (--demo / SEED_MODE=demo) is forbidden in production without ALLOW_PRODUCTION_SEED_ACCOUNTS=true.',
+    );
+  }
+
+  const shouldSeedAccounts = process.env.SKIP_SEED_ACCOUNTS !== 'true';
   if (shouldSeedAccounts) {
     const configuredSeedPassword = (process.env.SEED_DEV_PASSWORD || '').trim();
     if (isProductionEnv && !configuredSeedPassword) {
@@ -1277,7 +1319,10 @@ module.exports = {
   BA_ROLES,
   BA_PRODUCTS_AUTHORITATIVE,
   UNAPPROVED_SLA_KEYS,
+  LEGACY_DEMO_ACCOUNT_EMAILS,
   syncAuthoritativeProducts,
+  seedCatalogOnly,
+  resolveSeedMode,
   main,
 };
 

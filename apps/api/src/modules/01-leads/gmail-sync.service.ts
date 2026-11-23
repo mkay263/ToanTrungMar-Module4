@@ -8,6 +8,10 @@ import {
 import { upsertActionableNotification } from '../../core/notifications/service';
 import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
 import {
+  acquireDurableJobLease,
+  releaseDurableJobLease,
+} from '../../core/jobs/durable-lease';
+import {
   getGoogleConnection,
   getValidAccessToken,
 } from '../02-tracking-sync/google-oauth.service';
@@ -814,7 +818,43 @@ export async function syncLeadsFromGmail(options?: {
     return globalForGmailSync.__gmailSyncInFlight;
   }
 
-  const runPromise = runSyncLeadsFromGmailInternal(options).finally(() => {
+  const runWithDurableLease = async (): Promise<GmailSyncRunResult> => {
+    const lease = await acquireDurableJobLease({
+      jobKey: 'gmail_lead_sync',
+      leaseTtlMs: 90_000,
+      checkpointNote: options?.mockMessages ? 'mock_gmail_sync' : 'live_gmail_sync',
+    });
+    if (!lease.acquired) {
+      return {
+        ok: true,
+        connectedEmail: options?.mockConnectedEmail ?? null,
+        message: 'Phiên đồng bộ Gmail khác đang chạy trên worker khác; bỏ qua để tránh trùng lặp.',
+        summary: { scanned: 0, created: 0, deduplicated: 0, skippedNoise: 0, failed: 0, error: null },
+        createdLeads: [],
+      };
+    }
+
+    try {
+      const res = await runSyncLeadsFromGmailInternal(options);
+      await releaseDurableJobLease({
+        jobKey: 'gmail_lead_sync',
+        ownerId: lease.ownerId,
+        status: res.ok ? 'completed' : 'failed',
+        checkpointNote: `scanned=${res.summary.scanned},created=${res.summary.created}`,
+      });
+      return res;
+    } catch (err) {
+      await releaseDurableJobLease({
+        jobKey: 'gmail_lead_sync',
+        ownerId: lease.ownerId,
+        status: 'failed',
+        checkpointNote: err instanceof Error ? err.message : 'gmail_sync_failed',
+      }).catch(() => undefined);
+      throw err;
+    }
+  };
+
+  const runPromise = runWithDurableLease().finally(() => {
     if (!options?.mockMessages) {
       globalForGmailSync.__gmailSyncInFlight = null;
     }

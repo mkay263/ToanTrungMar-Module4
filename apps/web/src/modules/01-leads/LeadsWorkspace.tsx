@@ -102,6 +102,7 @@ import {
   KANBAN_COLUMN_THEMES,
   STATUS_BADGE_STYLES,
   STATUS_ROW_ACCENTS,
+  normalizeWebsiteFilterParam,
   type B2bFollowUpHorizonKey,
   type FraudEvaluationResult,
   type LeadsFraudIndex,
@@ -226,18 +227,9 @@ export function LeadsWorkspace() {
     if (mappedSt && (mappedSt === 'all' || PIPELINE_STATUSES.includes(mappedSt as PipelineStatus))) {
       setStatusFilter(mappedSt);
     }
-    const normalizeWebParam = (raw: string): string => {
-      const low = raw.trim().toLowerCase();
-      if (low === 'ga4-508951192' || low === 'ga4_508951192' || low === '508951192') return 'bangdientu.com.vn';
-      if (low === 'ga4-512879968' || low === 'ga4_512879968' || low === '512879968') return 'toantrung.com.vn';
-      if (low === 'ga4-538179128' || low === 'ga4_538179128' || low === '538179128') return 'bangled.vn';
-      if (low === 'ga4-509190194' || low === 'ga4_509190194' || low === '509190194') return 'manhinhled.net.vn';
-      if (low === '__unresolved__' || low === 'missing') return '__unresolved__';
-      return low;
-    };
     const webParam = params.get('websiteId') || params.get('sourceWebsite');
     if (webParam && webParam.trim()) {
-      setSourceWebsiteFilter(normalizeWebParam(webParam));
+      setSourceWebsiteFilter(normalizeWebsiteFilterParam(webParam));
     }
     if (params.get('missingWebsite') === '1') {
       setSourceWebsiteFilter('__unresolved__');

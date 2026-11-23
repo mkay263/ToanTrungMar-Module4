@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { getSessionSecret } from '../config';
 
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12; // 96 bits for AES-GCM
@@ -16,28 +17,41 @@ function getDerivedKeyMemo(): Map<string, Buffer> {
   return globalVaultCache.__toantrungDerivedVaultKeys;
 }
 
-function getCandidateKeys(): Buffer[] {
+function deriveKeyForSecret(secret: string): Buffer {
+  const memo = getDerivedKeyMemo();
+  const hit = memo.get(secret);
+  if (hit) return hit;
+  const derived = crypto.scryptSync(secret, VAULT_SALT, 32);
+  memo.set(secret, derived);
+  return derived;
+}
+
+function getPrimaryVaultSecret(): string {
+  const explicitVaultKey = (process.env.VAULT_MASTER_KEY || '').trim();
+  if (explicitVaultKey && explicitVaultKey.length >= 32) {
+    return explicitVaultKey;
+  }
+  return getSessionSecret();
+}
+
+function getDecryptionCandidateKeys(): Buffer[] {
+  const primary = getPrimaryVaultSecret();
+  const sessionSecret = (process.env.SESSION_SECRET || '').trim();
+  // Keep legacy keys strictly for backward-compatible decryption/migration of previously encrypted records
   const secrets = [
-    process.env.SESSION_SECRET,
+    primary,
+    sessionSecret,
     'independent-toantrung-v2-local-session-secret-key-2026-hmac-sha256',
     'toantrung-v2-production-default-secret-key-2026',
     'toantrung-v2-fallback-dev-secret-2026',
   ].filter(Boolean) as string[];
 
-  // Memoize scryptSync output per secret across all requests & chunks to avoid ~240ms CPU stall per call
-  const memo = getDerivedKeyMemo();
   const unique = Array.from(new Set(secrets));
-  return unique.map((s) => {
-    const hit = memo.get(s);
-    if (hit) return hit;
-    const derived = crypto.scryptSync(s, VAULT_SALT, 32);
-    memo.set(s, derived);
-    return derived;
-  });
+  return unique.map(deriveKeyForSecret);
 }
 
 function getVaultKey(): Buffer {
-  return getCandidateKeys()[0];
+  return deriveKeyForSecret(getPrimaryVaultSecret());
 }
 
 /**
@@ -76,7 +90,7 @@ export function decryptSecret(cipherPayload: string): string {
   const iv = Buffer.from(ivHex, 'hex');
   const tag = Buffer.from(tagHex, 'hex');
 
-  for (const key of getCandidateKeys()) {
+  for (const key of getDecryptionCandidateKeys()) {
     try {
       const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
       decipher.setAuthTag(tag);

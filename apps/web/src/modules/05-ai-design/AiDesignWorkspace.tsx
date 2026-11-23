@@ -60,86 +60,19 @@ import {
 import { apiRequest } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { ModelRegistryModal } from './ModelRegistryModal';
-
-interface LeadOpt {
-  id: number;
-  leadCode: string;
-  label: string;
-}
-
-interface ProductOpt {
-  id: number;
-  code: string;
-  name: string;
-  categoryGroup: string;
-}
-
-interface ProviderStatusInfo {
-  provider: AiProviderId;
-  providerName: string;
-  isConfigured: boolean;
-  statusLabel: string;
-  activeModel: string;
-  costPerImageUsd: number;
-  supportsInpainting: boolean;
-  notes: string;
-  defaultProviderId?: AiProviderId;
-  defaultModelId?: string;
-  autoFallbackToLocal?: boolean;
-  availableProviders?: AiProviderCatalogItemDto[];
-  modelRegistry?: AiModelRegistrySnapshotDto;
-}
-
-type UniversalUseCaseCategory =
-  | 'general_photo'
-  | 'marketing_poster'
-  | 'space_architecture'
-  | 'led_screen'
-  | 'custom_other';
-
-interface ProjectParameterFormState {
-  projectName: string;
-  designType: DesignType;
-  useCaseCategory: UniversalUseCaseCategory;
-  customSubjectName: string;
-  editActionMode: 'inpaint_keep_bg' | 'enhance_retouch' | 'region_composite' | 'creative_redesign';
-  visualStylePreset: 'photorealistic' | 'modern_clean' | 'vivid_marketing' | 'luxury_arch' | 'custom';
-  dimensionUnit: 'auto_photo' | 'm' | 'cm' | 'mm' | 'px';
-  targetScopeMode: 'full_image' | 'touch_points';
-  leadId: string;
-  contactName: string;
-  installationInfo: string;
-  notes: string;
-  productId: number;
-  pixelPitch: string;
-  screenStyle: 'flat' | 'curved' | 'corner_90';
-  screenWidthM: number;
-  screenHeightM: number;
-  aspectRatio: string;
-  aspectLocked: boolean;
-  bannerWidthPx: number;
-  bannerHeightPx: number;
-}
-
-const STORAGE_SELECTED_PROJECT_KEY = 'tt_studio_selected_project_id';
-const STORAGE_UNIVERSAL_PARAMS_KEY = 'tt_studio_universal_params_v1';
-
-function parseAspectRatioValue(ratioStr: string): number | null {
-  const m = ratioStr.match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$/);
-  if (!m) return null;
-  const w = Number(m[1]);
-  const h = Number(m[2]);
-  if (!w || !h || h <= 0) return null;
-  return w / h;
-}
-
-function resolveAssetUrl(urlOrKey: string | null | undefined): string {
-  if (!urlOrKey) return '/brand/showroom-toan-trung.webp';
-  if (urlOrKey.startsWith('/') || urlOrKey.startsWith('http://') || urlOrKey.startsWith('https://')) {
-    return urlOrKey;
-  }
-  return `/api/v1/design/asset-file?key=${encodeURIComponent(urlOrKey)}`;
-}
+import {
+  STORAGE_SELECTED_PROJECT_KEY,
+  STORAGE_UNIVERSAL_PARAMS_KEY,
+  buildAutoDiscoveredModels,
+  parseAspectRatioValue,
+  resolveAssetUrl,
+  type CustomAiModelRegistryEntry,
+  type LeadOpt,
+  type ProductOpt,
+  type ProjectParameterFormState,
+  type ProviderStatusInfo,
+  type UniversalUseCaseCategory,
+} from './ai-workspace-helpers';
 
 export function AiDesignWorkspace() {
   const { user } = useSession();
@@ -237,126 +170,24 @@ export function AiDesignWorkspace() {
   } | null>(null);
 
   // Custom Employee-Added AI Models Registry (for future AI models)
-  const [customAiModels, setCustomAiModels] = useState<
-    Array<{
-      id: string;
-      name: string;
-      role: 'consultant' | 'image_gen' | 'both';
-      providerId: AiProviderId;
-      modelId: string;
-      apiKey?: string;
-      apiEndpoint?: string;
-      badge: string;
-      createdAt: string;
-    }>
-  >([]);
+  const [customAiModels, setCustomAiModels] = useState<CustomAiModelRegistryEntry[]>([]);
 
-  // API-Driven Model Registry: ONLY surfaces models from connected API keys, clearly classified by capability (Image Generation vs Chat/Vision)
-  const autoDiscoveredModels = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        id: string;
-        name: string;
-        badge: string;
-        providerId: AiProviderId;
-        providerLabel: string;
-        category: 'image' | 'chat';
-      }
-    >();
-    const cleanShortName = (rawName: string) =>
-      rawName
-        .replace(/\s*\([^)]*\)\s*/g, ' ')
-        .replace(/\s*—\s*\[[^\]]*\]\s*/g, '')
-        .trim();
-
-    const getProviderLabel = (pid: AiProviderId): string => {
-      if (pid === 'google_imagen') return 'Google API';
-      if (pid === 'openai_dalle') return 'OpenAI API';
-      if (pid === 'flux_bfl') return 'FLUX API';
-      if (pid === 'stability_ai') return 'Stability API';
-      if (pid === 'custom_endpoint') return 'Custom API';
-      return 'Nội bộ';
-    };
-
-    const classifyModel = (id: string, badge: string): 'image' | 'chat' => {
-      const lowerId = id.toLowerCase();
-      const lowerBadge = badge.toLowerCase();
-      if (
-        lowerId.includes('image') ||
-        lowerId.includes('imagen') ||
-        lowerId.includes('dall-e') ||
-        lowerId.includes('flux') ||
-        lowerId.includes('sd3') ||
-        lowerId.includes('sdxl') ||
-        lowerId.includes('studio-v3') ||
-        lowerBadge.includes('tạo & ghép ảnh') ||
-        lowerBadge.includes('@taoanh')
-      ) {
-        return 'image';
-      }
-      return 'chat';
-    };
-
-    const addModel = (
-      id: string,
-      name: string,
-      badge: string,
-      providerId: AiProviderId
-    ) => {
-      if (!id || map.has(id)) return;
-      const category = classifyModel(id, badge);
-      const normalizedBadge =
-        category === 'image' ? '🎨 Tạo & Ghép ảnh' : '💬 Chat & Phân tích ảnh';
-      map.set(id, {
-        id,
-        name: cleanShortName(name) || id,
-        badge: normalizedBadge,
-        providerId,
-        providerLabel: getProviderLabel(providerId),
-        category,
-      });
-    };
-
-    // 1. If user just ran a live API scan in this session, surface those exact models first
-    if (testAiResult?.discoveredModels && testAiResult.discoveredModels.length > 0) {
-      for (const m of testAiResult.discoveredModels) {
-        addModel(m.id, m.name, m.badge, testAiResult.providerId || 'google_imagen');
-      }
-    }
-
-    // 2. Read ONLY from providers that actually have an API key connected on the server
-    const connectedProviders = (providerStatus?.availableProviders || []).filter(
-      (p) => p.providerId !== 'local_sandbox' && p.hasApiKey && p.isConfigured
-    );
-    for (const prov of connectedProviders) {
-      for (const m of prov.models || []) {
-        addModel(m.id, m.name, m.badge, prov.providerId);
-      }
-    }
-
-    // 3. Any custom models explicitly added by staff
-    for (const cm of customAiModels) {
-      addModel(cm.modelId, cm.name, cm.badge || 'Custom', cm.providerId);
-    }
-
-    // 4. If no external API key is connected at all yet, provide only the active built-in fallback so the list is never bloated with unconnected providers
-    if (map.size === 0) {
-      addModel(
-        'gemini-3.5-flash-lite',
-        'Gemini 3.5 Flash (Chờ gắn API Key)',
-        '💬 Chat & Phân tích ảnh',
-        'google_imagen'
-      );
-    }
-
-    return Array.from(map.values());
-  }, [
-    providerStatus?.availableProviders,
-    testAiResult?.discoveredModels,
-    testAiResult?.providerId,
-    customAiModels,
-  ]);
+  // API-Driven Model Registry: ONLY surfaces models from connected API keys, clearly classified by capability
+  const autoDiscoveredModels = useMemo(
+    () =>
+      buildAutoDiscoveredModels({
+        availableProviders: providerStatus?.availableProviders,
+        testResultModels: testAiResult?.discoveredModels,
+        testResultProviderId: testAiResult?.providerId,
+        customAiModels,
+      }),
+    [
+      providerStatus?.availableProviders,
+      testAiResult?.discoveredModels,
+      testAiResult?.providerId,
+      customAiModels,
+    ]
+  );
   const [newCustomAiName, setNewCustomAiName] = useState('');
   const [newCustomAiRole, setNewCustomAiRole] = useState<'consultant' | 'image_gen' | 'both'>('both');
   const [newCustomAiProvider, setNewCustomAiProvider] = useState<AiProviderId>('google_imagen');
@@ -375,7 +206,7 @@ export function AiDesignWorkspace() {
           const scrubbed = parsed.map((item: Record<string, unknown>) => {
             const { apiKey: _droppedKey, ...safeItem } = item;
             return safeItem;
-          }) as typeof customAiModels;
+          }) as unknown as typeof customAiModels;
           setCustomAiModels(scrubbed);
           window.localStorage.setItem('toantrung_custom_ai_models_v1', JSON.stringify(scrubbed));
         }

@@ -175,7 +175,7 @@ export async function GET(request: Request) {
       ).length;
 
       const ctrRatio = impressions > 0 ? Number((clicks / impressions).toFixed(4)) : 0;
-      const cplVnd = crmLeadsL3 > 0 && spendVnd > 0 ? Math.round(spendVnd / crmLeadsL3) : 0;
+      const cplVnd = crmLeadsL3 > 0 ? Math.round(spendVnd / crmLeadsL3) : null;
 
       return {
         stt: idx + 1,
@@ -210,7 +210,7 @@ export async function GET(request: Request) {
     const totalWon = campaignRows.reduce((s, r) => s + r.wonCount, 0);
     const aggregateCtr =
       totalImpressions > 0 ? Number((totalClicks / totalImpressions).toFixed(4)) : 0;
-    const aggregateCpl = totalCrmL3 > 0 && totalSpend > 0 ? Math.round(totalSpend / totalCrmL3) : 0;
+    const aggregateCpl = totalCrmL3 > 0 ? Math.round(totalSpend / totalCrmL3) : null;
 
     const buffer = buildStandardXlsxBuffer([
       {
@@ -226,7 +226,7 @@ export async function GET(request: Request) {
           { label: 'Tổng Chi Phí Ads (VNĐ)', value: totalSpend.toLocaleString('vi-VN') },
           { label: 'Chuyển Đổi Nền Tảng', value: totalPlatformConv },
           { label: 'Lead CRM Thực Tế (L3)', value: totalCrmL3 },
-          { label: 'CPL Thực Tế (VNĐ/Lead)', value: aggregateCpl.toLocaleString('vi-VN') },
+          { label: 'CPL Thực Tế (VNĐ/Lead)', value: aggregateCpl !== null ? aggregateCpl.toLocaleString('vi-VN') : 'Chưa có Lead hợp lệ' },
           { label: 'Hợp Đồng Thành Công (Won)', value: totalWon },
         ],
         columns: [

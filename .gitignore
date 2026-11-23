@@ -6,6 +6,8 @@ build/
 coverage/
 *.log
 *.tsbuildinfo
+# Prisma generated Postgres client (regenerated per target OS by npm run db:generate)
+packages/database/generated/
 # Local database & protected upload storage
 *.db
 *.db-journal

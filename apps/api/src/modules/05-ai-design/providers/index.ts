@@ -21,6 +21,7 @@ import type {
 } from '@toantrung/contracts';
 import { bumpDomainRevisions } from '../../../core/cache/server-data-cache';
 import { APP_CONFIG } from '../../../core/config';
+import { decryptSecret, encryptSecret } from '../../../core/security/vault';
 import { GoogleImagenProvider } from './google-imagen.provider';
 import { OpenAiImageProvider } from './openai-image.provider';
 import { UniversalCloudAiProvider } from './universal-cloud.provider';
@@ -86,6 +87,38 @@ function getConfigFilePath(): string {
   return path.join(dir, 'multi-ai-providers.json');
 }
 
+function decryptStoredProviders(
+  providers: Partial<Record<AiProviderId, StoredProviderEntry>> | undefined,
+): Partial<Record<AiProviderId, StoredProviderEntry>> {
+  const out: Partial<Record<AiProviderId, StoredProviderEntry>> = {};
+  if (!providers || typeof providers !== 'object') return out;
+  for (const [k, entry] of Object.entries(providers)) {
+    if (!entry) continue;
+    const decryptedKey = entry.apiKey ? decryptSecret(entry.apiKey) || entry.apiKey : entry.apiKey;
+    out[k as AiProviderId] = {
+      ...entry,
+      ...(decryptedKey ? { apiKey: decryptedKey } : {}),
+    };
+  }
+  return out;
+}
+
+function encryptStoredProviders(
+  providers: Partial<Record<AiProviderId, StoredProviderEntry>> | undefined,
+): Partial<Record<AiProviderId, StoredProviderEntry>> {
+  const out: Partial<Record<AiProviderId, StoredProviderEntry>> = {};
+  if (!providers || typeof providers !== 'object') return out;
+  for (const [k, entry] of Object.entries(providers)) {
+    if (!entry) continue;
+    const rawKey = (entry.apiKey || '').trim();
+    out[k as AiProviderId] = {
+      ...entry,
+      ...(rawKey ? { apiKey: encryptSecret(rawKey) } : {}),
+    };
+  }
+  return out;
+}
+
 function readStoredConfig(): StoredMultiAiConfig {
   try {
     const file = getConfigFilePath();
@@ -102,7 +135,7 @@ function readStoredConfig(): StoredMultiAiConfig {
       defaultProviderId: parsed.defaultProviderId || 'google_imagen',
       defaultModelId: parsed.defaultModelId || 'imagen-3.0-generate-002',
       autoFallbackToLocal: parsed.autoFallbackToLocal ?? true,
-      providers: parsed.providers || {},
+      providers: decryptStoredProviders(parsed.providers),
     };
     globalForMultiAiConfig.__toantrungMultiAiConfigCache = {
       filePath: file,
@@ -119,7 +152,11 @@ function writeStoredConfig(config: StoredMultiAiConfig): void {
   try {
     const file = getConfigFilePath();
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8');
+    const encryptedDiskPayload: StoredMultiAiConfig = {
+      ...config,
+      providers: encryptStoredProviders(config.providers),
+    };
+    fs.writeFileSync(file, JSON.stringify(encryptedDiskPayload, null, 2), 'utf-8');
     const stat = fs.statSync(file);
     globalForMultiAiConfig.__toantrungMultiAiConfigCache = {
       filePath: file,
@@ -130,6 +167,30 @@ function writeStoredConfig(config: StoredMultiAiConfig): void {
   } catch {
     // Ignore write failure in read-only test environments
   }
+}
+
+export function migrateStoredAiKeysToVault(): {
+  migratedCount: number;
+  alreadyEncryptedCount: number;
+} {
+  const file = getConfigFilePath();
+  if (!fs.existsSync(file)) {
+    return { migratedCount: 0, alreadyEncryptedCount: 0 };
+  }
+  const rawParsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<StoredMultiAiConfig>;
+  let migratedCount = 0;
+  let alreadyEncryptedCount = 0;
+  for (const entry of Object.values(rawParsed.providers || {})) {
+    const k = (entry?.apiKey || '').trim();
+    if (!k) continue;
+    if (k.startsWith('vault$v1$')) alreadyEncryptedCount += 1;
+    else migratedCount += 1;
+  }
+  if (migratedCount > 0) {
+    const normalized = readStoredConfig();
+    writeStoredConfig(normalized);
+  }
+  return { migratedCount, alreadyEncryptedCount };
 }
 
 function maskKey(key: string | null | undefined): string | null {

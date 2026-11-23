@@ -270,3 +270,46 @@ export function deletePrivateBusinessFile(storageObjectKeyOrPath: string): void 
   }
 }
 
+export interface BackupBusinessFileEntry {
+  relativeKey: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+const BUSINESS_FILE_BUCKETS = ['leads', 'design', 'avatars', 'branding', 'reports'] as const;
+
+export function copyAndHashBusinessFilesForBackup(backupFilesDir: string): BackupBusinessFileEntry[] {
+  const rootResolved = path.resolve(APP_CONFIG.getStorageRoot());
+  const manifestEntries: BackupBusinessFileEntry[] = [];
+  fs.mkdirSync(backupFilesDir, { recursive: true });
+
+  for (const bucket of BUSINESS_FILE_BUCKETS) {
+    const srcBucketDir = path.join(rootResolved, bucket);
+    if (!fs.existsSync(srcBucketDir) || !fs.statSync(srcBucketDir).isDirectory()) continue;
+
+    const stack: string[] = [srcBucketDir];
+    while (stack.length > 0) {
+      const currentDir = stack.pop()!;
+      for (const entry of fs.readdirSync(currentDir, { withFileTypes: true })) {
+        const fullSrcPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(fullSrcPath);
+        } else if (entry.isFile()) {
+          const relKey = path.relative(rootResolved, fullSrcPath).replace(/\\/g, '/');
+          const destPath = path.join(backupFilesDir, relKey);
+          fs.mkdirSync(path.dirname(destPath), { recursive: true });
+          const buf = fs.readFileSync(fullSrcPath);
+          fs.writeFileSync(destPath, buf);
+          manifestEntries.push({
+            relativeKey: relKey,
+            sizeBytes: buf.length,
+            sha256: crypto.createHash('sha256').update(buf).digest('hex'),
+          });
+        }
+      }
+    }
+  }
+
+  return manifestEntries.sort((a, b) => a.relativeKey.localeCompare(b.relativeKey));
+}
+

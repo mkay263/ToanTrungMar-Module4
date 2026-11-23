@@ -10,6 +10,7 @@ import type {
   SelectGoogleResourcesDto,
 } from '@toantrung/contracts';
 import { encryptSecret, decryptSecret, maskSecret } from '../../core/security/vault';
+import { getSessionSecret } from '../../core/config';
 import { safeSecretEquals } from '../../core/http';
 import { getCanonicalDateRange, countInclusiveCalendarDays } from '../../core/reporting-dates';
 import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
@@ -748,11 +749,7 @@ export async function saveSelectedResources(input: {
 const OAUTH_STATE_MAX_AGE_MS = 15 * 60 * 1000;
 
 function getOAuthStateHmacSecret(): string {
-  return (
-    process.env.SESSION_SECRET ||
-    process.env.VAULT_MASTER_KEY ||
-    'tt-v2-google-oauth-state-hmac-2026'
-  );
+  return (process.env.VAULT_MASTER_KEY || '').trim() || getSessionSecret();
 }
 
 export function sanitizeOAuthReturnPath(rawPath?: string | null): string {

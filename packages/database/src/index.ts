@@ -124,6 +124,11 @@ const SQLITE_HOT_INDEX_SQL: string[] = [
   'CREATE INDEX IF NOT EXISTS "design_requests_created_at_idx" ON "design_requests"("created_at")',
   'CREATE INDEX IF NOT EXISTS "design_requests_assigned_designer_id_idx" ON "design_requests"("assigned_designer_id")',
   'CREATE INDEX IF NOT EXISTS "design_requests_requested_by_sales_id_idx" ON "design_requests"("requested_by_sales_id")',
+  'CREATE TABLE IF NOT EXISTS "tracking_touchpoints" ("id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "event_id" TEXT NOT NULL, "event_type" TEXT NOT NULL, "source_website" TEXT NOT NULL, "page_url" TEXT, "lead_code" TEXT, "submission_id" TEXT, "visitor_id" TEXT, "occurred_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)',
+  'CREATE UNIQUE INDEX IF NOT EXISTS "tracking_touchpoints_event_id_key" ON "tracking_touchpoints"("event_id")',
+  'CREATE INDEX IF NOT EXISTS "tracking_touchpoints_source_website_occurred_at_idx" ON "tracking_touchpoints"("source_website", "occurred_at")',
+  'CREATE INDEX IF NOT EXISTS "tracking_touchpoints_occurred_at_idx" ON "tracking_touchpoints"("occurred_at")',
+  'CREATE INDEX IF NOT EXISTS "tracking_touchpoints_submission_id_idx" ON "tracking_touchpoints"("submission_id")',
 ];
 
 export async function ensureSqlitePerformanceReady(client: PrismaClient): Promise<void> {

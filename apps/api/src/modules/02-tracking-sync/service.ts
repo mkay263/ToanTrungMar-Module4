@@ -322,6 +322,7 @@ export async function ingestWebhookLeadWithErrorProtection(input: WebhookLeadInt
             },
           });
         });
+        bumpDomainRevisions(['leads', 'tracking', 'reports', 'ads', 'notifications'], 'webhook_lead_ingested');
       }
 
       return {
@@ -606,6 +607,7 @@ interface StoredTouchpointRecord {
 const globalForTrackingLocks = globalThis as unknown as {
   __toantrungTouchpointWriteQueue?: Promise<unknown>;
   __toantrungWebhookIntakeQueue?: Promise<unknown>;
+  __toantrungTouchpointMigrationDone?: boolean;
 };
 
 function withSerializedTouchpointLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -622,17 +624,91 @@ function withSerializedWebhookIntakeLock<T>(fn: () => Promise<T>): Promise<T> {
   return next;
 }
 
-export async function getStoredTouchpoints(): Promise<StoredTouchpointRecord[]> {
-  const row = await prisma.systemSetting.findUnique({
+export async function migrateLegacyTouchpointsSettingToTable(): Promise<{
+  migratedCount: number;
+  skippedCount: number;
+}> {
+  const legacyRow = await prisma.systemSetting.findUnique({
     where: { key: SETTING_KEY_TOUCHPOINTS },
   });
-  if (!row?.value) return [];
-  try {
-    const arr = JSON.parse(row.value);
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
+  if (!legacyRow?.value) {
+    globalForTrackingLocks.__toantrungTouchpointMigrationDone = true;
+    return { migratedCount: 0, skippedCount: 0 };
   }
+
+  let parsed: unknown = [];
+  try {
+    parsed = JSON.parse(legacyRow.value);
+  } catch {
+    return { migratedCount: 0, skippedCount: 0 };
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    globalForTrackingLocks.__toantrungTouchpointMigrationDone = true;
+    return { migratedCount: 0, skippedCount: 0 };
+  }
+
+  let migratedCount = 0;
+  let skippedCount = 0;
+
+  for (const rawItem of parsed) {
+    if (!rawItem || typeof rawItem !== 'object') continue;
+    const item = rawItem as Partial<StoredTouchpointRecord>;
+    const eventId = typeof item.eventId === 'string' ? item.eventId.trim() : '';
+    if (!eventId) continue;
+
+    const occurredDate = item.occurredAt ? new Date(item.occurredAt) : new Date();
+    const validOccurredAt = Number.isNaN(occurredDate.getTime()) ? new Date() : occurredDate;
+
+    try {
+      await prisma.trackingTouchpoint.create({
+        data: {
+          eventId,
+          eventType: item.eventType || 'product_view',
+          sourceWebsite:
+            normalizeWebsiteDomain(item.sourceWebsite) ||
+            String(item.sourceWebsite || 'unknown').trim().toLowerCase(),
+          pageUrl: item.pageUrl?.trim() || null,
+          leadCode: item.leadCode?.trim() || null,
+          submissionId: item.submissionId?.trim() || null,
+          visitorId: item.visitorId?.trim() || null,
+          occurredAt: validOccurredAt,
+        },
+      });
+      migratedCount += 1;
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'P2002') {
+        skippedCount += 1;
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  globalForTrackingLocks.__toantrungTouchpointMigrationDone = true;
+  return { migratedCount, skippedCount };
+}
+
+export async function getStoredTouchpoints(): Promise<StoredTouchpointRecord[]> {
+  if (!globalForTrackingLocks.__toantrungTouchpointMigrationDone) {
+    await withSerializedTouchpointLock(() => migrateLegacyTouchpointsSettingToTable());
+  }
+
+  const rows = await prisma.trackingTouchpoint.findMany({
+    orderBy: [{ occurredAt: 'desc' }, { id: 'desc' }],
+    take: 5000,
+  });
+
+  return rows.map((r) => ({
+    eventId: r.eventId,
+    eventType: (r.eventType as StoredTouchpointRecord['eventType']) || 'product_view',
+    sourceWebsite: r.sourceWebsite,
+    pageUrl: r.pageUrl,
+    leadCode: r.leadCode,
+    submissionId: r.submissionId,
+    visitorId: r.visitorId,
+    occurredAt: r.occurredAt.toISOString(),
+  }));
 }
 
 export async function recordTrackingTouchpoint(input: {
@@ -647,10 +723,12 @@ export async function recordTrackingTouchpoint(input: {
 }): Promise<{ ok: true; deduplicated: boolean; linkedLeadCode: string | null }> {
   return withSerializedTouchpointLock(async () => {
     const normalizedEventId = input.eventId.trim();
-    const existing = await getStoredTouchpoints();
-    const found = existing.find((e) => e.eventId === normalizedEventId);
-    if (found) {
-      return { ok: true, deduplicated: true, linkedLeadCode: found.leadCode };
+    const existingRow = await prisma.trackingTouchpoint.findUnique({
+      where: { eventId: normalizedEventId },
+      select: { leadCode: true },
+    });
+    if (existingRow) {
+      return { ok: true, deduplicated: true, linkedLeadCode: existingRow.leadCode };
     }
 
     let linkedLeadCode = input.leadCode?.trim() || null;
@@ -662,28 +740,40 @@ export async function recordTrackingTouchpoint(input: {
       linkedLeadCode = matchedTracking?.lead?.leadCode || null;
     }
 
-    const record: StoredTouchpointRecord = {
-      eventId: normalizedEventId,
-      eventType: input.eventType,
-      sourceWebsite:
-        normalizeWebsiteDomain(input.sourceWebsite) || input.sourceWebsite.trim().toLowerCase(),
-      pageUrl: input.pageUrl?.trim() || null,
-      leadCode: linkedLeadCode,
-      submissionId: input.submissionId?.trim() || null,
-      visitorId: input.visitorId?.trim() || null,
-      occurredAt: input.occurredAt?.trim() || new Date().toISOString(),
-    };
+    const occurredDate = input.occurredAt?.trim() ? new Date(input.occurredAt.trim()) : new Date();
+    const validOccurredAt = Number.isNaN(occurredDate.getTime()) ? new Date() : occurredDate;
 
-    const next = [record, ...existing].slice(0, 500);
-    await prisma.systemSetting.upsert({
-      where: { key: SETTING_KEY_TOUCHPOINTS },
-      update: { value: JSON.stringify(next) },
-      create: {
-        key: SETTING_KEY_TOUCHPOINTS,
-        value: JSON.stringify(next),
-      },
-    });
+    try {
+      await prisma.trackingTouchpoint.create({
+        data: {
+          eventId: normalizedEventId,
+          eventType: input.eventType,
+          sourceWebsite:
+            normalizeWebsiteDomain(input.sourceWebsite) || input.sourceWebsite.trim().toLowerCase(),
+          pageUrl: input.pageUrl?.trim() || null,
+          leadCode: linkedLeadCode,
+          submissionId: input.submissionId?.trim() || null,
+          visitorId: input.visitorId?.trim() || null,
+          occurredAt: validOccurredAt,
+        },
+      });
+    } catch (err) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'P2002') {
+        const winner = await prisma.trackingTouchpoint.findUnique({
+          where: { eventId: normalizedEventId },
+          select: { leadCode: true },
+        });
+        return {
+          ok: true,
+          deduplicated: true,
+          linkedLeadCode: winner?.leadCode ?? linkedLeadCode,
+        };
+      }
+      throw err;
+    }
 
+    bumpDomainRevisions(['tracking', 'reports'], 'touchpoint_recorded');
     return { ok: true, deduplicated: false, linkedLeadCode };
   });
 }

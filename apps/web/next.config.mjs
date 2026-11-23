@@ -2,6 +2,9 @@
 const nextConfig = {
   reactStrictMode: false,
   transpilePackages: ['@toantrung/contracts', '@toantrung/api', '@toantrung/database'],
+  images: {
+    unoptimized: true,
+  },
   experimental: {
     externalDir: true,
     instrumentationHook: true,

@@ -429,6 +429,7 @@ export async function listLeadsForUser(
     pageSize?: number;
     limit?: number;
     cursorId?: number;
+    bypassCache?: boolean;
   },
 ): Promise<{
   leads: LeadItemDto[];
@@ -569,6 +570,7 @@ export async function listLeadsForUser(
     key: `m01-leads:${filterKey}`,
     domains: ['leads', 'design', 'auth'],
     ttlMs: 15_000,
+    bypassCache: filters?.bypassCache,
     compute: async () => {
       const [rows, totalCount, { products, salesOptions }, alertRows, gmailCfgRow] = await Promise.all([
         prisma.lead.findMany({
@@ -964,6 +966,7 @@ export async function exportAllLeadsForUser(
   const BATCH_SIZE = 500;
   const MAX_BATCHES = 200; // up to 100,000 records in bounded chunks
   const allLeads: LeadItemDto[] = [];
+  const seenIds = new Set<number>();
   let currentPage = 1;
   let totalCount = 0;
 
@@ -972,13 +975,25 @@ export async function exportAllLeadsForUser(
       ...filters,
       page: currentPage,
       pageSize: BATCH_SIZE,
+      bypassCache: true,
     });
     totalCount = batch.totalCount;
-    allLeads.push(...batch.leads);
+    for (const item of batch.leads) {
+      if (!seenIds.has(item.id)) {
+        seenIds.add(item.id);
+        allLeads.push(item);
+      }
+    }
     if (batch.leads.length < BATCH_SIZE || allLeads.length >= batch.totalCount) {
       break;
     }
     currentPage += 1;
+  }
+
+  if (totalCount > BATCH_SIZE * MAX_BATCHES && allLeads.length < totalCount) {
+    throw new Error(
+      `LEAD_EXPORT_LIMIT_EXCEEDED: Bộ lọc hiện khớp ${totalCount.toLocaleString('vi-VN')} Lead, vượt ngưỡng xuất 1 lần (${(BATCH_SIZE * MAX_BATCHES).toLocaleString('vi-VN')} Lead). Vui lòng thu hẹp bộ lọc trước khi tải.`,
+    );
   }
 
   return { leads: allLeads, totalCount };
@@ -1141,7 +1156,9 @@ export async function createManualLead(actor: SessionUserDto, input: CreateManua
         },
       })
       .catch(() => null);
-    bumpDomainRevisions(['leads', 'notifications'], 'lead_created_and_reassigned');
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads', 'notifications'], 'lead_created_and_reassigned');
+  } else {
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_created');
   }
 
   return ingested.lead;
@@ -1344,7 +1361,7 @@ export async function transitionLeadPipeline(
     !existing.receivedAt && (input.toStatus === 'quoting' || input.toStatus === 'lost');
 
   // Không ghi quoteValueVnd/dealValueVnd: quy tắc không công khai giá. Giá trị cũ trong DB được giữ nguyên.
-  return transitionLeadWithVersion(prisma, {
+  const updated = await transitionLeadWithVersion(prisma, {
     leadId,
     expectedVersion: input.expectedVersion,
     patch: {
@@ -1379,6 +1396,8 @@ export async function transitionLeadPipeline(
           : `Chuyển trạng thái Pipeline từ ${existing.pipelineStatus} sang ${input.toStatus}`),
     },
   });
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_pipeline_transition');
+  return updated;
 }
 
 export async function reassignLeadSales(
@@ -1493,7 +1512,7 @@ export async function markLeadSpam(
     input.spamReason === 'Nhầm máy' ||
     input.spamReason === 'Sai số';
 
-  return transitionLeadWithVersion(prisma, {
+  const updated = await transitionLeadWithVersion(prisma, {
     leadId,
     expectedVersion: input.expectedVersion,
     patch: {
@@ -1512,6 +1531,8 @@ export async function markLeadSpam(
         }${input.noteContent ? ` · ${input.noteContent}` : ''}`,
     },
   });
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_marked_spam');
+  return updated;
 }
 
 export async function createPrivateQuoteVersion(
@@ -1566,7 +1587,7 @@ export async function createPrivateQuoteVersion(
     bypassPriceCheckConfirmed: Boolean(input.bypassPriceCheckConfirmed),
   });
 
-  return transitionLeadWithVersion(prisma, {
+  const updated = await transitionLeadWithVersion(prisma, {
     leadId,
     expectedVersion: input.expectedVersion,
     patch: {
@@ -1586,6 +1607,8 @@ export async function createPrivateQuoteVersion(
       note: `Ghi nhận báo giá ${quoteCode} (Lần ${versionNumber}): ${input.scopeSummary.trim()}`,
     },
   });
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads'], 'lead_quote_version_created');
+  return updated;
 }
 
 export async function uploadLeadAttachment(params: {
