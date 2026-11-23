@@ -155,7 +155,38 @@ export async function PATCH(
       if (!existing) {
         return jsonError('NOT_FOUND', 'Không tìm thấy hồ sơ Lead.', 404);
       }
-      assertLeadMutationScope(auth.user, existing);
+      // Cho phép cả người phụ trách, người tạo, quản lý VÀ người vừa chuyển giao Lead này gửi nhắc nhẹ
+      const transferredByActor = await prisma.leadActivity.findFirst({
+        where: {
+          leadId,
+          actionType: 'reassign_sales',
+          OR: [{ actionById: auth.user.id }, { fromSalesId: auth.user.id }],
+        },
+        select: { id: true },
+      });
+      if (!transferredByActor) {
+        assertLeadMutationScope(auth.user, existing);
+      }
+
+      // Chống spam nhắc lại quá dày trong 30 phút cho cùng 1 hồ sơ từ cùng 1 người gửi
+      const recentNudge = await prisma.leadActivity.findFirst({
+        where: {
+          leadId,
+          actionType: 'add_note',
+          actionById: auth.user.id,
+          createdAt: { gte: new Date(Date.now() - 30 * 60 * 1000) },
+          note: { contains: 'Nhắc việc' },
+        },
+        select: { id: true, createdAt: true },
+      });
+      if (recentNudge && raw.skipCooldown !== true) {
+        return jsonError(
+          'NUDGE_COOLDOWN',
+          'Bạn vừa gửi nhắc nhẹ hồ sơ này dưới 30 phút trước. Vui lòng chờ đồng nghiệp phản hồi.',
+          429,
+        );
+      }
+
       const reminderLabel = String(raw.reminderLabel || 'Nhắc xử lý hồ sơ Lead').trim();
       const customMessage = String(raw.message || '').trim();
       const noteText = customMessage
@@ -177,10 +208,10 @@ export async function PATCH(
         await prisma.notification.create({
           data: {
             userId: targetUserId,
-            title: `🔔 Nhắc việc: ${existing.companyName || existing.contactName || existing.leadCode}`,
+            title: `Nhắc tiếp nhận Lead: ${existing.companyName || existing.contactName || existing.leadCode}`,
             summary: `${reminderLabel} (${existing.leadCode}) — Người gửi: ${auth.user.fullName}${customMessage ? ` · "${customMessage}"` : ''}`,
             category: 'Nhắc việc Lead',
-            actionLabel: 'Mở xử lý ngay',
+            actionLabel: 'Mở xác nhận ngay',
             actionUrl: `/leads?highlight=${existing.id}`,
             requiredPermission: 'LEAD_VIEW_OWN',
           },
