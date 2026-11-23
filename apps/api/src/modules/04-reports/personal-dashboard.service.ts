@@ -106,6 +106,26 @@ function extractScheduledDate(note: string | null | undefined): string | null {
   return match ? match[1] : null;
 }
 
+function formatCleanActorName(fullName?: string | null, actorRef?: string | null): string {
+  if (fullName && fullName.trim()) return fullName.trim();
+  const ref = (actorRef || '').trim();
+  if (!ref) return 'Hệ thống';
+  if (ref.toLowerCase().startsWith('website_webhook:') || ref.toLowerCase().startsWith('webhook:')) {
+    const domain = ref.split(':').slice(1).join(':').replace(/^https?:\/\//i, '').replace(/^www\./i, '').trim();
+    return domain ? `Web ${domain}` : 'Biểu mẫu Website';
+  }
+  if (ref.toLowerCase().startsWith('gmail_sync:')) {
+    return 'Đồng bộ Gmail';
+  }
+  if (ref.toLowerCase().startsWith('google_lead_form')) {
+    return 'Form Google Ads';
+  }
+  if (ref.includes('@')) {
+    return 'Đồng bộ tự động';
+  }
+  return ref;
+}
+
 export async function getPersonalDashboardData(
   user: SessionUserDto,
 ): Promise<PersonalDashboardDto> {
@@ -139,174 +159,174 @@ export async function getPersonalDashboardData(
   ] = await Promise.all([
     canManageLeads
       ? prisma.lead.findMany({
-          where: {
-            assignedSalesId: user.id,
-            receivedAt: null,
-            isSpam: false,
-            pipelineStatus: { in: openStatuses },
-          },
-          orderBy: { updatedAt: 'desc' },
-          take: 15,
-          include: {
-            assignedSales: { select: { fullName: true } },
-            activities: {
-              where: { actionType: { in: ['reassign_sales', 'auto_reassign', 'create_lead'] } },
-              orderBy: { createdAt: 'desc' },
-              take: 3,
-              include: {
-                actionBy: { select: { fullName: true } },
-                fromSales: { select: { fullName: true } },
-              },
+        where: {
+          assignedSalesId: user.id,
+          receivedAt: null,
+          isSpam: false,
+          pipelineStatus: { in: openStatuses },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 15,
+        include: {
+          assignedSales: { select: { fullName: true } },
+          activities: {
+            where: { actionType: { in: ['reassign_sales', 'auto_reassign', 'create_lead'] } },
+            orderBy: { createdAt: 'desc' },
+            take: 3,
+            include: {
+              actionBy: { select: { fullName: true } },
+              fromSales: { select: { fullName: true } },
             },
           },
-        })
+        },
+      })
       : Promise.resolve([]),
 
     canManageLeads
       ? prisma.leadActivity.findMany({
-          where: {
-            actionType: 'reassign_sales',
-            OR: [{ actionById: user.id }, { fromSalesId: user.id }],
-            lead: {
-              receivedAt: null,
-              isSpam: false,
-              pipelineStatus: { in: openStatuses },
-              NOT: { assignedSalesId: user.id },
-            },
+        where: {
+          actionType: 'reassign_sales',
+          OR: [{ actionById: user.id }, { fromSalesId: user.id }],
+          lead: {
+            receivedAt: null,
+            isSpam: false,
+            pipelineStatus: { in: openStatuses },
+            NOT: { assignedSalesId: user.id },
           },
-          orderBy: { createdAt: 'desc' },
-          take: 20,
-          include: {
-            toSales: { select: { fullName: true } },
-            lead: {
-              include: {
-                assignedSales: { select: { fullName: true } },
-                activities: {
-                  where: {
-                    actionType: 'add_note',
-                    createdAt: { gte: thirtyMinAgo },
-                    note: { contains: 'Nhắc việc' },
-                  },
-                  take: 1,
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 20,
+        include: {
+          toSales: { select: { fullName: true } },
+          lead: {
+            include: {
+              assignedSales: { select: { fullName: true } },
+              activities: {
+                where: {
+                  actionType: 'add_note',
+                  createdAt: { gte: thirtyMinAgo },
+                  note: { contains: 'Nhắc việc' },
                 },
+                take: 1,
               },
             },
           },
-        })
+        },
+      })
       : Promise.resolve([]),
 
     isManagerRole
       ? prisma.lead.findMany({
-          where: {
-            receivedAt: null,
-            isSpam: false,
-            pipelineStatus: { in: openStatuses },
-            assignedSalesId: { not: null },
-            updatedAt: { lte: fourHoursAgo },
-          },
-          orderBy: { updatedAt: 'asc' },
-          take: 6,
-          include: {
-            assignedSales: { select: { fullName: true } },
-            activities: {
-              where: { actionType: 'reassign_sales' },
-              orderBy: { createdAt: 'desc' },
-              take: 1,
-              include: {
-                actionBy: { select: { fullName: true } },
-                fromSales: { select: { fullName: true } },
-              },
+        where: {
+          receivedAt: null,
+          isSpam: false,
+          pipelineStatus: { in: openStatuses },
+          assignedSalesId: { not: null },
+          updatedAt: { lte: fourHoursAgo },
+        },
+        orderBy: { updatedAt: 'asc' },
+        take: 6,
+        include: {
+          assignedSales: { select: { fullName: true } },
+          activities: {
+            where: { actionType: 'reassign_sales' },
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            include: {
+              actionBy: { select: { fullName: true } },
+              fromSales: { select: { fullName: true } },
             },
           },
-        })
+        },
+      })
       : Promise.resolve([]),
 
     canManageLeads
       ? prisma.lead.findMany({
-          where: {
-            assignedSalesId: user.id,
-            isSpam: false,
-            pipelineStatus: { in: openStatuses },
+        where: {
+          assignedSalesId: user.id,
+          isSpam: false,
+          pipelineStatus: { in: openStatuses },
+        },
+        orderBy: { updatedAt: 'desc' },
+        take: 80,
+        select: {
+          id: true,
+          leadCode: true,
+          companyName: true,
+          contactName: true,
+          phone: true,
+          projectName: true,
+          pipelineStatus: true,
+          firstQuoteSentAt: true,
+          quoteRespondedAt: true,
+          contactedAt: true,
+          leadProducts: {
+            select: { noteSpecification: true },
+            take: 3,
           },
-          orderBy: { updatedAt: 'desc' },
-          take: 80,
-          select: {
-            id: true,
-            leadCode: true,
-            companyName: true,
-            contactName: true,
-            phone: true,
-            projectName: true,
-            pipelineStatus: true,
-            firstQuoteSentAt: true,
-            quoteRespondedAt: true,
-            contactedAt: true,
-            leadProducts: {
-              select: { noteSpecification: true },
-              take: 3,
-            },
-            activities: {
-              where: { note: { contains: '[HẸN' } },
-              orderBy: { createdAt: 'desc' },
-              take: 2,
-              select: { note: true },
-            },
+          activities: {
+            where: { note: { contains: '[HẸN' } },
+            orderBy: { createdAt: 'desc' },
+            take: 2,
+            select: { note: true },
           },
-        })
+        },
+      })
       : Promise.resolve([]),
 
     canViewLeads
       ? prisma.lead.count({
-          where: {
-            isSpam: false,
-            createdAt: { gte: startOfVnToday },
-            ...(canViewAllLeads ? {} : { assignedSalesId: user.id }),
-          },
-        })
+        where: {
+          isSpam: false,
+          createdAt: { gte: startOfVnToday },
+          ...(canViewAllLeads ? {} : { assignedSalesId: user.id }),
+        },
+      })
       : Promise.resolve(0),
 
     hasBaPermission(user.roleCode, 'AI_DESIGN')
       ? prisma.designRequest.findMany({
-          where:
-            user.roleCode === 'DESIGNER'
-              ? { assignedDesignerId: user.id }
-              : user.roleCode === 'ADMIN' || user.roleCode === 'BOD'
-                ? {}
-                : { requestedBySalesId: user.id },
-          orderBy: { createdAt: 'desc' },
-          take: 12,
-          include: {
-            lead: { select: { leadCode: true } },
-          },
-        })
+        where:
+          user.roleCode === 'DESIGNER'
+            ? { assignedDesignerId: user.id }
+            : user.roleCode === 'ADMIN' || user.roleCode === 'BOD'
+              ? {}
+              : { requestedBySalesId: user.id },
+        orderBy: { createdAt: 'desc' },
+        take: 12,
+        include: {
+          lead: { select: { leadCode: true } },
+        },
+      })
       : Promise.resolve([]),
 
     canViewLeads
       ? prisma.leadActivity.findMany({
-          where: canViewAllLeads
-            ? {}
-            : {
-                lead: {
-                  OR: [{ assignedSalesId: user.id }, { createdByUserId: user.id }],
-                },
-              },
-          orderBy: { createdAt: 'desc' },
-          take: 10,
-          include: {
-            actionBy: { select: { fullName: true } },
-            fromSales: { select: { fullName: true } },
-            toSales: { select: { fullName: true } },
+        where: canViewAllLeads
+          ? {}
+          : {
             lead: {
-              select: {
-                id: true,
-                leadCode: true,
-                companyName: true,
-                contactName: true,
-                projectName: true,
-              },
+              OR: [{ assignedSalesId: user.id }, { createdByUserId: user.id }],
             },
           },
-        })
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        include: {
+          actionBy: { select: { fullName: true } },
+          fromSales: { select: { fullName: true } },
+          toSales: { select: { fullName: true } },
+          lead: {
+            select: {
+              id: true,
+              leadCode: true,
+              companyName: true,
+              contactName: true,
+              projectName: true,
+            },
+          },
+        },
+      })
       : Promise.resolve([]),
   ]);
 
@@ -481,10 +501,10 @@ export async function getPersonalDashboardData(
       leadId: act.leadId,
       leadCode: act.lead.leadCode,
       customerLabel: isAnonymized
-        ? `Hồ sơ ${act.lead.leadCode}`
-        : act.lead.companyName || act.lead.contactName || act.lead.projectName || act.lead.leadCode,
+        ? ''
+        : act.lead.companyName || act.lead.contactName || act.lead.projectName || '',
       actionType: act.actionType,
-      actorName: act.actionBy?.fullName || act.actorRef || 'Hệ thống',
+      actorName: formatCleanActorName(act.actionBy?.fullName, act.actorRef),
       summary,
       createdAt: act.createdAt.toISOString(),
     };

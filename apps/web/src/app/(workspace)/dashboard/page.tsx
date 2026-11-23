@@ -1686,49 +1686,58 @@ export default function DashboardPage() {
           </div>
 
           {rightCardTab === 'activity' ? (
-            <div className="relative space-y-2.5 max-h-[268px] overflow-y-auto pr-1 before:content-[''] before:absolute before:left-[11px] before:top-3 before:bottom-3 before:w-px before:bg-slate-100">
+            <div className="relative flex-1 min-h-0 space-y-2 max-h-[380px] overflow-y-auto [scrollbar-width:thin] pr-1 before:content-[''] before:absolute before:left-[11px] before:top-3 before:bottom-3 before:w-px before:bg-slate-100">
               {(personal?.recentActivities || []).length === 0 ? (
                 <p className="text-xs text-slate-400 py-8 text-center">
                   Chưa có hoạt động gần đây.
                 </p>
               ) : (
-                (personal?.recentActivities || []).slice(0, 7).map((act) => (
-                  <Link
-                    key={act.id}
-                    href={canViewLeads ? `/leads?highlight=${act.leadId}` : '/reports'}
-                    className="relative pl-7 pr-2 py-1.5 rounded-xl hover:bg-slate-50/90 flex items-start justify-between gap-2 transition"
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`absolute left-[7px] top-3 w-2.5 h-2.5 rounded-full ring-4 ring-white ${getActivityDotColor(
-                        act.actionType,
-                      )}`}
-                    />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-xs text-slate-800 leading-snug">
-                        <strong className="font-semibold text-slate-900">{act.actorName}</strong>{' '}
-                        <span className="text-slate-500">{act.summary}</span>
-                      </p>
-                      <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                        <span className="font-mono text-[#1E3A8A] font-medium">
-                          {formatCompactLeadCode(act.leadCode)}
-                        </span>{' '}
-                        · {act.customerLabel}
-                      </p>
-                    </div>
-                    <span className="text-[10px] text-slate-400 whitespace-nowrap inline-flex items-center gap-0.5 shrink-0 pt-0.5 tabular-nums">
-                      <Clock className="w-3 h-3" />
-                      {new Date(act.createdAt).toLocaleTimeString('vi-VN', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </span>
-                  </Link>
-                ))
+                (personal?.recentActivities || []).slice(0, 8).map((act) => {
+                  const hasDistinctCustomer =
+                    Boolean(act.customerLabel) &&
+                    act.customerLabel.trim() !== act.leadCode.trim() &&
+                    !act.customerLabel.includes(act.leadCode);
+                  return (
+                    <Link
+                      key={act.id}
+                      href={canViewLeads ? `/leads?highlight=${act.leadId}` : '/reports'}
+                      className="relative pl-7 pr-2 py-1.5 rounded-xl hover:bg-slate-50/90 flex items-start justify-between gap-2 transition"
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={`absolute left-[7px] top-3 w-2.5 h-2.5 rounded-full ring-4 ring-white ${getActivityDotColor(
+                          act.actionType,
+                        )}`}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-xs text-slate-800 leading-snug truncate">
+                          <strong className="font-semibold text-slate-900">{act.actorName}</strong>{' '}
+                          <span className="text-slate-500">{act.summary}</span>
+                        </p>
+                        <p className="text-[11px] text-slate-400 truncate mt-0.5">
+                          <span
+                            className="font-mono text-[#1E3A8A] font-medium"
+                            title={act.leadCode}
+                          >
+                            {formatCompactLeadCode(act.leadCode)}
+                          </span>
+                          {hasDistinctCustomer ? ` · ${act.customerLabel}` : ''}
+                        </p>
+                      </div>
+                      <span className="text-[10px] text-slate-400 whitespace-nowrap inline-flex items-center gap-0.5 shrink-0 pt-0.5 tabular-nums">
+                        <Clock className="w-3 h-3" />
+                        {new Date(act.createdAt).toLocaleTimeString('vi-VN', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                    </Link>
+                  );
+                })
               )}
             </div>
           ) : (
-            <div className="space-y-2.5 max-h-[268px] overflow-y-auto pr-1">
+            <div className="flex-1 min-h-0 space-y-2.5 max-h-[380px] overflow-y-auto [scrollbar-width:thin] pr-1">
               {salesRows.slice(0, 6).map((sp) => (
                 <div
                   key={sp.salesUserId}
