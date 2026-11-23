@@ -3,7 +3,24 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 const fs = require('node:fs');
+const ts = require('typescript');
 const { PrismaClient } = require('@prisma/client');
+
+if (!require.extensions['.ts']) {
+  require.extensions['.ts'] = function compileTs(module, filename) {
+    const source = fs.readFileSync(filename, 'utf8');
+    const transpiled = ts.transpileModule(source, {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        esModuleInterop: true,
+        resolveJsonModule: true,
+      },
+      fileName: filename,
+    });
+    module._compile(transpiled.outputText, filename);
+  };
+}
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../..');
 const INDEP_DB_PATH = path.join(REPO_ROOT, 'packages/database/prisma/independent_v2.db');

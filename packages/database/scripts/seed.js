@@ -12,22 +12,63 @@ const chosenDbFile =
       ? devDbFile
       : independentDbFile;
 const defaultDbUrl = chosenDbFile.startsWith('/') ? `file://${chosenDbFile}` : `file:${chosenDbFile}`;
-const targetDbUrl =
-  process.env.DATABASE_URL &&
+
+function resolveTargetDatabase() {
+  const explicitPostgresUrl =
+    process.env.DATABASE_URL && /^postgres(ql)?:\/\//i.test(process.env.DATABASE_URL)
+      ? process.env.DATABASE_URL
+      : process.env.USE_POSTGRES_TRIAL === '1' && process.env.PG_DATABASE_URL
+        ? process.env.PG_DATABASE_URL
+        : null;
+
+  const targetDbUrl =
+    explicitPostgresUrl ||
+    (process.env.DATABASE_URL &&
     process.env.DATABASE_URL !== 'file:./dev.db' &&
     process.env.DATABASE_URL !== 'file:./independent_v2.db'
-    ? process.env.DATABASE_URL
-    : defaultDbUrl;
-process.env.DATABASE_URL = targetDbUrl;
-const { PrismaClient } = require('@prisma/client');
+      ? process.env.DATABASE_URL
+      : defaultDbUrl);
 
-const prisma = new PrismaClient({
-  datasources: {
-    db: {
-      url: targetDbUrl,
+  return {
+    isPostgres: Boolean(explicitPostgresUrl),
+    explicitPostgresUrl,
+    targetDbUrl,
+  };
+}
+
+let cachedPrisma = null;
+let cachedIsPostgres = false;
+
+function getDefaultPrismaClient() {
+  if (cachedPrisma) return cachedPrisma;
+  const { isPostgres, explicitPostgresUrl, targetDbUrl } = resolveTargetDatabase();
+  cachedIsPostgres = isPostgres;
+  process.env.DATABASE_URL = targetDbUrl;
+
+  if (isPostgres) {
+    process.env.PG_DATABASE_URL = explicitPostgresUrl;
+    const pgClientPath = path.resolve(__dirname, '../generated/postgres-client');
+    const { PrismaClient: PgPrismaClient } = require(pgClientPath);
+    cachedPrisma = new PgPrismaClient({
+      datasources: {
+        db: {
+          url: explicitPostgresUrl,
+        },
+      },
+    });
+    return cachedPrisma;
+  }
+
+  const { PrismaClient } = require('@prisma/client');
+  cachedPrisma = new PrismaClient({
+    datasources: {
+      db: {
+        url: targetDbUrl,
+      },
     },
-  },
-});
+  });
+  return cachedPrisma;
+}
 
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -89,7 +130,7 @@ const UNAPPROVED_SLA_KEYS = [
   'workingHoursConfig',
 ];
 
-async function syncAuthoritativeProducts(client = prisma) {
+async function syncAuthoritativeProducts(client = getDefaultPrismaClient()) {
   await client.$transaction(async (tx) => {
     const existing = await tx.product.findMany({ orderBy: { id: 'asc' } });
     const byId = new Map(existing.map((r) => [r.id, r]));
@@ -138,6 +179,16 @@ async function syncAuthoritativeProducts(client = prisma) {
       }
     }
   });
+
+  if (cachedIsPostgres || /^postgres(ql)?:\/\//i.test(process.env.DATABASE_URL || '')) {
+    try {
+      await client.$executeRawUnsafe(
+        `SELECT setval(pg_get_serial_sequence('products', 'id'), COALESCE((SELECT MAX(id) FROM products), 1), true)`,
+      );
+    } catch {
+      // Ignore on SQLite clients passed explicitly when env holds a PostgreSQL URL
+    }
+  }
 }
 
 function createSamplePngBuffer() {
@@ -155,7 +206,8 @@ function createSamplePngBuffer() {
   );
 }
 
-async function seedSyntheticModuleData(usersByEmail) {
+async function seedSyntheticModuleData(usersByEmail, client = getDefaultPrismaClient()) {
+  const prisma = client;
   await prisma.$executeRawUnsafe(`
     UPDATE "leads"
     SET "company_name" = REPLACE("company_name", ' (Dữ liệu tổng hợp)', ''),
@@ -1049,7 +1101,7 @@ function resolveSeedMode() {
   return 'catalog';
 }
 
-async function seedCatalogOnly(client = prisma) {
+async function seedCatalogOnly(client = getDefaultPrismaClient()) {
   for (const r of BA_ROLES) {
     await client.role.upsert({
       where: { roleCode: r.roleCode },
@@ -1093,6 +1145,7 @@ async function seedCatalogOnly(client = prisma) {
 }
 
 async function main() {
+  const prisma = getDefaultPrismaClient();
   const seedMode = resolveSeedMode();
   await seedCatalogOnly(prisma);
 
@@ -1307,7 +1360,7 @@ async function main() {
       }
     }
 
-    await seedSyntheticModuleData(usersByEmail);
+    await seedSyntheticModuleData(usersByEmail, prisma);
 
     console.log(
       `Đã khởi tạo 8 vai trò BA, ${BA_PRODUCTS_AUTHORITATIVE.length} sản phẩm chuẩn BA, ${devAccounts.length} tài khoản và dữ liệu tổng hợp cho cả 5 phân hệ.`,
@@ -1332,5 +1385,5 @@ if (require.main === module) {
       console.error(err);
       process.exitCode = 1;
     })
-    .finally(() => prisma.$disconnect());
+    .finally(() => (cachedPrisma ? cachedPrisma.$disconnect() : Promise.resolve()));
 }
