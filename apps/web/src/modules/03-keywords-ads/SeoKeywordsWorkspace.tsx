@@ -1153,8 +1153,13 @@ export function SeoKeywordsWorkspace() {
               onClear={seoExcelCalc.clearSelection}
             />
             <div tabIndex={0} role="region" aria-label="Bảng từ khóa tìm kiếm kiểu Excel" className="overflow-x-auto max-h-[68vh]">
-              <table className={`w-full text-xs border-separate border-spacing-0 ${seoExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+              <table className="w-full text-xs border-separate border-spacing-0 [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
+                  <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                    {['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((l) => (
+                      <th key={`kw-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                    ))}
+                  </tr>
                   <tr className="border-b border-slate-200">
                     <th scope="col" className="py-2.5 px-4 text-left font-semibold">Từ khóa tìm kiếm</th>
                     <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>
@@ -1293,8 +1298,13 @@ export function SeoKeywordsWorkspace() {
               onClear={seoExcelCalc.clearSelection}
             />
             <div tabIndex={0} role="region" aria-label="Bảng trang đích SEO" className="overflow-x-auto max-h-[68vh]">
-              <table className={`w-full text-xs border-separate border-spacing-0 ${seoExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+              <table className="w-full text-xs border-separate border-spacing-0 [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
+                  <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                    {(queryPageLinks.length > 0 ? ['A', 'B', 'C', 'D', 'E', 'F', 'G'] : ['A', 'B', 'C', 'D', 'E', 'F']).map((l) => (
+                      <th key={`pg-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                    ))}
+                  </tr>
                   <tr className="border-b border-slate-200">
                     <th scope="col" className="py-2.5 px-4 text-left font-semibold">URL trang đích</th>
                     <th scope="col" className="py-2.5 px-3 text-right font-semibold">Click tìm kiếm</th>

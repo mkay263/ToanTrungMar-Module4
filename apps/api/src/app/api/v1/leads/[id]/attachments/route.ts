@@ -1,10 +1,137 @@
+import { NextResponse } from 'next/server';
+import { prisma } from '@toantrung/database';
+import { hasBaPermission } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
 import { bumpDomainRevisions } from '../../../../../../core/cache/server-data-cache';
 import { requirePermissionSession } from '../../../../../../core/permissions';
+import { readPrivateBusinessFile } from '../../../../../../core/storage/private-files.service';
 import {
   shouldAnonymizeLeadForRole,
   uploadLeadAttachment,
 } from '../../../../../../modules/01-leads/service';
+
+export async function GET(
+  req: Request,
+  context: { params: { id: string } },
+) {
+  const auth = await requirePermissionSession(req, 'ATTACHMENT_UPLOAD_VIEW', {
+    requireCsrf: false,
+  });
+  if (!auth.ok) return auth.response;
+
+  if (shouldAnonymizeLeadForRole(auth.user.roleCode)) {
+    return jsonError(
+      'FORBIDDEN_ANONYMIZED_ROLE',
+      'Vai trò xem ẩn danh không được tải tệp đính kèm định danh khách hàng.',
+      403,
+    );
+  }
+
+  const leadId = Number(context.params.id);
+  const url = new URL(req.url);
+  const archivedActivityId = Number(url.searchParams.get('archivedActivityId'));
+  if (!Number.isInteger(leadId) || leadId <= 0 || !Number.isInteger(archivedActivityId) || archivedActivityId <= 0) {
+    return jsonError('INVALID_ARCHIVED_ATTACHMENT', 'Thiếu mã hồ sơ hoặc mã lịch sử tệp đã lưu trữ.', 400);
+  }
+
+  const activity = await prisma.leadActivity.findFirst({
+    where: {
+      id: archivedActivityId,
+      leadId,
+      actionType: 'upload_attachment',
+    },
+    include: { lead: true },
+  });
+
+  if (!activity || !activity.oldValueJson) {
+    return jsonError('NOT_FOUND', 'Không tìm thấy tệp lưu trữ trong lịch sử hồ sơ.', 404);
+  }
+
+  let archived: {
+    fileName?: string;
+    fileUrl?: string;
+    attachmentType?: string;
+  } | null = null;
+  try {
+    const parsed = JSON.parse(activity.oldValueJson) as {
+      archivedAttachment?: {
+        fileName?: string;
+        fileUrl?: string;
+        attachmentType?: string;
+      };
+    };
+    archived = parsed?.archivedAttachment || null;
+  } catch {
+    archived = null;
+  }
+
+  if (!archived?.fileUrl || !archived?.fileName) {
+    return jsonError('NOT_FOUND', 'Bản ghi lịch sử này không chứa tệp lưu trữ.', 404);
+  }
+
+  if (archived.attachmentType === 'quote_doc') {
+    return jsonError(
+      'PRICE_DOCUMENT_RESTRICTED',
+      'Tệp hồ sơ báo giá không được phép hiển thị hoặc tải qua hệ thống.',
+      403,
+    );
+  }
+
+  const canViewAll = hasBaPermission(auth.user.roleCode, 'LEAD_VIEW_ALL');
+  if (auth.user.roleCode === 'DESIGNER') {
+    const linkedDesignCount = await prisma.designRequest.count({
+      where: { leadId },
+    });
+    if (linkedDesignCount === 0) {
+      return jsonError(
+        'FORBIDDEN_LEAD_SCOPE',
+        'Designer chỉ được xem tệp của hồ sơ Lead có yêu cầu thiết kế 3D/2D.',
+        403,
+      );
+    }
+  } else if (
+    !canViewAll &&
+    activity.lead.assignedSalesId !== auth.user.id &&
+    activity.lead.createdByUserId !== auth.user.id
+  ) {
+    return jsonError(
+      'FORBIDDEN_LEAD_SCOPE',
+      'Bạn chỉ được tải tệp lịch sử của hồ sơ Lead do mình phụ trách.',
+      403,
+    );
+  }
+
+  const fileData = readPrivateBusinessFile(archived.fileUrl);
+  if (!fileData) {
+    return jsonError('FILE_MISSING', 'Tệp vật lý không còn tồn tại trong kho lưu trữ riêng tư.', 404);
+  }
+
+  const forceDownload = url.searchParams.get('download') === '1';
+  const isUnsafeActiveType = /^image\/svg\+xml|^text\/html|^application\/javascript/i.test(
+    fileData.mimeType,
+  );
+  const isInlinePreviewable =
+    !forceDownload &&
+    !isUnsafeActiveType &&
+    (/^image\/(?:png|jpeg|webp|gif|bmp)$/i.test(fileData.mimeType) ||
+      fileData.mimeType === 'application/pdf' ||
+      fileData.mimeType.startsWith('text/plain') ||
+      fileData.mimeType.startsWith('video/'));
+  const dispositionType = isInlinePreviewable ? 'inline' : 'attachment';
+  const asciiFallback =
+    archived.fileName.replace(/["\r\n\\]/g, '_').replace(/[^\x20-\x7E]/g, '_') || 'archived-attachment';
+
+  return new NextResponse(new Uint8Array(fileData.buffer), {
+    status: 200,
+    headers: {
+      'Content-Type': isUnsafeActiveType ? 'application/octet-stream' : fileData.mimeType,
+      'Content-Disposition': `${dispositionType}; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(archived.fileName)}`,
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Cache-Control': 'private, no-store',
+    },
+  });
+}
 
 export async function POST(
   req: Request,

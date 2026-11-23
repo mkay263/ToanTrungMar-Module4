@@ -92,6 +92,16 @@ interface PickedCell {
 
 const COLS_STORAGE_KEY = 'tt_ads_visible_cols_v1';
 
+function getExcelColLetter(index: number): string {
+  let n = index;
+  let result = '';
+  while (n >= 0) {
+    result = String.fromCharCode((n % 26) + 65) + result;
+    n = Math.floor(n / 26) - 1;
+  }
+  return result;
+}
+
 function formatCompactUrl(rawUrl: string): string {
   try {
     const u = new URL(rawUrl);
@@ -421,10 +431,15 @@ export function AdsExcelTableSection({
     return 'cursor-cell hover:bg-blue-50/60';
   };
 
-  const colSpanCount =
-    1 +
-    (viewMode === 'daily' ? 1 : 0) +
-    STANDARD_COLUMN_META.filter((m) => isVisible(m.key)).length;
+  const excelColLetters = useMemo(() => {
+    const count =
+      1 +
+      (viewMode === 'daily' ? 1 : 0) +
+      STANDARD_COLUMN_META.filter((m) => isVisible(m.key)).length;
+    return Array.from({ length: count }, (_, idx) => getExcelColLetter(idx));
+  }, [viewMode, visibleCols]);
+
+  const colSpanCount = 1 + excelColLetters.length;
 
   return (
     <section
@@ -717,20 +732,29 @@ export function AdsExcelTableSection({
         {sortAnnouncement}
       </div>
 
-      {/* Bảng dữ liệu chính */}
+      {/* Bảng dữ liệu chính — mặc định luôn bật lưới A-Z rõ nét, không dính cột trái gây đè chữ */}
       <div
         tabIndex={0}
         role="region"
         aria-label="Bảng chiến dịch quảng cáo và link đích"
         className="overflow-x-auto max-h-[72vh]"
       >
-        <table
-          className={`w-full min-w-[1040px] text-left border-separate border-spacing-0 text-xs ${
-            calcActive ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''
-          }`}
-        >
+        <table className="w-full min-w-[1060px] text-left border-separate border-spacing-0 text-xs [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
           <thead className="bg-slate-100 text-slate-700 sticky top-0 z-20 shadow-[0_1px_0_#CBD5E1]">
+            <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+              <th scope="col" className="py-1 px-2 text-center w-10">
+                #
+              </th>
+              {excelColLetters.map((letter) => (
+                <th key={`col-letter-${letter}`} scope="col" className="py-1 px-2 text-center">
+                  {letter}
+                </th>
+              ))}
+            </tr>
             <tr>
+              <th scope="col" className="py-2 px-2 font-semibold text-center text-slate-500 w-10 whitespace-nowrap">
+                STT
+              </th>
               {viewMode === 'daily' && (
                 <th
                   scope="col"
@@ -825,7 +849,7 @@ export function AdsExcelTableSection({
                 </td>
               </tr>
             ) : (
-              displayRows.map((row) => {
+              displayRows.map((row, rowIdx) => {
                 const c = row.campaign;
                 const rowLabel = viewMode === 'daily' ? `${c.campaignName} (${row.date})` : c.campaignName;
                 const realUrls = c.finalUrls || [];
@@ -834,6 +858,9 @@ export function AdsExcelTableSection({
 
                 return (
                   <tr key={row.rowId} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
+                    <td className="py-2.5 px-2 text-center font-mono text-[11px] text-slate-400 bg-slate-50/80 w-10 select-none tabular-nums">
+                      {rowIdx + 1}
+                    </td>
                     {viewMode === 'daily' && (
                       <td className="py-2.5 px-3 font-mono text-slate-600 whitespace-nowrap tabular-nums">
                         {row.date}
@@ -993,6 +1020,7 @@ export function AdsExcelTableSection({
           {filteredCampaigns.length > 0 && (
             <tfoot className="bg-blue-50/90 border-t-2 border-[#1E3A8A]/40 font-bold text-[#0F275C] sticky bottom-0 z-10">
               <tr>
+                <td className="py-2.5 px-2 text-center font-mono text-[11px] text-slate-500">Σ</td>
                 {viewMode === 'daily' && <td className="py-2.5 px-3">Tổng</td>}
                 <td className="py-2.5 px-4">
                   Σ Tổng ({filteredCampaigns.length} chiến dịch)

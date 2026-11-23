@@ -4,6 +4,33 @@ import type {
   PriceCheckAlertDto,
 } from '@toantrung/contracts';
 
+/**
+ * Rút gọn hiển thị mã hồ sơ Lead dài (VD: TT-20261106-000720 -> TT2611-0720,
+ * TT-T06-1795464928165 -> TT-T06-8165) cho gọn mắt; mã gốc vẫn giữ đầy đủ trong tooltip & DB.
+ */
+export function formatCompactLeadCode(rawCode: string | null | undefined): string {
+  if (!rawCode) return '';
+  const code = rawCode.trim();
+  // Mã mới đã gọn sẵn: TT-2611-0721 (<= 13 ký tự)
+  if (/^TT-\d{4}-\d{4}$/i.test(code)) return code;
+  // Mã cũ kiểu TT-20261106-000720 hoặc TT-20261124-00072010189
+  const legacyDateMatch = code.match(/^TT-20(\d{2})(\d{2})\d{2}-(\d+)$/i);
+  if (legacyDateMatch) {
+    const [, yy, mm, digits] = legacyDateMatch;
+    const shortSeq = digits.length <= 4 ? digits.padStart(4, '0') : digits.slice(-4);
+    return `TT${yy}${mm}-${shortSeq}`;
+  }
+  // Mã thử nghiệm hoặc mã có timestamp dài (VD: TT-T06-1795464928165 -> TT-T06-8165)
+  const longSuffixMatch = code.match(/^([A-Z0-9]+-[A-Z0-9]+)-(\d{7,})$/i);
+  if (longSuffixMatch) {
+    return `${longSuffixMatch[1]}-${longSuffixMatch[2].slice(-4)}`;
+  }
+  if (code.length > 16) {
+    return `${code.slice(0, 7)}…${code.slice(-4)}`;
+  }
+  return code;
+}
+
 export const STATUS_BADGE_STYLES: Record<PipelineStatus, string> = {
   new_lead: 'bg-violet-50 text-violet-700 border-violet-200 font-semibold',
   quoting: 'bg-blue-50 text-blue-700 border-blue-200 font-semibold',

@@ -98,6 +98,7 @@ import {
   buildLeadsFraudIndex,
   evaluateLeadFraudCriteria,
   extractScheduledFollowUpDate,
+  formatCompactLeadCode,
   getB2bFollowUpHorizon,
   KANBAN_COLUMN_THEMES,
   STATUS_BADGE_STYLES,
@@ -3330,18 +3331,33 @@ export function LeadsWorkspace() {
                           onClick={() => openLeadDetail(lead.id, 'info')}
                           className={`group cursor-pointer transition-colors min-h-[68px] hover:bg-blue-50/45 ${STATUS_ROW_ACCENTS[lead.pipelineStatus]}`}
                         >
-                          {/* Cột 1: Khách hàng / dự án */}
+                          {/* Cột 1: Khách hàng / dự án + dấu hiệu Nghi trùng / Quay lại ngay tại tên khách & mã gọn */}
                           <th scope="row" className={`sticky start-0 z-[1] bg-white group-hover:bg-blue-50/45 py-3 px-3 align-middle font-normal ${STATUS_ROW_ACCENTS[lead.pipelineStatus]}`}>
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                openLeadDetail(lead.id, 'info');
-                              }}
-                              className="font-semibold text-slate-900 group-hover:text-[#1E3A8A] hover:underline truncate max-w-full text-left block focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
-                            >
-                              {primaryCustomerLabel}
-                            </button>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openLeadDetail(lead.id, 'info');
+                                }}
+                                className="font-semibold text-slate-900 group-hover:text-[#1E3A8A] hover:underline truncate text-left block focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+                              >
+                                {primaryCustomerLabel}
+                              </button>
+                              {qualityBadge && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setInvestigativeLead(lead);
+                                  }}
+                                  className={`inline-flex items-center whitespace-nowrap gap-1 shrink-0 min-h-5 px-2 py-0.5 rounded-full border text-[11px] font-semibold transition-colors ${qualityBadge.className}`}
+                                >
+                                  <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
+                                  <span>{qualityBadge.label}</span>
+                                </button>
+                              )}
+                            </div>
                             {secondaryProjectLine ? (
                               <div className="text-xs text-slate-600 truncate max-w-full mt-0.5">
                                 {secondaryProjectLine}
@@ -3351,8 +3367,11 @@ export function LeadsWorkspace() {
                                 Thiếu tiêu đề nội dung biểu mẫu
                               </div>
                             ) : null}
-                            <div className="text-[11px] font-mono text-slate-500 truncate max-w-full mt-0.5">
-                              {lead.leadCode}
+                            <div
+                              className="text-[11px] font-mono text-slate-500 truncate max-w-full mt-0.5"
+                              title={`Mã hồ sơ đầy đủ: ${lead.leadCode}`}
+                            >
+                              {formatCompactLeadCode(lead.leadCode)}
                             </div>
                           </th>
 
@@ -3394,7 +3413,7 @@ export function LeadsWorkspace() {
                             )}
                           </td>
 
-                          {/* Cột 5: Trạng thái / lịch theo dõi (1 badge trạng thái chính + chip cảnh báo gọn, không tô đỏ cả hàng) */}
+                          {/* Cột 4: Trạng thái / lịch theo dõi (nhãn Nghi trùng/Quay lại đã chuyển sang Cột 1 để dễ quét ngay tại tên khách) */}
                           <td className="py-3 px-2.5 align-middle">
                             <div className="flex flex-wrap items-center gap-1.5">
                               <span
@@ -3402,20 +3421,6 @@ export function LeadsWorkspace() {
                               >
                                 {PIPELINE_STATUS_LABELS[lead.pipelineStatus]}
                               </span>
-
-                              {qualityBadge && (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    setInvestigativeLead(lead);
-                                  }}
-                                  className={`inline-flex items-center whitespace-nowrap gap-1 min-h-6 px-2 py-0.5 rounded-full border text-[11px] font-semibold transition-colors ${qualityBadge.className}`}
-                                >
-                                  <AlertTriangle aria-hidden="true" className="w-3 h-3 shrink-0" />
-                                  <span>{qualityBadge.label}</span>
-                                </button>
-                              )}
                             </div>
                             {horizon.scheduledDate ? (
                               <div className="text-[11px] text-slate-500 mt-1">
@@ -4579,8 +4584,11 @@ export function LeadsWorkspace() {
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-mono text-xs font-bold text-[#1E3A8A]">
-                        {selectedLead.leadCode}
+                      <span
+                        className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 font-mono text-xs font-bold text-[#1E3A8A]"
+                        title={`Mã hồ sơ đầy đủ: ${selectedLead.leadCode}`}
+                      >
+                        {formatCompactLeadCode(selectedLead.leadCode)}
                       </span>
                       <h2 className="font-display text-base sm:text-lg font-bold text-slate-900 truncate max-w-[440px]">
                         {selectedLead.companyName || selectedLead.contactName || selectedLead.phone}
@@ -4941,8 +4949,8 @@ export function LeadsWorkspace() {
                                     className="p-2.5 rounded-xl bg-white/95 border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                   >
                                     <div className="text-xs text-slate-700 min-w-0">
-                                      <span className="font-mono font-bold text-emerald-800 mr-2">
-                                        {hist.leadCode}
+                                      <span className="font-mono font-bold text-emerald-800 mr-2" title={hist.leadCode}>
+                                        {formatCompactLeadCode(hist.leadCode)}
                                       </span>
                                       <strong>{hist.companyName || hist.contactName || hist.phone}</strong>
                                       {hist.projectName ? ` · Dự án cũ: ${hist.projectName}` : ''}
@@ -4974,7 +4982,7 @@ export function LeadsWorkspace() {
                                         }}
                                         className="h-7 px-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition"
                                       >
-                                        Xem đơn cũ {hist.leadCode} →
+                                        Xem đơn cũ {formatCompactLeadCode(hist.leadCode)} →
                                       </button>
                                     </div>
                                   </div>
@@ -5028,7 +5036,7 @@ export function LeadsWorkspace() {
                               </p>
                               {priorHistLead && (
                                 <p className="text-[11px] text-slate-600 truncate">
-                                  Hồ sơ cũ: <strong className="font-mono">{priorHistLead.leadCode}</strong>
+                                  Hồ sơ cũ: <strong className="font-mono" title={priorHistLead.leadCode}>{formatCompactLeadCode(priorHistLead.leadCode)}</strong>
                                   {priorHistLead.projectName ? ` · ${priorHistLead.projectName}` : ''}
                                 </p>
                               )}
@@ -5065,8 +5073,8 @@ export function LeadsWorkspace() {
                                   className="p-2.5 rounded-xl bg-white border border-slate-200/90 flex flex-col sm:flex-row sm:items-center justify-between gap-2"
                                 >
                                   <div className="text-xs text-slate-700 min-w-0">
-                                    <span className="font-mono font-bold text-[#1E3A8A] mr-2">
-                                      {hist.leadCode}
+                                    <span className="font-mono font-bold text-[#1E3A8A] mr-2" title={hist.leadCode}>
+                                      {formatCompactLeadCode(hist.leadCode)}
                                     </span>
                                     <span
                                       className={`px-2 py-0.5 rounded border text-[10px] font-bold mr-2 ${
@@ -5109,7 +5117,7 @@ export function LeadsWorkspace() {
                                       }}
                                       className="h-7 px-2.5 rounded-lg bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold transition"
                                     >
-                                      Xem hồ sơ {hist.leadCode} →
+                                      Xem hồ sơ {formatCompactLeadCode(hist.leadCode)} →
                                     </button>
                                   </div>
                                 </div>

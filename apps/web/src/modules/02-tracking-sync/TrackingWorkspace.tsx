@@ -1123,8 +1123,13 @@ export function TrackingWorkspace() {
                 />
 
                 <div tabIndex={0} role="region" aria-label="Bảng trang đích theo user mới" className="overflow-x-auto max-h-[68vh]">
-                  <table className={`w-full text-left border-separate border-spacing-0 text-xs ${ga4ExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                  <table className="w-full text-left border-separate border-spacing-0 text-xs [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
                     <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 sticky top-0 z-10">
+                      <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                        {['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].map((l) => (
+                          <th key={`lp-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                        ))}
+                      </tr>
                       <tr>
                         <th scope="col" className="py-2.5 px-4 font-semibold">Trang đích (Landing Page)</th>
                         <th scope="col" className="py-2.5 px-3 font-semibold">Phân loại</th>
@@ -1293,8 +1298,13 @@ export function TrackingWorkspace() {
                   onClear={ga4ExcelCalc.clearSelection}
                 />
                 <div tabIndex={0} role="region" aria-label="Bảng theo kênh" className="overflow-x-auto">
-                  <table className={`w-full text-left border-separate border-spacing-0 text-xs ${ga4ExcelCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                  <table className="w-full text-left border-separate border-spacing-0 text-xs [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
                     <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 sticky top-0">
+                      <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                        {['A', 'B', 'C', 'D', 'E', 'F', 'G'].map((l) => (
+                          <th key={`ch-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                        ))}
+                      </tr>
                       <tr>
                         <th scope="col" className="py-2.5 px-4 font-semibold">Kênh marketing</th>
                         <th scope="col" className="py-2.5 px-3 font-semibold">Nguồn / phương thức</th>
@@ -2403,48 +2413,64 @@ export function TrackingWorkspace() {
         </div>
       </div>
 
-      {/* Drawer chi tiết chiến dịch (Ad group / Keyword / Thiết bị / Khu vực) */}
+      {/* Hộp thoại giữa màn hình chi tiết chiến dịch (giống Tạo Lead) */}
       {drawerCampaign && (
-        <div className="fixed inset-0 z-50 bg-slate-900/45 backdrop-blur-xs flex justify-end">
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5"
+          onClick={() => setDrawerCampaign(null)}
+        >
           <div
             role="dialog"
+            aria-modal="true"
             aria-label={`Chi tiết chiến dịch ${drawerCampaign.campaignName}`}
-            className="w-full max-w-xl bg-white h-full shadow-2xl border-l border-slate-200 flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl max-h-[88vh] rounded-2xl bg-white shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150"
           >
-            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-3">
-              <div>
-                <h2 className="text-base font-bold text-slate-900">
-                  {drawerCampaign.campaignName}
-                </h2>
+            <div className="px-5 py-4 bg-slate-50/80 border-b border-slate-200 flex items-start justify-between gap-3 shrink-0">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base sm:text-lg font-bold text-slate-900 truncate">
+                    {drawerCampaign.campaignName}
+                  </h2>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
+                      drawerCampaign.status === 'ENABLED'
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-slate-100 text-slate-600 border border-slate-200'
+                    }`}
+                  >
+                    {drawerCampaign.status === 'ENABLED' ? 'Đang chạy' : 'Tạm dừng'}
+                  </span>
+                </div>
                 <p className="text-xs text-slate-500 mt-0.5">{drawerCampaign.attributionNote}</p>
               </div>
               <button
                 type="button"
-                aria-label="Đóng ngăn chi tiết"
+                aria-label="Đóng chi tiết chiến dịch"
                 onClick={() => setDrawerCampaign(null)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 shrink-0"
               >
                 <X aria-hidden="true" className="w-5 h-5" />
               </button>
             </div>
 
             <div className="flex-1 overflow-y-auto p-5 space-y-5 text-xs">
-              <div className="grid grid-cols-3 gap-3">
-                <div className="rounded-[10px] bg-slate-50 border border-slate-200 p-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3.5">
                   <div className="text-slate-500">Chi phí thực tế</div>
-                  <div className="text-base font-bold text-slate-900 mt-1 tabular-nums">
+                  <div className="text-base sm:text-lg font-extrabold text-slate-900 mt-1 tabular-nums">
                     {drawerCampaign.cost.toLocaleString('vi-VN')} ₫
                   </div>
                 </div>
-                <div className="rounded-[10px] bg-slate-50 border border-slate-200 p-3">
-                  <div className="text-slate-500">Lead CRM hợp lệ</div>
-                  <div className="text-base font-bold text-[#0F275C] mt-1 tabular-nums">
+                <div className="rounded-xl bg-blue-50/60 border border-blue-200/80 p-3.5">
+                  <div className="text-slate-600">Lead CRM hợp lệ</div>
+                  <div className="text-base sm:text-lg font-extrabold text-[#0F275C] mt-1 tabular-nums">
                     {drawerCampaign.validAttributedLeadCount}
                   </div>
                 </div>
-                <div className="rounded-[10px] bg-slate-50 border border-slate-200 p-3">
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3.5">
                   <div className="text-slate-500">CPL thực tế</div>
-                  <div className="text-base font-bold text-slate-900 mt-1 tabular-nums">
+                  <div className="text-base sm:text-lg font-extrabold text-slate-900 mt-1 tabular-nums">
                     {drawerCampaign.costPerValidLead !== null
                       ? `${drawerCampaign.costPerValidLead.toLocaleString('vi-VN')} ₫`
                       : 'Chưa đủ đối soát'}
@@ -2458,7 +2484,7 @@ export function TrackingWorkspace() {
                   Link đích chiến dịch ({drawerCampaign.finalUrls?.length || (drawerCampaign.primaryDestinationUrl ? 1 : 0)})
                 </h3>
                 {(drawerCampaign.finalUrls && drawerCampaign.finalUrls.length > 0) ? (
-                  <div className="space-y-1.5 rounded-[10px] bg-blue-50/50 border border-blue-200/80 p-3">
+                  <div className="space-y-1.5 rounded-xl bg-blue-50/50 border border-blue-200/80 p-3.5 max-h-52 overflow-y-auto">
                     {drawerCampaign.finalUrls.map((u) => (
                       <a
                         key={u}
@@ -2477,13 +2503,13 @@ export function TrackingWorkspace() {
                     href={drawerCampaign.primaryDestinationUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center gap-1.5 rounded-[10px] bg-slate-50 border border-slate-200 px-3 py-2 text-slate-700 font-mono text-[11px] hover:underline"
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-slate-700 font-mono text-[11px] hover:underline"
                   >
                     <span>{drawerCampaign.primaryDestinationUrl}</span>
                     <ExternalLink className="w-3 h-3 shrink-0" />
                   </a>
                 ) : (
-                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-[10px] p-3">
+                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
                     Chưa có URL đích chi tiết từ chiến dịch này.
                   </p>
                 )}
@@ -2497,7 +2523,7 @@ export function TrackingWorkspace() {
                 {(ads?.breakdowns.adGroups || []).filter(
                   (ag) => ag.campaignName === drawerCampaign.campaignName,
                 ).length === 0 ? (
-                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-[10px] p-3">
+                  <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
                     {ads?.breakdowns.keywordAvailabilityNote ||
                       'Nguồn hiện chưa trả dữ liệu phân rã nhóm quảng cáo / từ khóa / thiết bị / khu vực cho chiến dịch này.'}
                   </p>
@@ -2508,10 +2534,10 @@ export function TrackingWorkspace() {
                       .map((ag) => (
                         <li
                           key={ag.adGroupId}
-                          className="rounded-[10px] border border-slate-200 p-3 flex items-center justify-between"
+                          className="rounded-xl border border-slate-200 p-3 flex items-center justify-between hover:bg-slate-50/70 transition"
                         >
                           <span className="font-semibold text-slate-800">{ag.adGroupName}</span>
-                          <span className="tabular-nums text-slate-600">
+                          <span className="tabular-nums text-slate-600 font-medium">
                             {ag.clicks} click · {ag.cost.toLocaleString('vi-VN')} ₫
                           </span>
                         </li>
@@ -2519,6 +2545,16 @@ export function TrackingWorkspace() {
                   </ul>
                 )}
               </div>
+            </div>
+
+            <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => setDrawerCampaign(null)}
+                className="h-9 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold transition"
+              >
+                Đóng
+              </button>
             </div>
           </div>
         </div>

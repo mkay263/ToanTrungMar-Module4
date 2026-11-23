@@ -2281,8 +2281,13 @@ export function ReportsWorkspace() {
                       onClear={quickCalc.clearSelection}
                     />
                     <div tabIndex={0} role="region" aria-label="Bảng nhu cầu sản phẩm" className="overflow-x-auto">
-                      <table className={`w-full text-xs text-left tabular-nums border-separate border-spacing-0 ${quickCalc.excelMode ? '[&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200' : ''}`}>
+                      <table className="w-full text-xs text-left tabular-nums border-separate border-spacing-0 [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
                         <thead className="bg-slate-100 text-slate-600 uppercase border-b border-slate-200">
+                          <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
+                            {['A', 'B', 'C', 'D', 'E', 'F'].map((l) => (
+                              <th key={`prod-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
+                            ))}
+                          </tr>
                           <tr>
                             <th className="px-4 py-2.5">Sản phẩm</th>
                             <th className="px-3 py-2.5 text-right">Lead quan tâm</th>
