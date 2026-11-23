@@ -124,8 +124,8 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const [loadingBell, setLoadingBell] = useState(false);
   const bellRef = useRef<HTMLDivElement | null>(null);
 
-  const [adminMenuOpen, setAdminMenuOpen] = useState(false);
-  const adminMenuRef = useRef<HTMLDivElement | null>(null);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [incomingHandovers, setIncomingHandovers] = useState<IncomingHandoverLite[]>([]);
   const [handoverPopoverOpen, setHandoverPopoverOpen] = useState(false);
@@ -176,7 +176,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('keydown', handleKey);
   }, []);
 
-  // Tải danh sách Lead chuyển giao chờ xác nhận (nhẹ, không polling riêng, tự cập nhật khi có sync)
   const fetchIncomingHandovers = useCallback(async () => {
     if (!user || !hasBaPermission(user.roleCode, 'LEAD_VIEW_OWN')) {
       setIncomingHandovers([]);
@@ -205,7 +204,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
     return () => unsub();
   }, [user, fetchIncomingHandovers]);
 
-  // Cập nhật số lượng trên tiêu đề tab trình duyệt im lặng (không tiếng ting ting)
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const pendingCount = incomingHandovers.length;
@@ -266,14 +264,14 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       if (bellRef.current && !bellRef.current.contains(e.target as Node)) {
         setBellOpen(false);
       }
-      if (adminMenuRef.current && !adminMenuRef.current.contains(e.target as Node)) {
-        setAdminMenuOpen(false);
+      if (accountMenuRef.current && !accountMenuRef.current.contains(e.target as Node)) {
+        setAccountMenuOpen(false);
       }
     };
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setBellOpen(false);
-        setAdminMenuOpen(false);
+        setAccountMenuOpen(false);
         setHandoverPopoverOpen(false);
       }
     };
@@ -393,24 +391,27 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
   const topbarSearchPlaceholder =
     pathname === '/leads' || pathname.startsWith('/leads/')
       ? 'Tìm SĐT, khách, mã Lead...'
-      : `Tìm trong ${currentBreadcrumb}...`;
+      : `Tìm nhanh trong ${currentBreadcrumb}...`;
 
   if (loading) {
     return (
       <div className="min-h-screen bg-[#F8FAFC] flex flex-col w-full">
-        <div className="h-[56px] bg-white border-b border-slate-200 px-4 flex items-center gap-4">
-          <div className="h-8 w-36 rounded-lg bg-slate-200 animate-pulse" />
-          <div className="hidden lg:flex items-center gap-2">
-            {[1, 2, 3, 4, 5, 6].map((i) => (
-              <div key={i} className="h-8 w-20 rounded-lg bg-slate-100 animate-pulse" />
-            ))}
+        <div className="h-[54px] bg-white/90 border-b border-slate-200/75 px-4 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="h-7 w-28 rounded-lg bg-slate-200/80 animate-pulse" />
+            <div className="hidden lg:flex items-center gap-2">
+              {[1, 2, 3, 4, 5, 6].map((i) => (
+                <div key={i} className="h-7 w-20 rounded-lg bg-slate-100 animate-pulse" />
+              ))}
+            </div>
           </div>
+          <div className="h-8 w-44 rounded-full bg-slate-100 animate-pulse" />
         </div>
         <div className="p-4 space-y-3">
-          <div className="h-24 rounded-2xl bg-white border border-slate-200 animate-pulse" />
+          <div className="h-24 rounded-2xl bg-white border border-slate-200/80 animate-pulse" />
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             {[1, 2, 3, 4].map((i) => (
-              <div key={i} className="h-[108px] rounded-2xl bg-white border border-slate-200 animate-pulse" />
+              <div key={i} className="h-[108px] rounded-2xl bg-white border border-slate-200/80 animate-pulse" />
             ))}
           </div>
         </div>
@@ -434,11 +435,6 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       (!item.requiredPermission || hasBaPermission(user.roleCode, item.requiredPermission)),
   );
 
-  const isSystemRouteActive = visibleSystemNav.some(
-    (item) => pathname === item.href || pathname.startsWith(`${item.href}/`),
-  );
-
-  // Chỉ hiện dải nhắc bàn giao nổi trên các trang không có sẵn bảng bàn giao (Tổng quan & Lead đã hiển thị trực diện)
   const showGlobalHandoverStrip =
     incomingHandovers.length > 0 &&
     pathname !== '/dashboard' &&
@@ -468,16 +464,16 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
             aria-label="Menu điều hướng di động"
             className="fixed inset-y-0 left-0 z-50 w-[264px] bg-gradient-to-b from-[#071128] via-[#0B1938] to-[#0E224A] text-white shadow-2xl flex flex-col lg:hidden"
           >
-            <div className="h-[56px] px-4 flex items-center justify-between border-b border-white/10">
+            <div className="h-[54px] px-4 flex items-center justify-between border-b border-white/10">
               <Link
                 href="/dashboard"
                 onClick={() => setMobileOpen(false)}
                 className="flex items-center gap-2.5"
               >
-                <span className="w-8 h-8 rounded-xl bg-gradient-to-br from-sky-500 to-blue-700 text-white font-extrabold text-xs grid place-items-center">
+                <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-sky-500 to-blue-700 text-white font-extrabold text-xs grid place-items-center">
                   TT
                 </span>
-                <span className="font-display font-bold text-base text-white">Toàn Trung CRM</span>
+                <span className="font-display font-bold text-sm text-white">Toàn Trung CRM</span>
               </Link>
               <button
                 type="button"
@@ -549,7 +545,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               )}
             </nav>
 
-            <div className="p-3 border-t border-white/10">
+            <div className="p-3 border-t border-white/10 space-y-2">
               <Link
                 href="/profile"
                 onClick={() => setMobileOpen(false)}
@@ -563,52 +559,60 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   <p className="text-[11px] text-sky-200/80 truncate">{user.roleName}</p>
                 </div>
               </Link>
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileOpen(false);
+                  void logout();
+                }}
+                className="w-full h-9 px-3 rounded-xl bg-white/5 hover:bg-rose-500/20 text-rose-200 text-xs font-semibold inline-flex items-center justify-center gap-2"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Đăng xuất</span>
+              </button>
             </div>
           </aside>
         </>
       )}
 
       {/* ===================================================================== */}
-      {/* PHƯƠNG ÁN 1: THANH ĐIỀU HƯỚNG NGANG TRÊN CÙNG (56px)                  */}
-      {/* Giải phóng 100% cạnh trái — hết cảnh 2 thanh dọc kẹp nhau ở M02/M03   */}
+      {/* TOPBAR TINH GIẢN CHUẨN LINEAR / STRIPE (54px, không khung hộp thô)     */}
+      {/* Chỉ 3 điểm chạm bên phải: Tìm nhanh mềm · Chuông mảnh · Menu Avatar   */}
       {/* ===================================================================== */}
-      <header className="sticky top-0 z-30 h-[56px] shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200/90 px-2.5 sm:px-4 flex items-center justify-between gap-2.5 shadow-[0_1px_3px_rgba(15,23,42,0.04)]">
-        {/* Trái: Nút menu mobile + Thương hiệu + 6 phân hệ chính nằm ngang */}
-        <div className="flex items-center gap-2 lg:gap-3 min-w-0">
+      <header className="sticky top-0 z-30 h-[54px] shrink-0 bg-white/88 backdrop-blur-xl border-b border-slate-200/75 px-3 sm:px-5 flex items-center justify-between gap-3">
+        {/* Trái: Thương hiệu thanh thoát + Menu 6 phân hệ có vạch nhấn mảnh */}
+        <div className="flex items-center gap-2.5 lg:gap-4 min-w-0 h-full">
           <button
             type="button"
             onClick={() => setMobileOpen(true)}
             aria-label="Mở menu điều hướng"
-            className="lg:hidden min-w-9 min-h-9 rounded-xl text-slate-600 hover:text-[#1E3A8A] hover:bg-slate-100 grid place-items-center shrink-0"
+            className="lg:hidden w-8 h-8 rounded-full text-slate-600 hover:text-slate-900 hover:bg-slate-100 grid place-items-center shrink-0"
           >
-            <Menu aria-hidden="true" className="w-5 h-5" />
+            <Menu aria-hidden="true" className="w-4 h-4" />
           </button>
 
           <Link
             href="/dashboard"
-            className="flex items-center gap-2 shrink-0 pr-1 lg:pr-2.5 lg:border-r lg:border-slate-200/90 focus-visible:outline-2 focus-visible:outline-[#1E3A8A] rounded-lg"
+            className="flex items-center gap-2 shrink-0 focus-visible:outline-2 focus-visible:outline-[#1E3A8A] rounded-lg"
           >
-            <span className="w-8 h-8 rounded-xl bg-gradient-to-br from-[#0F275C] to-[#2563EB] text-white font-extrabold text-xs grid place-items-center shadow-xs shrink-0">
+            <span className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#0B1F4D] via-[#1E3A8A] to-[#2563EB] text-white font-extrabold text-[11px] tracking-tight grid place-items-center shadow-xs shrink-0">
               TT
             </span>
-            <div className="hidden sm:block leading-tight">
-              <span className="block font-display font-extrabold tracking-tight text-sm text-[#0F275C]">
-                Toàn Trung
-              </span>
-              <span className="hidden 2xl:block text-[10px] font-medium text-slate-400">
-                CRM V2
-              </span>
-            </div>
+            <span className="hidden sm:inline font-display font-bold tracking-tight text-[14px] text-slate-900">
+              Toàn Trung
+            </span>
           </Link>
+
+          <span className="hidden lg:block h-4 w-px bg-slate-200/90 shrink-0" aria-hidden="true" />
 
           <span className="lg:hidden text-slate-900 font-bold text-sm truncate">
             {currentBreadcrumb}
           </span>
 
-          {/* Thanh điều hướng 6 phân hệ chính trên Desktop */}
+          {/* Menu chính: nền dịu khi active + vạch nhấn 2px thanh lịch dưới mép */}
           <nav
             aria-label="Điều hướng chính"
-            className="hidden lg:flex items-center gap-0.5 xl:gap-1 min-w-0"
+            className="hidden lg:flex items-center gap-0.5 xl:gap-1 h-full min-w-0"
           >
             {visibleWorkNav.map((item) => {
               const Icon = item.icon;
@@ -619,29 +623,37 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   href={item.href}
                   prefetch={true}
                   aria-current={active ? 'page' : undefined}
-                  className={`relative inline-flex items-center gap-1.5 h-9 px-2.5 xl:px-3 rounded-xl text-xs xl:text-[13px] whitespace-nowrap transition-all focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
-                    active
-                      ? 'bg-[#0F275C] text-white font-semibold shadow-xs'
-                      : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900 font-medium'
-                  }`}
+                  className={`relative h-full inline-flex items-center px-1 group focus-visible:outline-none`}
                 >
-                  <Icon
-                    aria-hidden="true"
-                    className={`w-4 h-4 shrink-0 ${active ? 'text-sky-300' : 'text-slate-400'}`}
-                  />
-                  <span className="hidden 2xl:inline">{item.label}</span>
-                  <span className="2xl:hidden">{item.shortLabel || item.label}</span>
-                  {item.badge !== undefined && item.badge > 0 && (
-                    <span
-                      title={`${item.badge} Lead chờ xác nhận tiếp nhận`}
-                      className={`ml-0.5 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-extrabold tabular-nums ${
-                        active
-                          ? 'bg-amber-400 text-slate-950'
-                          : 'bg-amber-500 text-white'
+                  <span
+                    className={`inline-flex items-center gap-1.5 h-8 px-2.5 xl:px-3 rounded-lg text-[13px] whitespace-nowrap transition-colors group-focus-visible:ring-2 group-focus-visible:ring-[#1E3A8A]/40 ${
+                      active
+                        ? 'bg-blue-50/85 text-[#0F275C] font-semibold'
+                        : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100/75 font-medium'
+                    }`}
+                  >
+                    <Icon
+                      aria-hidden="true"
+                      className={`w-[15px] h-[15px] shrink-0 transition-colors ${
+                        active ? 'text-[#1E3A8A]' : 'text-slate-400 group-hover:text-slate-600'
                       }`}
-                    >
-                      {item.badge}
-                    </span>
+                    />
+                    <span className="hidden 2xl:inline">{item.label}</span>
+                    <span className="2xl:hidden">{item.shortLabel || item.label}</span>
+                    {item.badge !== undefined && item.badge > 0 && (
+                      <span
+                        title={`${item.badge} Lead chờ xác nhận tiếp nhận`}
+                        className="ml-0.5 inline-flex items-center justify-center min-w-[17px] h-[17px] px-1 rounded-full bg-amber-500/15 text-amber-800 ring-1 ring-amber-400/50 text-[10px] font-bold tabular-nums"
+                      >
+                        {item.badge}
+                      </span>
+                    )}
+                  </span>
+                  {active && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute inset-x-2.5 bottom-0 h-[2px] rounded-t-full bg-[#1E3A8A]"
+                    />
                   )}
                 </Link>
               );
@@ -649,10 +661,10 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           </nav>
         </div>
 
-        {/* Phải: Tìm nhanh · Thông báo · Quản trị · Hồ sơ · Đăng xuất */}
+        {/* Phải: Chỉ 3 điểm chạm tinh tế — Tìm kiếm mềm · Chuông không viền · Menu Avatar hợp nhất */}
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           {showTopbarSearch && (
-            <div className="hidden md:flex w-44 xl:w-60 2xl:w-72 items-center gap-1.5 h-9 px-2.5 rounded-xl bg-slate-50 hover:bg-slate-100/80 focus-within:bg-white border border-slate-200 focus-within:border-[#1E3A8A] focus-within:ring-2 focus-within:ring-blue-500/15 text-xs text-slate-800 transition-all">
+            <div className="hidden md:flex w-44 xl:w-56 2xl:w-64 items-center gap-2 h-8 px-3 rounded-full bg-slate-100/80 hover:bg-slate-100 focus-within:bg-white border border-transparent focus-within:border-[#1E3A8A]/35 focus-within:ring-4 focus-within:ring-blue-500/10 text-xs text-slate-800 transition-all">
               <Search aria-hidden="true" className="w-3.5 h-3.5 text-slate-400 shrink-0" />
               <label htmlFor="tt-global-search-input" className="sr-only">
                 {topbarSearchPlaceholder}
@@ -681,7 +693,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   }
                 }}
                 placeholder={topbarSearchPlaceholder}
-                className="flex-1 bg-transparent outline-none text-xs text-slate-900 placeholder:text-slate-400 min-w-0"
+                className="flex-1 bg-transparent outline-none text-xs text-slate-800 placeholder:text-slate-400 min-w-0"
               />
               {globalSearchText ? (
                 <button
@@ -693,12 +705,12 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                       window.dispatchEvent(new CustomEvent('tt-global-search', { detail: '' }));
                     }
                   }}
-                  className="w-5 h-5 rounded-full hover:bg-slate-200 text-slate-500 hover:text-slate-900 text-xs font-bold grid place-items-center shrink-0"
+                  className="w-4 h-4 rounded-full hover:bg-slate-200 text-slate-500 text-xs font-bold grid place-items-center shrink-0"
                 >
                   ×
                 </button>
               ) : (
-                <kbd className="text-[10px] font-mono bg-white px-1.5 py-0.5 rounded border border-slate-200 text-slate-400 shrink-0">
+                <kbd className="text-[10px] font-mono text-slate-400 bg-white/80 px-1.5 py-0.5 rounded-md shadow-[0_1px_0_rgba(15,23,42,0.06)] shrink-0">
                   /
                 </kbd>
               )}
@@ -711,26 +723,33 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               onClick={() => setMobileSearchOpen(!mobileSearchOpen)}
               aria-label="Mở ô tìm kiếm"
               aria-expanded={mobileSearchOpen}
-              className="md:hidden w-9 h-9 rounded-xl border border-slate-200 bg-white text-slate-600 grid place-items-center"
+              className="md:hidden w-8 h-8 rounded-full hover:bg-slate-100 text-slate-500 grid place-items-center"
             >
               <Search aria-hidden="true" className="w-4 h-4" />
             </button>
           )}
 
-          {/* Chuông Thông báo */}
+          {/* Chuông thông báo không viền hộp */}
           <div ref={bellRef} className="relative">
             <button
               type="button"
-              onClick={() => setBellOpen((prev) => !prev)}
+              onClick={() => {
+                setAccountMenuOpen(false);
+                setBellOpen((prev) => !prev);
+              }}
               aria-label={unreadCount > 0 ? `Thông báo (${unreadCount} chưa đọc)` : 'Thông báo'}
               aria-expanded={bellOpen}
               aria-haspopup="dialog"
-              className="relative w-9 h-9 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 hover:text-[#1E3A8A] grid place-items-center transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
+              className={`relative w-8 h-8 rounded-full grid place-items-center transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
+                bellOpen
+                  ? 'bg-blue-50 text-[#1E3A8A]'
+                  : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'
+              }`}
             >
-              <Bell aria-hidden="true" className="w-4 h-4" />
+              <Bell aria-hidden="true" className="w-[17px] h-[17px]" />
               {unreadCount > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[18px] min-h-[18px] px-1 rounded-full bg-[#2563EB] text-white text-[10px] font-bold grid place-items-center">
-                  {unreadCount}
+                <span className="absolute top-0.5 right-0.5 min-w-[15px] h-[15px] px-1 rounded-full bg-[#2563EB] text-white text-[9px] font-bold grid place-items-center ring-2 ring-white tabular-nums">
+                  {unreadCount > 9 ? '9+' : unreadCount}
                 </span>
               )}
             </button>
@@ -739,14 +758,14 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               <div
                 role="dialog"
                 aria-label="Thông báo gần đây"
-                className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-white border border-slate-200 shadow-xl z-50 overflow-hidden"
+                className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-white border border-slate-200/90 shadow-2xl shadow-slate-900/10 z-50 overflow-hidden"
               >
-                <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                <div className="px-4 py-3 bg-slate-50/70 border-b border-slate-100 flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-slate-900">Thông báo cần xử lý</span>
+                    <span className="text-xs font-bold text-slate-900">Thông báo</span>
                     {unreadCount > 0 && (
-                      <span className="px-2 py-0.5 rounded-full bg-blue-100 text-[#1E3A8A] text-[11px] font-semibold">
-                        {unreadCount} chưa đọc
+                      <span className="px-2 py-0.5 rounded-full bg-blue-50 text-[#1E3A8A] text-[11px] font-semibold">
+                        {unreadCount} mới
                       </span>
                     )}
                   </div>
@@ -757,46 +776,32 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                       className="text-xs font-semibold text-[#1E3A8A] hover:underline inline-flex items-center gap-1"
                     >
                       <CheckCheck aria-hidden="true" className="w-3.5 h-3.5" />
-                      <span>Đánh dấu đã đọc</span>
+                      <span>Đọc hết</span>
                     </button>
                   )}
                 </div>
 
-                {desktopNotifPermission !== 'unsupported' && (
-                  <div className="px-4 py-2 bg-blue-50/60 border-b border-blue-100 flex items-center justify-between gap-2">
-                    {desktopNotifPermission === 'granted' ? (
-                      <span className="text-[11px] font-semibold text-emerald-700">
-                        ✓ Đã bật thông báo trình duyệt (im lặng, không tiếng kêu)
-                      </span>
-                    ) : desktopNotifPermission === 'denied' ? (
-                      <span className="text-[11px] text-slate-500">
-                        Thông báo trình duyệt đang tắt (bật lại ở biểu tượng ổ khóa thanh địa chỉ).
-                      </span>
-                    ) : (
-                      <>
-                        <span className="text-[11px] text-slate-700 font-medium">
-                          Nhận báo Lead im lặng khi mở tab khác:
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => void requestDesktopNotifPermission()}
-                          className="shrink-0 px-2.5 py-1 rounded-lg bg-[#1E3A8A] text-white text-[11px] font-bold hover:bg-[#1553A2] transition"
-                        >
-                          Bật thông báo
-                        </button>
-                      </>
-                    )}
+                {desktopNotifPermission !== 'unsupported' && desktopNotifPermission === 'default' && (
+                  <div className="px-4 py-2 bg-blue-50/50 border-b border-blue-100/80 flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-700 font-medium">
+                      Nhận báo Lead im lặng khi mở tab khác:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void requestDesktopNotifPermission()}
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-[#0F275C] text-white text-[11px] font-semibold hover:bg-[#1E3A8A] transition"
+                    >
+                      Bật ngay
+                    </button>
                   </div>
                 )}
 
                 <div className="max-h-80 overflow-y-auto divide-y divide-slate-100">
                   {loadingBell ? (
-                    <div className="p-6 text-center text-xs text-slate-500">
-                      Đang tải thông báo...
-                    </div>
+                    <div className="p-6 text-center text-xs text-slate-400">Đang tải...</div>
                   ) : recentNotifications.length === 0 ? (
-                    <div className="p-6 text-center text-xs text-slate-500">
-                      Chưa có thông báo cần xử lý.
+                    <div className="p-6 text-center text-xs text-slate-400">
+                      Không có thông báo mới.
                     </div>
                   ) : (
                     recentNotifications.map((item) => {
@@ -809,16 +814,16 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                           key={item.id}
                           href={item.actionUrl || '/notifications'}
                           onClick={() => setBellOpen(false)}
-                          className={`block px-4 py-3 hover:bg-slate-50 transition ${
-                            !item.isRead ? 'bg-blue-50/40' : ''
+                          className={`block px-4 py-3 hover:bg-slate-50/80 transition ${
+                            !item.isRead ? 'bg-blue-50/35' : ''
                           }`}
                         >
                           <div className="flex items-start gap-2.5">
                             <div
                               className={`mt-0.5 w-7 h-7 rounded-lg grid place-items-center shrink-0 ${
                                 isWarn
-                                  ? 'bg-amber-100 text-amber-800'
-                                  : 'bg-blue-100 text-[#1E3A8A]'
+                                  ? 'bg-amber-50 text-amber-700'
+                                  : 'bg-blue-50 text-[#1E3A8A]'
                               }`}
                             >
                               {isWarn ? (
@@ -833,7 +838,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                                   {item.title}
                                 </p>
                                 {!item.isRead && (
-                                  <span className="w-2 h-2 rounded-full bg-[#2563EB] shrink-0" />
+                                  <span className="w-1.5 h-1.5 rounded-full bg-[#2563EB] shrink-0" />
                                 )}
                               </div>
                               <p className="text-xs text-slate-600 line-clamp-2 mt-0.5">
@@ -851,11 +856,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   )}
                 </div>
 
-                <div className="p-2.5 bg-slate-50 border-t border-slate-200 text-center">
+                <div className="p-2 bg-slate-50/70 border-t border-slate-100 text-center">
                   <Link
                     href="/notifications"
                     onClick={() => setBellOpen(false)}
-                    className="w-full min-h-8 py-1.5 rounded-xl bg-[#1E3A8A] hover:bg-[#153075] text-white text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition"
+                    className="w-full h-8 rounded-xl hover:bg-slate-200/60 text-[#1E3A8A] text-xs font-semibold inline-flex items-center justify-center gap-1 transition"
                   >
                     <span>Xem tất cả thông báo</span>
                     <ArrowUpRight aria-hidden="true" className="w-3.5 h-3.5" />
@@ -865,105 +870,158 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
             )}
           </div>
 
-          {/* Menu Quản trị hệ thống (Nhân sự / Cài đặt) gom gọn vào icon bánh răng */}
-          {visibleSystemNav.length > 0 && (
-            <div ref={adminMenuRef} className="relative hidden lg:block">
-              <button
-                type="button"
-                onClick={() => setAdminMenuOpen((prev) => !prev)}
-                aria-label="Quản trị hệ thống"
-                aria-expanded={adminMenuOpen}
-                className={`w-9 h-9 rounded-xl border grid place-items-center transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
-                  isSystemRouteActive
-                    ? 'bg-[#0F275C] border-[#0F275C] text-white'
-                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50 hover:text-[#1E3A8A]'
-                }`}
-              >
-                <Settings aria-hidden="true" className="w-4 h-4" />
-              </button>
+          <span className="hidden sm:block h-4 w-px bg-slate-200/80" aria-hidden="true" />
 
-              {adminMenuOpen && (
-                <div className="absolute right-0 mt-2 w-52 rounded-xl bg-white border border-slate-200 shadow-xl py-1.5 z-50">
-                  <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                    Quản trị hệ thống
-                  </div>
-                  {visibleSystemNav.map((item) => {
-                    const Icon = item.icon;
-                    const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-                    return (
-                      <Link
-                        key={item.href}
-                        href={item.href}
-                        onClick={() => setAdminMenuOpen(false)}
-                        className={`flex items-center gap-2.5 px-3 py-2 text-xs font-semibold transition ${
-                          active
-                            ? 'bg-blue-50 text-[#0F275C]'
-                            : 'text-slate-700 hover:bg-slate-50'
-                        }`}
-                      >
-                        <Icon className="w-4 h-4 text-slate-500 shrink-0" />
-                        <span>{item.label}</span>
-                      </Link>
-                    );
-                  })}
-                </div>
+          {/* 1 Nút Avatar hợp nhất: Hồ sơ · Nhân sự · Cài đặt · Đăng xuất (không còn khung hộp rời rạc) */}
+          <div ref={accountMenuRef} className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setBellOpen(false);
+                setAccountMenuOpen((prev) => !prev);
+              }}
+              aria-label={`Tài khoản ${user.fullName}`}
+              aria-expanded={accountMenuOpen}
+              aria-haspopup="menu"
+              className={`h-8 pl-1 pr-2 rounded-full inline-flex items-center gap-2 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
+                accountMenuOpen
+                  ? 'bg-slate-100 text-slate-900'
+                  : 'hover:bg-slate-100/90 text-slate-700'
+              }`}
+            >
+              {user.avatarUrl ? (
+                <img
+                  src={user.avatarUrl}
+                  alt=""
+                  className="w-6 h-6 rounded-full object-cover ring-1 ring-slate-200 shrink-0"
+                />
+              ) : (
+                <span className="w-6 h-6 rounded-full bg-gradient-to-br from-[#0F275C] to-[#2563EB] text-white font-bold text-[10px] grid place-items-center shrink-0">
+                  {getInitials(user.fullName)}
+                </span>
               )}
-            </div>
-          )}
-
-          {/* Hồ sơ cá nhân */}
-          <Link
-            href="/profile"
-            aria-current={pathname === '/profile' ? 'page' : undefined}
-            title={`${user.fullName} · ${user.roleName}`}
-            className={`inline-flex items-center gap-2 h-9 px-1.5 xl:px-2.5 rounded-xl border transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A] ${
-              pathname === '/profile'
-                ? 'border-[#1E3A8A] bg-blue-50/70 text-[#0F275C]'
-                : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-            }`}
-          >
-            {user.avatarUrl ? (
-              <img
-                src={user.avatarUrl}
-                alt=""
-                className="w-6 h-6 rounded-full object-cover ring-1 ring-slate-200 shrink-0"
-              />
-            ) : (
-              <span className="w-6 h-6 rounded-full bg-[#1E3A8A] text-white font-bold text-[10px] grid place-items-center shrink-0">
-                {getInitials(user.fullName)}
+              <span className="hidden sm:inline text-xs font-semibold max-w-[124px] truncate text-slate-800">
+                {user.fullName}
               </span>
-            )}
-            <span className="hidden xl:inline text-xs font-semibold max-w-[116px] truncate">
-              {user.fullName}
-            </span>
-          </Link>
+              <ChevronDown
+                aria-hidden="true"
+                className={`w-3.5 h-3.5 text-slate-400 transition-transform ${
+                  accountMenuOpen ? 'rotate-180 text-slate-700' : ''
+                }`}
+              />
+            </button>
 
-          <button
-            type="button"
-            onClick={() => void logout()}
-            aria-label="Đăng xuất"
-            title="Đăng xuất"
-            className="h-9 px-2.5 rounded-xl border border-slate-200 bg-white hover:bg-red-50 hover:border-red-200 text-slate-600 hover:text-red-700 text-xs font-medium inline-flex items-center gap-1.5 transition-colors focus-visible:outline-2 focus-visible:outline-[#1E3A8A]"
-          >
-            <LogOut aria-hidden="true" className="w-3.5 h-3.5" />
-            <span className="hidden 2xl:inline">Đăng xuất</span>
-          </button>
+            {accountMenuOpen && (
+              <div
+                role="menu"
+                aria-label="Menu tài khoản và hệ thống"
+                className="absolute right-0 mt-2 w-60 rounded-2xl bg-white border border-slate-200/90 shadow-2xl shadow-slate-900/10 py-1.5 z-50"
+              >
+                <div className="px-3.5 py-2.5 border-b border-slate-100">
+                  <p className="text-xs font-bold text-slate-900 truncate">{user.fullName}</p>
+                  <p className="text-[11px] text-slate-500 truncate mt-0.5">{user.email}</p>
+                  <span className="inline-block mt-1.5 px-2 py-0.5 rounded-md bg-blue-50 text-[#1E3A8A] text-[10px] font-semibold">
+                    {user.roleName}
+                  </span>
+                </div>
+
+                <div className="py-1">
+                  <Link
+                    href="/profile"
+                    role="menuitem"
+                    onClick={() => setAccountMenuOpen(false)}
+                    className={`flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium transition ${
+                      pathname === '/profile'
+                        ? 'bg-blue-50/80 text-[#0F275C] font-semibold'
+                        : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <UserCircle2 className="w-4 h-4 text-slate-400" />
+                    <span>Hồ sơ cá nhân</span>
+                  </Link>
+                  <Link
+                    href="/notifications"
+                    role="menuitem"
+                    onClick={() => setAccountMenuOpen(false)}
+                    className={`flex items-center justify-between gap-2.5 px-3.5 py-2 text-xs font-medium transition ${
+                      pathname === '/notifications'
+                        ? 'bg-blue-50/80 text-[#0F275C] font-semibold'
+                        : 'text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2.5">
+                      <Bell className="w-4 h-4 text-slate-400" />
+                      <span>Trung tâm thông báo</span>
+                    </span>
+                    {unreadCount > 0 && (
+                      <span className="px-1.5 py-0.5 rounded-full bg-blue-100 text-[#1E3A8A] text-[10px] font-bold">
+                        {unreadCount}
+                      </span>
+                    )}
+                  </Link>
+                </div>
+
+                {visibleSystemNav.length > 0 && (
+                  <div className="py-1 border-t border-slate-100">
+                    <div className="px-3.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                      Quản trị hệ thống
+                    </div>
+                    {visibleSystemNav.map((item) => {
+                      const Icon = item.icon;
+                      const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                      return (
+                        <Link
+                          key={item.href}
+                          href={item.href}
+                          role="menuitem"
+                          onClick={() => setAccountMenuOpen(false)}
+                          className={`flex items-center gap-2.5 px-3.5 py-2 text-xs font-medium transition ${
+                            active
+                              ? 'bg-blue-50/80 text-[#0F275C] font-semibold'
+                              : 'text-slate-700 hover:bg-slate-50'
+                          }`}
+                        >
+                          <Icon className="w-4 h-4 text-slate-400" />
+                          <span>{item.label}</span>
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="pt-1 border-t border-slate-100">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setAccountMenuOpen(false);
+                      void logout();
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3.5 py-2 text-xs font-semibold text-rose-600 hover:bg-rose-50/80 transition text-left"
+                  >
+                    <LogOut className="w-4 h-4" />
+                    <span>Đăng xuất</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* Dải nhắc Chuyển giao Lead im lặng trên toàn hệ thống (chỉ hiện khi có Lead chờ bạn tiếp nhận & không đứng ở Tổng quan/Lead) */}
+      {/* Dải nhắc Chuyển giao Lead im lặng trên toàn hệ thống (chỉ hiện ngoài trang Tổng quan & Lead) */}
       {showGlobalHandoverStrip && firstHandover && (
         <div
           role="region"
           aria-label="Lead chuyển giao chờ tiếp nhận"
-          className="relative z-20 bg-amber-50/95 border-b border-amber-200/90 px-3 sm:px-4 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+          className="relative z-20 bg-amber-50/90 border-b border-amber-200/80 px-3 sm:px-5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs"
         >
           <div className="flex flex-wrap items-center gap-2 min-w-0">
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500 text-white text-[11px] font-bold shrink-0">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-900 ring-1 ring-amber-400/40 text-[11px] font-bold shrink-0">
               <ArrowRightLeft className="w-3 h-3" />
               <span>Chờ tiếp nhận ({incomingHandovers.length})</span>
             </span>
-            <span className="text-amber-950 font-medium truncate">
+            <span className="text-slate-800 font-medium truncate">
               <strong className="font-mono text-[#0F275C]" title={firstHandover.leadCode}>
                 {formatCompactLeadCode(firstHandover.leadCode)}
               </strong>{' '}
@@ -980,34 +1038,34 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
               type="button"
               disabled={confirmingLeadId === firstHandover.leadId}
               onClick={() => void handleQuickConfirmHandover(firstHandover)}
-              className="h-7 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold inline-flex items-center gap-1 transition disabled:opacity-50"
+              className="h-7 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold inline-flex items-center gap-1 transition disabled:opacity-50"
             >
               <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>{confirmingLeadId === firstHandover.leadId ? 'Đang xác nhận...' : 'Xác nhận nhận'}</span>
+              <span>{confirmingLeadId === firstHandover.leadId ? 'Đang lưu...' : 'Xác nhận nhận'}</span>
             </button>
             {incomingHandovers.length > 1 && (
               <button
                 type="button"
                 onClick={() => setHandoverPopoverOpen((p) => !p)}
-                className="h-7 px-2.5 rounded-lg border border-amber-300 bg-white hover:bg-amber-100/70 text-amber-950 font-semibold inline-flex items-center gap-1 transition"
+                className="h-7 px-2.5 rounded-lg bg-white hover:bg-amber-100/70 border border-amber-200 text-amber-950 font-semibold inline-flex items-center gap-1 transition"
               >
-                <span>Xem tất cả ({incomingHandovers.length})</span>
+                <span>Tất cả ({incomingHandovers.length})</span>
                 <ChevronDown className="w-3.5 h-3.5" />
               </button>
             )}
             <Link
               href={`/leads?highlight=${firstHandover.leadId}`}
-              className="h-7 px-2.5 rounded-lg border border-amber-300 bg-white hover:bg-amber-100/70 text-[#1E3A8A] font-semibold inline-flex items-center"
+              className="h-7 px-2.5 rounded-lg bg-white hover:bg-slate-50 border border-slate-200 text-slate-700 font-semibold inline-flex items-center"
             >
               Mở hồ sơ
             </Link>
           </div>
 
           {handoverPopoverOpen && incomingHandovers.length > 1 && (
-            <div className="absolute right-4 top-full mt-1 w-[min(460px,calc(100vw-2rem))] rounded-2xl bg-white border border-amber-200 shadow-2xl p-3 space-y-2 z-50">
+            <div className="absolute right-5 top-full mt-1 w-[min(460px,calc(100vw-2rem))] rounded-2xl bg-white border border-slate-200 shadow-2xl p-3 space-y-2 z-50">
               <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
                 <span className="font-bold text-slate-900">
-                  {incomingHandovers.length} Lead được chuyển giao chờ bạn xác nhận
+                  {incomingHandovers.length} Lead chuyển giao chờ bạn xác nhận
                 </span>
                 <button
                   type="button"
@@ -1021,7 +1079,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 {incomingHandovers.map((item) => (
                   <div
                     key={item.leadId}
-                    className="p-2.5 rounded-xl border border-slate-200/90 bg-slate-50/50 flex items-center justify-between gap-2"
+                    className="p-2.5 rounded-xl border border-slate-200/80 bg-slate-50/50 flex items-center justify-between gap-2"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-1.5">
@@ -1051,7 +1109,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                       type="button"
                       disabled={confirmingLeadId === item.leadId}
                       onClick={() => void handleQuickConfirmHandover(item)}
-                      className="shrink-0 h-7 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold inline-flex items-center gap-1 disabled:opacity-50"
+                      className="shrink-0 h-7 px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold inline-flex items-center gap-1 disabled:opacity-50"
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
                       <span>Xác nhận</span>
@@ -1108,7 +1166,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
         className={
           isFullBleed
             ? 'flex-1 w-full overflow-y-auto flex flex-col p-0 pb-16 md:pb-0 bg-[#F8FAFC] focus:outline-none'
-            : 'flex-1 w-full px-2.5 sm:px-3.5 lg:px-4 py-3 pb-20 md:pb-5 overflow-y-auto bg-[#F8FAFC] focus:outline-none'
+            : 'flex-1 w-full px-3 sm:px-4 lg:px-5 py-4 pb-20 md:pb-6 overflow-y-auto bg-[#F8FAFC] focus:outline-none'
         }
       >
         {children}
@@ -1161,20 +1219,20 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
         </button>
       </nav>
 
-      {/* Thông báo nổi im lặng (không tiếng kêu) */}
+      {/* Thông báo nổi im lặng (không âm thanh) */}
       {latestAlertNotification && (
         <div
           role="alert"
           data-testid="global-incoming-alert-toast"
-          className="fixed bottom-16 md:bottom-5 right-4 z-50 w-[min(390px,calc(100vw-2rem))] rounded-2xl border border-[#2563EB]/40 bg-white p-4 shadow-2xl ring-4 ring-blue-500/10"
+          className="fixed bottom-16 md:bottom-5 right-4 z-50 w-[min(380px,calc(100vw-2rem))] rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl shadow-slate-900/15"
         >
           <div className="flex items-start gap-3">
-            <div className="w-9 h-9 rounded-xl bg-[#0F275C] text-white grid place-items-center shrink-0 shadow-xs">
+            <div className="w-8 h-8 rounded-xl bg-blue-50 text-[#1E3A8A] grid place-items-center shrink-0">
               <Bell aria-hidden="true" className="w-4 h-4" />
             </div>
             <div className="min-w-0 flex-1 space-y-1">
               <div className="flex items-center justify-between gap-2">
-                <span className="px-2 py-0.5 rounded-full bg-blue-50 border border-blue-200 text-[#1E3A8A] text-[10px] font-bold uppercase">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-[#1E3A8A]">
                   {latestAlertNotification.category || 'Thông báo mới'}
                 </span>
                 <button
@@ -1210,7 +1268,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                     }
                     router.push(targetUrl);
                   }}
-                  className="px-3 py-1.5 rounded-lg bg-[#1E3A8A] hover:bg-[#1553A2] text-white text-xs font-bold inline-flex items-center gap-1 transition shadow-2xs"
+                  className="px-3 py-1.5 rounded-lg bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-xs font-semibold inline-flex items-center gap-1 transition"
                 >
                   <span>{latestAlertNotification.actionLabel || 'Mở hồ sơ ngay'}</span>
                   <ArrowUpRight className="w-3.5 h-3.5" />
@@ -1218,7 +1276,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 <button
                   type="button"
                   onClick={dismissLatestAlert}
-                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-500 hover:bg-slate-100"
                 >
                   Để sau
                 </button>
