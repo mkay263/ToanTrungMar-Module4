@@ -384,8 +384,111 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
     void checkRevisions(true);
 
+    // Realtime Server-Sent Events (SSE) stream (<50ms push, zero Redis) with automatic fallback to polling
+    let sseConnected = false;
+    let eventSource: EventSource | null = null;
+    let sseSyncDebounceTimer: number | null = null;
+    let pendingSyncDomains = new Set<SyncDomain>();
+
+    const flushDebouncedSync = (sourceLabel: string) => {
+      if (cancelled || pendingSyncDomains.size === 0) return;
+      const batch = Array.from(pendingSyncDomains);
+      pendingSyncDomains = new Set<SyncDomain>();
+      invalidateApiCacheByDomains(batch);
+      publishDataSync(batch, sourceLabel);
+      if (batch.includes('branding')) {
+        void refreshBranding();
+      }
+    };
+
+    const applyIncomingRevisionPayload = (res: SystemRevisionsDto, sourceLabel: string) => {
+      if (cancelled) return;
+      lastRevisionCheckAtRef.current = Date.now();
+
+      const nextUnread = typeof res.unreadCount === 'number' ? res.unreadCount : undefined;
+      const unreadIncreased =
+        typeof nextUnread === 'number' && nextUnread > prevUnreadCountRef.current;
+      if (typeof nextUnread === 'number') {
+        setUnreadCount((prev) => (prev === nextUnread ? prev : nextUnread));
+        prevUnreadCountRef.current = nextUnread;
+      }
+
+      const prevDate = prevVnDateRef.current;
+      if (prevDate && res.serverDateVn && prevDate !== res.serverDateVn) {
+        const dateDomains: SyncDomain[] = ['leads', 'tracking', 'ads', 'reports'];
+        invalidateApiCacheByDomains(dateDomains);
+        publishDataSync(dateDomains, 'vn_midnight_rollover');
+      }
+      if (res.serverDateVn) {
+        prevVnDateRef.current = res.serverDateVn;
+      }
+
+      const prevRev = prevRevisionsRef.current;
+      let notificationsDomainChanged = false;
+      if (prevRev && res.revisions) {
+        const urgentDomains: SyncDomain[] = [];
+        for (const [domain, rev] of Object.entries(res.revisions)) {
+          if (prevRev[domain] !== rev) {
+            const typed = domain as SyncDomain;
+            if (typed === 'notifications') notificationsDomainChanged = true;
+            if (typed === 'notifications' || typed === 'leads' || typed === 'design') {
+              urgentDomains.push(typed);
+            } else {
+              pendingSyncDomains.add(typed);
+            }
+          }
+        }
+        if (urgentDomains.length > 0) {
+          invalidateApiCacheByDomains(urgentDomains);
+          publishDataSync(urgentDomains, sourceLabel);
+        }
+        if (pendingSyncDomains.size > 0) {
+          if (sseSyncDebounceTimer !== null) {
+            window.clearTimeout(sseSyncDebounceTimer);
+          }
+          sseSyncDebounceTimer = window.setTimeout(() => {
+            sseSyncDebounceTimer = null;
+            flushDebouncedSync(sourceLabel);
+          }, 1200);
+        }
+      }
+      if (res.revisions) {
+        prevRevisionsRef.current = { ...res.revisions };
+      }
+
+      if (notifBaselineLoadedRef.current && (unreadIncreased || notificationsDomainChanged)) {
+        void surfaceNewNotifications();
+      }
+    };
+
+    if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+      try {
+        eventSource = new EventSource('/api/v1/system/stream', { withCredentials: true });
+        eventSource.onopen = () => {
+          sseConnected = true;
+        };
+        eventSource.onerror = () => {
+          sseConnected = false;
+        };
+        const onSseData = (ev: MessageEvent) => {
+          try {
+            const parsed = JSON.parse(ev.data) as SystemRevisionsDto;
+            applyIncomingRevisionPayload(parsed, 'sse_realtime');
+          } catch {
+            // ignore malformed SSE payload
+          }
+        };
+        eventSource.addEventListener('snapshot', onSseData);
+        eventSource.addEventListener('revision', onSseData);
+      } catch {
+        sseConnected = false;
+      }
+    }
+
     const intervalId = window.setInterval(() => {
-      void checkRevisions(false);
+      if (!sseConnected) {
+        void checkRevisions(false);
+      }
     }, 30_000);
 
     const onVisibilityChange = () => {
@@ -423,6 +526,17 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       cancelled = true;
+      if (sseSyncDebounceTimer !== null) {
+        window.clearTimeout(sseSyncDebounceTimer);
+      }
+      if (eventSource) {
+        try {
+          eventSource.close();
+        } catch {
+          // ignore
+        }
+        eventSource = null;
+      }
       window.clearInterval(intervalId);
       unsubNotif();
       if (typeof document !== 'undefined') {

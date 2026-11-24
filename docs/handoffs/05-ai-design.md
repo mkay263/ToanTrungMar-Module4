@@ -69,3 +69,11 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
    - Khóa bảo mật đường dẫn `assertCanAccessStorageObjectKey` (chống Path Traversal + kiểm tra phân quyền dự án/Lead).
    - Bước tiếp theo: Chờ PO/Admin quyết định [Q16](../decisions/OPEN_QUESTIONS.md#q16) nếu muốn mở tab Gắn LED Nhanh trực tiếp cho `MKT_STAFF`/`MKT_LEAD`.
 
+
+
+---
+
+## 5. Nâng cấp Chuẩn Doanh Nghiệp Local — Enterprise Edition (24/11/2026)
+- **Tách mô-đun dịch vụ & giao diện Studio**: Tách toàn bộ động cơ Gắn Màn LED Nhanh sang `quick-led-studio.service.ts` (giảm kích thước `05-ai-design/service.ts` ~700 dòng) và lazy-load `StudioProjectModals.tsx` + `StudioAiConfigAndPromptModals.tsx` khỏi `AiDesignWorkspace.tsx`.
+- **Liên thông M01 → M05 từ Phiếu Kỹ thuật LED**: Nhận trực tiếp thông số kích thước $W \times H$ (m), dòng Pixel Pitch và phương án ghép Cabinet từ `/leads?specSheet=1` sang dự án phối cảnh Studio M05 mà không mang theo SĐT/Email hay đơn giá.
+- **Studio Duyệt Phối cảnh Chuyên nghiệp (`StudioVisualPinOverlay.tsx` + `/api/v1/design/[id]/pins`)**: Bổ sung chế độ **Ghim nhận xét trực quan trên ảnh** (tọa độ `xPct`/`yPct`, đánh dấu đã xử lý, chặn tuyệt đối SĐT/Email khách hàng trong nội dung ghim) kết hợp thanh kéo **So sánh Trước / Sau** trực tiếp trên khung preview Studio.

@@ -14,6 +14,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { UI_VOCABULARY, type M02CampaignRowDto } from '@toantrung/contracts';
+import { useVirtualRows } from '@/core/components/common/VirtualizedExcelGrid';
 
 type AdsStatusFilter = 'ENABLED' | 'HAS_COST' | 'ALL';
 type AdsViewMode = 'summary' | 'daily';
@@ -440,6 +441,15 @@ export function AdsExcelTableSection({
   }, [viewMode, visibleCols]);
 
   const colSpanCount = 1 + excelColLetters.length;
+  const virtualGrid = useVirtualRows({
+    totalCount: displayRows.length,
+    rowHeight: 46,
+    overscan: 14,
+    enabledThreshold: 60,
+  });
+  const visibleDisplayRows = virtualGrid.isVirtualized
+    ? displayRows.slice(virtualGrid.startIndex, virtualGrid.endIndex)
+    : displayRows;
 
   return (
     <section
@@ -732,12 +742,14 @@ export function AdsExcelTableSection({
         {sortAnnouncement}
       </div>
 
-      {/* Bảng dữ liệu chính — mặc định luôn bật lưới A-Z rõ nét, không dính cột trái gây đè chữ */}
+      {/* Bảng dữ liệu chính — mặc định luôn bật lưới A-Z rõ nét, hỗ trợ ảo hóa 10,000+ dòng 60 FPS */}
       <div
+        ref={virtualGrid.containerRef}
+        onScroll={virtualGrid.handleScroll}
         tabIndex={0}
         role="region"
         aria-label="Bảng chiến dịch quảng cáo và link đích"
-        className="overflow-x-auto max-h-[72vh]"
+        className="overflow-x-auto overflow-y-auto max-h-[72vh]"
       >
         <table className="w-full min-w-[1060px] text-left border-separate border-spacing-0 text-xs [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
           <thead className="bg-slate-100 text-slate-700 sticky top-0 z-20 shadow-[0_1px_0_#CBD5E1]">
@@ -849,8 +861,18 @@ export function AdsExcelTableSection({
                 </td>
               </tr>
             ) : (
-              displayRows.map((row, rowIdx) => {
-                const c = row.campaign;
+              <>
+                {virtualGrid.topSpacerHeight > 0 && (
+                  <tr aria-hidden="true">
+                    <td
+                      colSpan={colSpanCount}
+                      style={{ height: virtualGrid.topSpacerHeight, padding: 0, border: 0 }}
+                    />
+                  </tr>
+                )}
+                {visibleDisplayRows.map((row, sliceIdx) => {
+                  const rowIdx = virtualGrid.startIndex + sliceIdx;
+                  const c = row.campaign;
                 const rowLabel = viewMode === 'daily' ? `${c.campaignName} (${row.date})` : c.campaignName;
                 const realUrls = c.finalUrls || [];
                 const displayUrl = realUrls[0] || c.primaryDestinationUrl || null;
@@ -1013,7 +1035,16 @@ export function AdsExcelTableSection({
                     )}
                   </tr>
                 );
-              })
+                })}
+                {virtualGrid.bottomSpacerHeight > 0 && (
+                  <tr aria-hidden="true">
+                    <td
+                      colSpan={colSpanCount}
+                      style={{ height: virtualGrid.bottomSpacerHeight, padding: 0, border: 0 }}
+                    />
+                  </tr>
+                )}
+              </>
             )}
           </tbody>
 

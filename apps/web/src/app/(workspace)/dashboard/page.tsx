@@ -41,6 +41,11 @@ import { GoogleAdsDateRangePicker } from '@/components/common/GoogleAdsDateRange
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { formatWaitingDuration, getInitials } from '@/core/layout/WorkspaceShell';
 import { formatCompactLeadCode } from '@/modules/01-leads/leads-helpers';
+import {
+  FunnelAnomalyGuardStrip,
+  KpiAuditLineageDrawer,
+  type LineageMetricType,
+} from '@/core/components/common/KpiAuditLineageDrawer';
 
 interface PersonalHandoverItem {
   leadId: number;
@@ -169,6 +174,7 @@ function mapToDashboardPreset(nextPreset: string): DashboardDatePreset {
 
 export default function DashboardPage() {
   const { user } = useSession();
+  const [auditLineageMetric, setAuditLineageMetric] = useState<LineageMetricType | null>(null);
   const { scope, hydrated, updateScope } = useDashboardScope({ includeWebsiteInUrl: false });
   const apiPath = useMemo(() => buildDashboardApiPath(scope), [scope]);
 
@@ -279,16 +285,30 @@ export default function DashboardPage() {
     }
     void fetchPersonal({ skipCache: true });
 
+    let syncDebounceTimer: number | null = null;
     const unsubscribe = subscribeDataSync(
       ['reports', 'leads', 'tracking', 'ads', 'design', 'websites', 'notifications'],
-      () => {
-        void fetchDashboard({ silent: true });
-        void fetchPersonal({ skipCache: true });
+      (ev) => {
+        const needsPersonal = ev.domains.some(
+          (d) => d === 'leads' || d === 'notifications' || d === 'design',
+        );
+        if (syncDebounceTimer !== null) window.clearTimeout(syncDebounceTimer);
+        syncDebounceTimer = window.setTimeout(
+          () => {
+            syncDebounceTimer = null;
+            void fetchDashboard({ silent: true });
+            if (needsPersonal) {
+              void fetchPersonal({ skipCache: true });
+            }
+          },
+          needsPersonal ? 120 : 900,
+        );
       },
     );
 
     return () => {
       controller.abort();
+      if (syncDebounceTimer !== null) window.clearTimeout(syncDebounceTimer);
       unsubscribe();
     };
   }, [hydrated, user, apiPath, scope.preset, scope.from, scope.to, fetchDashboard, fetchPersonal]);
@@ -724,6 +744,35 @@ export default function DashboardPage() {
       {/* ===================================================================== */}
       {/* 4 THẺ KPI XU HƯỚNG (Bento Metric Cards chuẩn Executive)               */}
       {/* ===================================================================== */}
+      <FunnelAnomalyGuardStrip />
+
+      {canViewLeads && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white/80 border border-slate-200/80 px-3.5 py-2 text-xs">
+          <span className="font-semibold text-slate-600">
+            🔍 Kiểm toán &amp; Đối chứng gốc từng con số KPI:
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                { m: 'received_leads', label: 'Tổng Lead (L1)' },
+                { m: 'valid_leads', label: 'Lead hợp lệ (L2)' },
+                { m: 'ad_attributed_leads', label: 'Lead từ Quảng cáo (L3)' },
+                { m: 'won_leads', label: 'Đơn đã chốt' },
+              ] as const
+            ).map((btn) => (
+              <button
+                key={btn.m}
+                type="button"
+                onClick={() => setAuditLineageMetric(btn.m)}
+                className="h-7 px-2.5 rounded-lg border border-slate-200 bg-slate-50 hover:bg-[#0F275C] hover:text-white text-[11px] font-semibold text-slate-700 transition"
+              >
+                {btn.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <section aria-label="4 chỉ số điều hành chính" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5">
         {/* KPI 1: Phễu Lead & Chốt đơn */}
         <Link
@@ -1782,6 +1831,11 @@ export default function DashboardPage() {
           )}
         </section>
       </div>
+      <KpiAuditLineageDrawer
+        open={Boolean(auditLineageMetric)}
+        onClose={() => setAuditLineageMetric(null)}
+        metric={auditLineageMetric}
+      />
     </div>
   );
 }

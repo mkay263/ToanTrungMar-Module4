@@ -30,6 +30,11 @@ import { apiRequest, ApiClientError } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
 import { GoogleOAuthManager } from '@/components/google-oauth/GoogleOAuthManager';
 import { AdminSyncCenterPanel } from '@/components/settings/AdminSyncCenterPanel';
+import dynamic from 'next/dynamic';
+const EnterpriseGovernancePanel = dynamic(
+  () => import('@/components/settings/EnterpriseGovernancePanel'),
+  { ssr: false },
+);
 
 interface AuditItem {
   id: number;
@@ -53,10 +58,8 @@ export default function SettingsPage() {
   const [adminBranding, setAdminBranding] = useState<PublicBrandingDto>(branding);
   const [audits, setAudits] = useState<AuditItem[]>([]);
 
-  // Sub-tab navigation: 'system_health' | 'branding_identity' | 'google_integrations'
-  const [activeSettingsTab, setActiveSettingsTab] = useState<
-    'system_health' | 'branding_identity' | 'google_integrations'
-  >('google_integrations');
+  // Sub-tab navigation: 'system_health' | 'branding_identity' | 'google_integrations' | 'governance'
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'system_health' | 'branding_identity' | 'google_integrations' | 'governance'>('google_integrations');
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -64,6 +67,7 @@ export default function SettingsPage() {
     if (t === 'branding' || t === 'branding_identity') setActiveSettingsTab('branding_identity');
     else if (t === 'health' || t === 'system_health') setActiveSettingsTab('system_health');
     else if (t === 'sync' || t === 'google_integrations') setActiveSettingsTab('google_integrations');
+    else if (t === 'governance' || t === 'diagnostics' || t === 'audit') setActiveSettingsTab('governance');
   }, []);
 
   // Human-Friendly System Health & 1-Click Backup State (Enhancement 8)
@@ -696,12 +700,28 @@ export default function SettingsPage() {
             <ShieldCheck className="w-3.5 h-3.5" />
             <span>Lưu trữ &amp; Sao lưu</span>
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSettingsTab === 'governance'}
+            onClick={() => setActiveSettingsTab('governance')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-all ${
+              activeSettingsTab === 'governance'
+                ? 'bg-[#1E3A8A] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>Kiểm toán &amp; Chẩn đoán Local</span>
+          </button>
         </div>
       </div>
 
       {/* =====================================================================
           SUB-TAB: GOOGLE OAUTH 2.0 INTEGRATION (MODULES 02, 03, 04)
       ===================================================================== */}
+      {activeSettingsTab === 'governance' && <EnterpriseGovernancePanel />}
+
       {activeSettingsTab === 'google_integrations' && (
         <div className="space-y-6">
           <AdminSyncCenterPanel />

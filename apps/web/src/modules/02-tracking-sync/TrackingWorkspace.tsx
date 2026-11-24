@@ -42,6 +42,11 @@ import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
 import { MktSpreadsheetCalcBar, useMktExcelSelection } from '@/components/common/MktSpreadsheetCalcBar';
 import { AdsExcelTableSection } from './AdsExcelTableSection';
+import {
+  FunnelAnomalyGuardStrip,
+  KpiAuditLineageDrawer,
+  type LineageMetricType,
+} from '@/core/components/common/KpiAuditLineageDrawer';
 
 const MarketingTrafficChart = dynamic(
   () => import('./MarketingTrafficChart').then((m) => m.MarketingTrafficChart),
@@ -191,6 +196,7 @@ function buildM02ApiPath(
 
 export function TrackingWorkspace() {
   const { user } = useSession();
+  const [auditLineageMetric, setAuditLineageMetric] = useState<LineageMetricType | null>(null);
   const canDirectDesign = Boolean(user && hasBaPermission(user.roleCode, 'AI_DESIGN'));
   const { scope, hydrated, updateScope } = useDashboardScope();
   const [compareEnabled, setCompareEnabled] = useState(false);
@@ -629,6 +635,23 @@ export function TrackingWorkspace() {
             className="font-semibold underline"
           >
             Thử lại
+          </button>
+        </div>
+      )}
+
+      <FunnelAnomalyGuardStrip />
+
+      {user && hasBaPermission(user.roleCode, 'LEAD_VIEW_OWN') && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white border border-slate-200 px-3.5 py-2 text-xs">
+          <span className="text-slate-600 font-medium">
+            Đối chiếu minh bạch hồ sơ Lead thực tế gắn với Chiến dịch quảng cáo:
+          </span>
+          <button
+            type="button"
+            onClick={() => setAuditLineageMetric('ad_attributed_leads')}
+            className="h-7 px-3 rounded-lg bg-[#0F275C] hover:bg-[#1E3A8A] text-white text-[11px] font-bold transition"
+          >
+            🔍 Mở Danh sách Đối chứng Lead Quảng cáo (L3)
           </button>
         </div>
       )}
@@ -2559,6 +2582,12 @@ export function TrackingWorkspace() {
           </div>
         </div>
       )}
+      <KpiAuditLineageDrawer
+        open={Boolean(auditLineageMetric)}
+        onClose={() => setAuditLineageMetric(null)}
+        metric={auditLineageMetric}
+        websiteId={scope.websiteId || 'all'}
+      />
     </div>
   );
 }

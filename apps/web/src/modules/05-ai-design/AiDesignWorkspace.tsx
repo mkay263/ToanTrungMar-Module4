@@ -59,7 +59,25 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
-import { ModelRegistryModal } from './ModelRegistryModal';
+import dynamic from 'next/dynamic';
+const ModelRegistryModal = dynamic(
+  () => import('./ModelRegistryModal').then((m) => m.ModelRegistryModal),
+  { ssr: false },
+);
+const StudioProjectModals = dynamic(() => import('./StudioProjectModals'), { ssr: false });
+const StudioAiConfigAndPromptModals = dynamic(
+  () => import('./StudioAiConfigAndPromptModals'),
+  { ssr: false },
+);
+const StudioVisualPinOverlay = dynamic(
+  () => import('./StudioVisualPinOverlay'),
+  { ssr: false },
+);
+const AiFinOpsControlPanel = dynamic(
+  () => import('@/core/components/common/AiFinOpsControlPanel'),
+  { ssr: false },
+);
+import { subscribeDataSync } from '@/core/http/data-sync-bus';
 import {
   STORAGE_SELECTED_PROJECT_KEY,
   STORAGE_UNIVERSAL_PARAMS_KEY,
@@ -109,6 +127,30 @@ export function AiDesignWorkspace() {
   const [savingBrief, setSavingBrief] = useState<boolean>(false);
   const [showModelRegistryModal, setShowModelRegistryModal] = useState<boolean>(false);
   const [tabletDrawerOpen, setTabletDrawerOpen] = useState<boolean>(false);
+  const [pinModeActive, setPinModeActive] = useState<boolean>(false);
+  const [showTokenFinOpsModal, setShowTokenFinOpsModal] = useState<boolean>(false);
+  const [liveTokenSummary, setLiveTokenSummary] = useState<{ monthTokens: number; monthCalls: number; monthCostUsdFormatted: string } | null>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    const fetchTokenBadge = async (skipCache = false) => {
+      try {
+        const res = await apiRequest<{ myStats: { monthTokens: number; monthCalls: number; monthCostUsdFormatted: string } }>('/api/v1/ai/copilot?mode=finops&module=05-ai-design', { skipCache });
+        if (!cancelled && res?.myStats) setLiveTokenSummary(res.myStats);
+      } catch {
+        // ignore for roles without AI permission
+      }
+    };
+    void fetchTokenBadge(false);
+    const unsub = subscribeDataSync(['design'], () => {
+      void fetchTokenBadge(true);
+    });
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [user]);
 
   // Canvas View Mode: 'original' (Ảnh gốc) | 'result' (Kết quả AI) | 'live_3d' (Chấm điểm & Ghép 3D $0) | 'compare' (So sánh Trước/Sau) | 'bom' (Sơ đồ Cabin & BOM)
   const [viewMode, setViewMode] = useState<'original' | 'result' | 'live_3d' | 'compare' | 'bom'>('result');
@@ -4568,6 +4610,21 @@ export function AiDesignWorkspace() {
 
           <button
             type="button"
+            data-testid="open-m05-token-finops-btn"
+            onClick={() => setShowTokenFinOpsModal(true)}
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border border-purple-200/90 bg-purple-50/80 px-2.5 py-1.5 text-xs font-bold text-purple-900 shadow-2xs transition hover:bg-purple-100 hover:border-purple-300"
+            title="Xem thống kê tiêu thụ Token (Prompt / Output) và chi phí AI thực tế tại M05"
+          >
+            <Coins className="h-3.5 w-3.5 text-purple-600 shrink-0" />
+            <span>
+              {liveTokenSummary
+                ? `Token AI: ${liveTokenSummary.monthTokens.toLocaleString('vi-VN')} tok (${liveTokenSummary.monthCostUsdFormatted})`
+                : 'Token & Chi phí AI'}
+            </span>
+          </button>
+
+          <button
+            type="button"
             data-testid="open-model-registry-btn"
             onClick={() => setShowModelRegistryModal(true)}
             className="hidden 2xl:inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 hover:text-slate-900"
@@ -5001,6 +5058,25 @@ export function AiDesignWorkspace() {
                           : 'Chấm điểm'}
                       </span>
                     </button>
+                    {currentProject && viewMode !== 'bom' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const next = !pinModeActive;
+                          setPinModeActive(next);
+                          if (next) setShowHandles(false);
+                        }}
+                        className={`inline-flex items-center gap-1 rounded-xl px-2.5 py-1 text-xs font-extrabold transition shadow-2xs ${
+                          pinModeActive
+                            ? 'bg-amber-500 text-white ring-2 ring-amber-300'
+                            : 'border border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+                        }`}
+                        title="Bấm trực tiếp lên ảnh để ghim ghi chú chỉnh sửa cho Designer"
+                      >
+                        <Pin className="h-3.5 w-3.5" />
+                        <span>{pinModeActive ? 'Đang ghim' : 'Ghim nhận xét'}</span>
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -5427,6 +5503,15 @@ export function AiDesignWorkspace() {
                         ))}
                       </div>
                     )}
+
+                      {/* Visual Pin Feedback Overlay (M05 Studio Collaboration) */}
+                      <StudioVisualPinOverlay
+                        projectId={currentProject?.id ?? null}
+                        versionId={currentVersion?.id ?? null}
+                        pinModeActive={pinModeActive}
+                        user={user}
+                        onError={(msg) => setError(msg)}
+                      />
 
                     {/* Bottom-Right Fullscreen Icon */}
                     <button
@@ -6282,1109 +6367,143 @@ export function AiDesignWorkspace() {
         )}
       </div>
 
-      {/* MODAL: CREATE PROJECT */}
-      {showCreateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-2xl">
-            <h3 className="text-lg font-bold text-slate-900 mb-3">Tạo dự án thiết kế mới</h3>
-            <form onSubmit={handleCreateProject} className="space-y-3.5 text-sm">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Loại dự án:</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setNewProjectType('perspective_3d')}
-                    className={`rounded-xl p-2.5 font-bold border text-center transition ${
-                      newProjectType === 'perspective_3d'
-                        ? 'border-[#1E3A8A] bg-blue-50 text-[#1E3A8A]'
-                        : 'border-slate-200 text-slate-600'
-                    }`}
-                  >
-                    Phối cảnh 3D LED
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setNewProjectType('banner')}
-                    className={`rounded-xl p-2.5 font-bold border text-center transition ${
-                      newProjectType === 'banner'
-                        ? 'border-[#1E3A8A] bg-blue-50 text-[#1E3A8A]'
-                        : 'border-slate-200 text-slate-600'
-                    }`}
-                  >
-                    Banner khung LED
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Tên dự án *:</label>
-                <input
-                  type="text"
-                  required
-                  value={newProjectName}
-                  onChange={(e) => setNewProjectName(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Hồ sơ Lead liên kết (Tùy chọn):
-                </label>
-                <select
-                  value={newLeadId}
-                  onChange={(e) => setNewLeadId(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                >
-                  <option value="">-- Không gắn Lead (Thiết kế độc lập) --</option>
-                  {leadOptions.map((l) => (
-                    <option key={l.id} value={l.id}>
-                      {l.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Người liên hệ:</label>
-                <input
-                  type="text"
-                  value={newContactName}
-                  onChange={(e) => setNewContactName(e.target.value)}
-                  placeholder="Tên khách hàng / đại diện dự án"
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Con AI thực thi ban đầu:
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <select
-                    value={selectedProviderId}
-                    onChange={(e) => {
-                      const nextPid = e.target.value as AiProviderId;
-                      setSelectedProviderId(nextPid);
-                      const cat = providerStatus?.availableProviders?.find(
-                        (p) => p.providerId === nextPid
-                      );
-                      if (cat && cat.models.length > 0) {
-                        setSelectedModelId(cat.activeModel || cat.models[0].id);
-                      }
-                    }}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium"
-                  >
-                    {(providerStatus?.availableProviders || []).map((prov) => (
-                      <option key={prov.providerId} value={prov.providerId}>
-                        {prov.shortName}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={selectedModelId}
-                    onChange={(e) => setSelectedModelId(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium"
-                  >
-                    {(
-                      providerStatus?.availableProviders?.find(
-                        (p) => p.providerId === selectedProviderId
-                      )?.models || [{ id: 'imagen-3.0-generate-002', name: 'Google Imagen 3 Pro' }]
-                    ).map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Ảnh công trình khảo sát (Tùy chọn — có thể tải thêm sau):
-                </label>
-                <label className="flex cursor-pointer items-center justify-between rounded-xl border border-dashed border-slate-300 bg-slate-50 px-3.5 py-2.5 text-xs font-semibold text-slate-700 hover:border-[#1E3A8A] hover:bg-blue-50/40">
-                  <span className="truncate">
-                    {newProjectFiles.length > 0
-                      ? `Đã chọn ${newProjectFiles.length} ảnh (${newProjectFiles.map((f) => f.name).join(', ')})`
-                      : '📤 Bấm để chọn ảnh công trình của dự án này...'}
-                  </span>
-                  <input
-                    type="file"
-                    multiple
-                    accept="image/png,image/jpeg,image/webp"
-                    className="hidden"
-                    onChange={(e) => {
-                      const files = Array.from(e.target.files || []);
-                      setNewProjectFiles(files);
-                    }}
-                  />
-                </label>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Ghi chú vị trí lắp đặt (Tùy chọn):
-                </label>
-                <textarea
-                  rows={2}
-                  value={newPrompt}
-                  onChange={(e) => setNewPrompt(e.target.value)}
-                  placeholder="VD: Mặt tiền sảnh chính, vách hội trường tầng 2..."
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm"
-                />
-              </div>
-
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50"
-                >
-                  Hủy
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="rounded-xl bg-[#1E3A8A] px-5 py-2 text-sm font-bold text-white hover:bg-[#2563EB] shadow-xs"
-                >
-                  {submitting ? 'Đang khởi tạo...' : 'Tạo dự án'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {(showCreateModal || editingName || confirmModal || promptModal) && (
+        <StudioProjectModals
+          showCreateModal={showCreateModal}
+          setShowCreateModal={setShowCreateModal}
+          handleCreateProject={handleCreateProject}
+          newProjectType={newProjectType}
+          setNewProjectType={setNewProjectType}
+          newProjectName={newProjectName}
+          setNewProjectName={setNewProjectName}
+          newLeadId={newLeadId}
+          setNewLeadId={setNewLeadId}
+          leadOptions={leadOptions}
+          newContactName={newContactName}
+          setNewContactName={setNewContactName}
+          selectedProviderId={selectedProviderId}
+          setSelectedProviderId={setSelectedProviderId}
+          selectedModelId={selectedModelId}
+          setSelectedModelId={setSelectedModelId}
+          providerStatus={providerStatus}
+          newProjectFiles={newProjectFiles}
+          setNewProjectFiles={setNewProjectFiles}
+          newPrompt={newPrompt}
+          setNewPrompt={setNewPrompt}
+          submitting={submitting}
+          editingName={editingName}
+          setEditingName={setEditingName}
+          renameTargetId={renameTargetId}
+          setRenameTargetId={setRenameTargetId}
+          currentProject={currentProject}
+          requests={requests}
+          handleRenameProject={handleRenameProject}
+          renameValue={renameValue}
+          setRenameValue={setRenameValue}
+          quickEditDesignType={quickEditDesignType}
+          setQuickEditDesignType={setQuickEditDesignType}
+          quickEditLeadId={quickEditLeadId}
+          setQuickEditLeadId={setQuickEditLeadId}
+          quickEditContactName={quickEditContactName}
+          setQuickEditContactName={setQuickEditContactName}
+          quickEditPitch={quickEditPitch}
+          setQuickEditPitch={setQuickEditPitch}
+          quickEditWidthM={quickEditWidthM}
+          setQuickEditWidthM={setQuickEditWidthM}
+          quickEditHeightM={quickEditHeightM}
+          setQuickEditHeightM={setQuickEditHeightM}
+          quickEditInstallInfo={quickEditInstallInfo}
+          setQuickEditInstallInfo={setQuickEditInstallInfo}
+          savingQuickEdit={savingQuickEdit}
+          requestDeleteProject={requestDeleteProject}
+          confirmModal={confirmModal}
+          setConfirmModal={setConfirmModal}
+          confirmBusy={confirmBusy}
+          setConfirmBusy={setConfirmBusy}
+          promptModal={promptModal}
+          setPromptModal={setPromptModal}
+          promptBusy={promptBusy}
+          setPromptBusy={setPromptBusy}
+          setError={setError}
+        />
       )}
 
-      {/* MODAL: QUICK EDIT PROJECT (SỬA NHANH DỰ ÁN) */}
-      {editingName && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-xs">
-          <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
-              <div>
-                <h4 className="text-base font-bold text-slate-900">Sửa nhanh thông tin dự án</h4>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Cập nhật nhanh tên dự án, loại thiết kế, hồ sơ Lead liên kết và kích thước màn hình LED
-                </p>
-              </div>
-              <span className="rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-bold text-[#1E3A8A] border border-blue-200">
-                DA-{String(renameTargetId || currentProject?.id || 1).padStart(4, '0')}
-              </span>
-            </div>
-
-            <form onSubmit={handleRenameProject} className="space-y-3.5 text-sm">
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
-                  Tên dự án thiết kế <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  autoFocus
-                  data-testid="quick-edit-project-name-input"
-                  value={renameValue}
-                  onChange={(e) => setRenameValue(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2 text-sm font-medium text-slate-900 focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
-                  Loại dự án
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setQuickEditDesignType('perspective_3d')}
-                    className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${
-                      quickEditDesignType === 'perspective_3d'
-                        ? 'border-[#1E3A8A] bg-blue-50 text-[#1E3A8A]'
-                        : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    Phối cảnh 3D LED
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickEditDesignType('banner')}
-                    className={`rounded-xl border px-3 py-2 text-xs font-bold transition ${
-                      quickEditDesignType === 'banner'
-                        ? 'border-[#1E3A8A] bg-blue-50 text-[#1E3A8A]'
-                        : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    Banner khung LED
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Hồ sơ Lead liên kết:
-                  </label>
-                  <select
-                    value={quickEditLeadId}
-                    onChange={(e) => setQuickEditLeadId(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-800 focus:border-[#2563EB] focus:outline-none"
-                  >
-                    <option value="">-- Không gắn Lead --</option>
-                    {leadOptions.map((l) => (
-                      <option key={l.id} value={l.id}>
-                        {l.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Người liên hệ:
-                  </label>
-                  <input
-                    type="text"
-                    value={quickEditContactName}
-                    onChange={(e) => setQuickEditContactName(e.target.value)}
-                    placeholder="Tên khách hàng / đại diện"
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#2563EB] focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-3 gap-2.5">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Dòng Pitch LED:
-                  </label>
-                  <select
-                    value={quickEditPitch}
-                    onChange={(e) => setQuickEditPitch(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-2.5 py-2 text-xs font-semibold text-slate-800"
-                  >
-                    {['P1.25', 'P1.53', 'P1.86', 'P2.0', 'P2.5', 'P3.0', 'P4.0', 'P5.0', 'P8.0', 'P10'].map(
-                      (p) => (
-                        <option key={p} value={p}>
-                          {p}
-                        </option>
-                      )
-                    )}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Ngang (m):
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.5"
-                    value={quickEditWidthM}
-                    onChange={(e) => setQuickEditWidthM(Number(e.target.value))}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Cao (m):
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0.5"
-                    value={quickEditHeightM}
-                    onChange={(e) => setQuickEditHeightM(Number(e.target.value))}
-                    className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-800"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Vị trí lắp đặt / Ghi chú công trình:
-                </label>
-                <input
-                  type="text"
-                  value={quickEditInstallInfo}
-                  onChange={(e) => setQuickEditInstallInfo(e.target.value)}
-                  placeholder="VD: Sảnh chính tầng 1, cách sàn 1.2m..."
-                  className="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-800 focus:border-[#2563EB] focus:outline-none"
-                />
-              </div>
-
-              <div className="flex items-center justify-between pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const targetProj = requests.find(
-                      (r) => r.id === (renameTargetId || currentProject?.id)
-                    );
-                    setEditingName(false);
-                    setRenameTargetId(null);
-                    if (targetProj) {
-                      requestDeleteProject(targetProj);
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-red-200 bg-red-50/70 px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-100 transition"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  <span>Xóa dự án này</span>
-                </button>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingName(false);
-                      setRenameTargetId(null);
-                    }}
-                    className="rounded-xl border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-                  >
-                    Hủy
-                  </button>
-                  <button
-                    type="submit"
-                    data-testid="quick-edit-save-btn"
-                    disabled={savingQuickEdit || !renameValue.trim()}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#1E3A8A] px-5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#2563EB] disabled:opacity-50"
-                  >
-                    <Check className="h-3.5 w-3.5" />
-                    <span>{savingQuickEdit ? 'Đang lưu...' : 'Lưu cập nhật'}</span>
-                  </button>
-                </div>
-              </div>
-            </form>
-          </div>
-        </div>
+      {(showAiConfigModal || showPromptLibraryModal) && (
+        <StudioAiConfigAndPromptModals
+          showAiConfigModal={showAiConfigModal}
+          setShowAiConfigModal={setShowAiConfigModal}
+          aiModalTab={aiModalTab}
+          setAiModalTab={setAiModalTab}
+          autoDiscoveredModels={autoDiscoveredModels}
+          consultantModelId={consultantModelId}
+          setConsultantModelId={setConsultantModelId}
+          setConsultantModelName={setConsultantModelName}
+          setSelectedModelId={setSelectedModelId}
+          setSelectedProviderId={setSelectedProviderId}
+          setConfigModalProviderId={setConfigModalProviderId}
+          setConfigCustomModelInput={setConfigCustomModelInput}
+          setSuccessToast={setSuccessToast}
+          providerStatus={providerStatus}
+          gmailGeminiKeyInput={gmailGeminiKeyInput}
+          setGmailGeminiKeyInput={setGmailGeminiKeyInput}
+          quickCustomEndpoint={quickCustomEndpoint}
+          setQuickCustomEndpoint={setQuickCustomEndpoint}
+          parseSmartPastedAiInput={parseSmartPastedAiInput}
+          testingAiConnection={testingAiConnection}
+          savingAiConfig={savingAiConfig}
+          handleQuickConnectGmailGemini={handleQuickConnectGmailGemini}
+          testAiResult={testAiResult}
+          showPromptLibraryModal={showPromptLibraryModal}
+          setShowPromptLibraryModal={setShowPromptLibraryModal}
+          editingPromptId={editingPromptId}
+          setEditingPromptId={setEditingPromptId}
+          newSavedPromptTitle={newSavedPromptTitle}
+          setNewSavedPromptTitle={setNewSavedPromptTitle}
+          newSavedPromptCat={newSavedPromptCat}
+          setNewSavedPromptCat={setNewSavedPromptCat}
+          newSavedPromptText={newSavedPromptText}
+          setNewSavedPromptText={setNewSavedPromptText}
+          promptLibrary={promptLibrary}
+          savePromptLibraryToStorage={savePromptLibraryToStorage}
+          promptLibCategoryFilter={promptLibCategoryFilter}
+          setPromptLibCategoryFilter={setPromptLibCategoryFilter}
+          handlePromptChange={handlePromptChange}
+          executeChatSubmit={executeChatSubmit}
+        />
       )}
 
-      {/* MODAL: CUSTOM AESTHETIC CONFIRM DIALOG (THAY THẾ HOÀN TOÀN NATIVE BROWSER CONFIRM) */}
-      {confirmModal && (
+      {showTokenFinOpsModal && (
         <div
-          role="dialog"
-          aria-modal="true"
-          data-testid="custom-confirm-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-xs"
-        >
-          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-            <div className="flex items-start gap-3.5">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-600 border border-red-200/80">
-                <Trash2 className="h-5 w-5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <h4 className="text-base font-bold text-slate-900">{confirmModal.title}</h4>
-                {confirmModal.subtitle && (
-                  <p className="mt-0.5 text-xs font-semibold text-slate-500">
-                    {confirmModal.subtitle}
-                  </p>
-                )}
-                <p className="mt-2 text-sm text-slate-600 leading-relaxed">
-                  {confirmModal.message}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-5 flex items-center justify-end gap-2 border-t border-slate-100 pt-4">
-              <button
-                type="button"
-                disabled={confirmBusy}
-                onClick={() => setConfirmModal(null)}
-                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-              >
-                Hủy bỏ
-              </button>
-              <button
-                type="button"
-                data-testid="custom-confirm-accept-btn"
-                disabled={confirmBusy}
-                onClick={async () => {
-                  setConfirmBusy(true);
-                  try {
-                    await confirmModal.onConfirm();
-                    setConfirmModal(null);
-                  } catch (err) {
-                    setError(err instanceof Error ? err.message : 'Thao tác thất bại.');
-                    setConfirmModal(null);
-                  } finally {
-                    setConfirmBusy(false);
-                  }
-                }}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-red-600 px-5 py-2 text-xs font-bold text-white shadow-xs hover:bg-red-700 disabled:opacity-50"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                <span>{confirmBusy ? 'Đang xử lý...' : confirmModal.confirmLabel}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: CUSTOM AESTHETIC INPUT PROMPT (THAY THẾ HOÀN TOÀN NATIVE BROWSER PROMPT) */}
-      {promptModal && (
-        <div
-          role="dialog"
-          aria-modal="true"
-          data-testid="custom-prompt-modal"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4 backdrop-blur-xs"
-        >
-          <form
-            onSubmit={async (e) => {
-              e.preventDefault();
-              if (!promptModal.value.trim()) return;
-              setPromptBusy(true);
-              try {
-                await promptModal.onConfirm(promptModal.value);
-                setPromptModal(null);
-              } catch (err) {
-                setError(err instanceof Error ? err.message : 'Không thể lưu thay đổi.');
-                setPromptModal(null);
-              } finally {
-                setPromptBusy(false);
-              }
-            }}
-            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl"
-          >
-            <div className="flex items-center gap-2.5 mb-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-[#1E3A8A] border border-blue-200">
-                <Edit2 className="h-4 w-4" />
-              </div>
-              <div>
-                <h4 className="text-base font-bold text-slate-900">{promptModal.title}</h4>
-                <p className="text-xs text-slate-500">{promptModal.label}</p>
-              </div>
-            </div>
-
-            <input
-              type="text"
-              autoFocus
-              required
-              value={promptModal.value}
-              placeholder={promptModal.placeholder}
-              onChange={(e) =>
-                setPromptModal((prev) => (prev ? { ...prev, value: e.target.value } : null))
-              }
-              className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm font-medium text-slate-900 focus:border-[#2563EB] focus:outline-none"
-            />
-
-            <div className="mt-4 flex items-center justify-end gap-2 border-t border-slate-100 pt-3">
-              <button
-                type="button"
-                disabled={promptBusy}
-                onClick={() => setPromptModal(null)}
-                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Hủy
-              </button>
-              <button
-                type="submit"
-                disabled={promptBusy || !promptModal.value.trim()}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#1E3A8A] px-5 py-2 text-xs font-bold text-white shadow-xs hover:bg-[#2563EB] disabled:opacity-50"
-              >
-                <Check className="h-3.5 w-3.5" />
-                <span>{promptBusy ? 'Đang lưu...' : 'Lưu thay đổi'}</span>
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {/* MODAL GỌN GÀNG: 2 TAB (1. CHỌN AI · 2. SETTING) */}
-      {showAiConfigModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs"
-          onClick={() => setShowAiConfigModal(false)}
+          data-testid="m05-token-finops-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 backdrop-blur-xs p-3 sm:p-6"
+          onClick={() => setShowTokenFinOpsModal(false)}
         >
           <div
-            className="flex max-h-[88vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
+            className="w-full max-w-5xl max-h-[90vh] overflow-y-auto rounded-2xl bg-slate-50 border border-slate-200 shadow-2xl p-4 space-y-3"
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Header + 2 Tabs */}
-            <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-3">
-              <div className="flex items-center gap-1.5 rounded-xl bg-slate-200/80 p-1">
-                <button
-                  type="button"
-                  data-testid="ai-config-tab-select"
-                  onClick={() => setAiModalTab('select_ai')}
-                  className={`rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
-                    aiModalTab === 'select_ai'
-                      ? 'bg-white text-[#1553A2] shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  1. Chọn AI
-                </button>
-                <button
-                  type="button"
-                  data-testid="ai-config-tab-setting"
-                  onClick={() => setAiModalTab('setting_ai')}
-                  className={`rounded-lg px-3.5 py-1.5 text-xs font-extrabold transition ${
-                    aiModalTab === 'setting_ai'
-                      ? 'bg-white text-[#6D28D9] shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                >
-                  2. Setting &amp; Thêm AI
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowAiConfigModal(false)}
-                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-100"
-              >
-                Đóng ✕
-              </button>
-            </div>
-
-            {/* ================= TAB 1: DANH SÁCH MODEL TỰ ĐỌC & PHÂN LOẠI TỪ API ĐÃ GẮN ================= */}
-            {aiModalTab === 'select_ai' ? (
-              <div className="flex-1 overflow-y-auto bg-white p-4 text-xs text-[#17253F] space-y-3">
-                <div className="flex items-center justify-between px-1">
-                  <div>
-                    <span className="text-xs font-extrabold uppercase tracking-wide text-[#17253F]">
-                      Model khả dụng từ API đã gắn ({autoDiscoveredModels.length})
-                    </span>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      Gắn API của hãng nào hệ thống tự động đọc &amp; phân biệt đúng loại Model của API đó.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Nhóm 1: Model Tạo & Ghép ảnh (nếu API đã gắn có hỗ trợ) */}
-                {autoDiscoveredModels.some((m) => m.category === 'image') && (
-                  <div className="space-y-1">
-                    <div className="px-2 py-1 text-[11px] font-extrabold uppercase tracking-wider text-[#6D28D9]">
-                      🎨 Model Tạo Phối Cảnh, Ghép SP &amp; Banner
-                    </div>
-                    {autoDiscoveredModels
-                      .filter((m) => m.category === 'image')
-                      .map((m) => {
-                        const isSelected = consultantModelId === m.id;
-                        return (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => {
-                              setConsultantModelId(m.id);
-                              setConsultantModelName(m.name);
-                              setSelectedModelId(m.id);
-                              setSelectedProviderId(m.providerId);
-                              setConfigModalProviderId(m.providerId);
-                              setConfigCustomModelInput(m.id);
-                              setSuccessToast(`Đã chọn Model: ${m.name} (${m.providerLabel})`);
-                              setShowAiConfigModal(false);
-                            }}
-                            className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-left transition ${
-                              isSelected
-                                ? 'border-[#1553A2] bg-blue-50/90 text-[#1553A2] font-extrabold shadow-2xs'
-                                : 'border-slate-200 bg-white text-slate-800 hover:border-blue-300 hover:bg-slate-50'
-                            }`}
-                          >
-                            <div className="flex flex-wrap items-center gap-2 min-w-0">
-                              <span className="truncate text-[13px]">{m.name}</span>
-                              <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 border border-slate-200">
-                                {m.providerLabel}
-                              </span>
-                              <span className="shrink-0 rounded-full bg-purple-50 px-2 py-0.5 text-[10px] font-bold text-[#6D28D9] border border-purple-200">
-                                {m.badge}
-                              </span>
-                            </div>
-                            <span
-                              className={`shrink-0 text-sm font-extrabold ${
-                                isSelected ? 'text-[#1553A2]' : 'text-slate-400'
-                              }`}
-                            >
-                              {isSelected ? '✓' : '›'}
-                            </span>
-                          </button>
-                        );
-                      })}
-                  </div>
-                )}
-
-                {/* Nhóm 2: Model Chat & Phân tích ảnh */}
-                {autoDiscoveredModels.some((m) => m.category === 'chat') && (
-                  <div className="space-y-1">
-                    <div className="px-2 py-1 text-[11px] font-extrabold uppercase tracking-wider text-[#1553A2]">
-                      💬 Model Trò Chuyện &amp; Phân Tích Ảnh
-                    </div>
-                    {autoDiscoveredModels
-                      .filter((m) => m.category === 'chat')
-                      .map((m) => {
-                        const isSelected = consultantModelId === m.id;
-                        return (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => {
-                              setConsultantModelId(m.id);
-                              setConsultantModelName(m.name);
-                              setSelectedModelId(m.id);
-                              setSelectedProviderId(m.providerId);
-                              setConfigModalProviderId(m.providerId);
-                              setConfigCustomModelInput(m.id);
-                              setSuccessToast(`Đã chọn Model: ${m.name} (${m.providerLabel})`);
-                              setShowAiConfigModal(false);
-                            }}
-                            className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-left transition ${
-                              isSelected
-                                ? 'border-[#1553A2] bg-blue-50/90 text-[#1553A2] font-extrabold shadow-2xs'
-                                : 'border-slate-200 bg-white text-slate-800 hover:border-blue-300 hover:bg-slate-50'
-                            }`}
-                          >
-                            <div className="flex flex-wrap items-center gap-2 min-w-0">
-                              <span className="truncate text-[13px]">{m.name}</span>
-                              <span className="shrink-0 rounded-md bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 border border-slate-200">
-                                {m.providerLabel}
-                              </span>
-                              <span className="shrink-0 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200">
-                                {m.badge}
-                              </span>
-                            </div>
-                            <span
-                              className={`shrink-0 text-sm font-extrabold ${
-                                isSelected ? 'text-[#1553A2]' : 'text-slate-400'
-                              }`}
-                            >
-                              {isSelected ? '✓' : '›'}
-                            </span>
-                          </button>
-                        );
-                      })}
-                  </div>
-                )}
-
-                {/* Hidden compatibility nodes for existing tests */}
-                <div className="sr-only">
-                  {(providerStatus?.availableProviders || []).map((prov) => (
-                    <button
-                      key={prov.providerId}
-                      type="button"
-                      data-testid={`multi-ai-card-${prov.providerId}`}
-                      onClick={() => setConfigModalProviderId(prov.providerId)}
-                    >
-                      {prov.shortName}
-                    </button>
-                  ))}
-                </div>
-
-                {/* Bottom Action Row: Gắn thêm API Key để hệ thống tự đọc Model của Key đó */}
-                <div className="border-t border-slate-200 pt-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setAiModalTab('setting_ai')}
-                    className="flex w-full items-center justify-between rounded-xl border border-blue-200 bg-blue-50/60 px-3.5 py-2.5 text-left text-[13px] font-bold text-[#1553A2] transition hover:bg-blue-100/70"
-                  >
-                    <span className="inline-flex items-center gap-2">
-                      <Settings2 className="h-4 w-4 text-[#1553A2]" />
-                      <span>🔑 Gắn API Key mới (Tự nhận diện hãng &amp; đọc đúng Model của Key)</span>
-                    </span>
-                    <span className="text-[#1553A2] font-bold">›</span>
-                  </button>
-                </div>
-              </div>
-            ) : (
-              /* ================= TAB 2: 1 Ô GẮN API KEY THÔNG MINH (TỰ NHẬN DIỆN HÃNG & PHÂN LOẠI MODEL) ================= */
-              <div className="flex-1 overflow-y-auto bg-white p-5 space-y-4 text-xs">
-                <div className="rounded-2xl border border-blue-200 bg-blue-50/40 p-4 space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <span className="text-sm font-extrabold text-[#17253F] block">
-                        🔑 Gắn mã API Key — Tự động nhận diện hãng &amp; đọc đúng loại Model
-                      </span>
-                      <span className="text-[11px] text-slate-600">
-                        Hỗ trợ tự phân biệt Key <strong>Google Gemini/Imagen (`AIza...`)</strong>, <strong>OpenAI (`sk-proj-...`)</strong>, <strong>Custom AI Gateway (`sk-...`)</strong>, <strong>OpenRouter (`sk-or-...`)</strong>.
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2.5">
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input
-                        data-testid="gmail-gemini-key-input"
-                        type="password"
-                        autoComplete="off"
-                        value={gmailGeminiKeyInput}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          const parsed = parseSmartPastedAiInput(raw);
-                          setGmailGeminiKeyInput(parsed.key);
-                          if (parsed.url && !quickCustomEndpoint.trim()) {
-                            setQuickCustomEndpoint(parsed.url);
-                          }
-                        }}
-                        placeholder="Dán mã API Key (hoặc dán cả cặp URL + Key — hệ thống tự tách & nhận diện)"
-                        className="flex-1 rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 font-mono text-xs text-slate-900 focus:border-[#1553A2] focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        data-testid="gmail-gemini-connect-btn"
-                        disabled={testingAiConnection || savingAiConfig}
-                        onClick={handleQuickConnectGmailGemini}
-                        className="shrink-0 inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#1553A2] px-4 py-2.5 font-extrabold text-white hover:bg-[#1E3A8A] disabled:opacity-50 shadow-2xs"
-                      >
-                        <Sparkles className="h-3.5 w-3.5" />
-                        <span>
-                          {testingAiConnection
-                            ? 'Đang tự dò cổng & đọc Model...'
-                            : 'Kết nối & Tự đọc Model'}
-                        </span>
-                      </button>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
-                        Chọn nhanh cổng API:
-                      </span>
-                      {(
-                        [
-                          { label: 'Tự động dò', url: '' },
-                          { label: 'OpenAI', url: 'https://api.openai.com/v1' },
-                          { label: 'Google Gemini', url: 'https://generativelanguage.googleapis.com/v1beta' },
-                          { label: 'OpenRouter', url: 'https://openrouter.ai/api/v1' },
-                          { label: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
-                          { label: 'Groq', url: 'https://api.groq.com/openai/v1' },
-                        ] as const
-                      ).map((preset) => {
-                        const isPicked = quickCustomEndpoint.trim() === preset.url;
-                        return (
-                          <button
-                            key={preset.label}
-                            type="button"
-                            onClick={() => setQuickCustomEndpoint(preset.url)}
-                            className={`px-2 py-0.5 rounded-md border text-[11px] font-semibold transition ${
-                              isPicked
-                                ? 'bg-[#1553A2] border-[#1553A2] text-white'
-                                : 'bg-white border-slate-200 text-slate-600 hover:border-blue-300 hover:text-[#1553A2]'
-                            }`}
-                          >
-                            {preset.label}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="flex items-center gap-2 pt-0.5">
-                      <span className="text-[11px] text-slate-500 font-medium shrink-0">Gateway / Proxy URL (tùy chọn):</span>
-                      <input
-                        type="text"
-                        value={quickCustomEndpoint}
-                        onChange={(e) => setQuickCustomEndpoint(e.target.value)}
-                        placeholder="Để trống để tự dò (hoặc dán URL cổng Relay riêng VD: https://api.nhacungcap.com/v1)"
-                        className="flex-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-[11px] text-slate-800 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none"
-                      />
-                    </div>
-                    <p className="text-[10.5px] text-slate-500 leading-relaxed">
-                      💡 <strong>Đổi Key không cần sửa code:</strong> Key hãng chính thức (Google, OpenAI, OpenRouter, DeepSeek, Groq) chỉ cần dán Key và bấm Kết nối. Nếu dùng Key từ cổng Proxy/Relay bên thứ 3, dán thêm <strong>Gateway URL</strong> 1 lần duy nhất — hệ thống sẽ tự mã hóa &amp; ghi nhớ cổng cho mọi lần đổi Key sau.
-                    </p>
-                  </div>
-
-                  {testAiResult && (
-                    <div
-                      className={`rounded-xl px-3.5 py-2.5 text-[11px] font-bold border ${
-                        testAiResult.ok
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
-                          : 'bg-red-50 border-red-200 text-red-800'
-                      }`}
-                    >
-                      {testAiResult.ok ? '✅ ' : '❌ '}
-                      {testAiResult.replyText} ({testAiResult.latencyMs}ms)
-                    </div>
-                  )}
-
-                  {/* Hiển thị ngay danh sách các Model đọc được từ API Key vừa gắn */}
-                  {autoDiscoveredModels.length > 0 && (
-                    <div className="rounded-xl border border-slate-200 bg-white p-3 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-extrabold text-[#17253F]">
-                          📋 Các Model thực tế đọc được từ API đã gắn ({autoDiscoveredModels.length} Model):
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setAiModalTab('select_ai')}
-                          className="text-[11px] font-bold text-[#1553A2] hover:underline"
-                        >
-                          Mở bảng chọn ›
-                        </button>
-                      </div>
-                      <select
-                        value={consultantModelId}
-                        onChange={(e) => {
-                          const nextId = e.target.value;
-                          setConsultantModelId(nextId);
-                          setSelectedModelId(nextId);
-                          const found = autoDiscoveredModels.find((m) => m.id === nextId);
-                          if (found) {
-                            setConsultantModelName(found.name);
-                            setSelectedProviderId(found.providerId);
-                          } else {
-                            setConsultantModelName(nextId);
-                          }
-                          setSuccessToast(`Đã chuyển sang Model: ${found ? found.name : nextId}`);
-                        }}
-                        className="w-full rounded-xl border border-slate-300 bg-slate-50 px-3 py-2 text-xs font-extrabold text-[#1553A2] focus:border-[#1553A2] focus:outline-none"
-                      >
-                        {autoDiscoveredModels.map((m) => (
-                          <option key={m.id} value={m.id}>
-                            {m.name} — [{m.providerLabel} · {m.badge}]
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-      {/* MODAL: PROMPT LIBRARY ("THƯ VIỆN LƯU TRỮ CÁC LỆNH PROMPT") */}
-      {showPromptLibraryModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-xs"
-          onClick={() => setShowPromptLibraryModal(false)}
-        >
-          <div
-            className="flex max-h-[88vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-slate-200 bg-gradient-to-r from-[#17253F] to-[#1E3A8A] px-5 py-3.5 text-white">
-              <div>
-                <h3 className="text-base font-extrabold flex items-center gap-2">
-                  <span>📚 Thư viện Lưu trữ Lệnh Prompt (Toàn Trung AI Studio)</span>
-                </h3>
-                <p className="text-xs text-blue-100 mt-0.5">
-                  Lưu trữ, phân loại và tái sử dụng nhanh các câu lệnh @TaoAnh, @TaoAnhPoster và Phân tích kỹ thuật ($0)
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowPromptLibraryModal(false)}
-                className="rounded-lg bg-white/10 px-2.5 py-1 text-xs font-bold text-white hover:bg-white/20"
-              >
-                ✕ Đóng
-              </button>
-            </div>
-
-            {/* Add / Edit Prompt Form */}
-            <div className="border-b border-slate-200 bg-slate-50 p-4">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-xs font-extrabold uppercase tracking-wide text-slate-700">
-                  {editingPromptId ? '✏️ Chỉnh sửa lệnh Prompt đã lưu' : '➕ Thêm / Lưu lệnh Prompt mới vào thư viện'}
+            <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+              <div className="flex items-center gap-2">
+                <Coins className="w-4 h-4 text-purple-700" />
+                <span className="font-bold text-sm text-slate-900">
+                  Bảng Theo Dõi Tiêu Thụ Token &amp; Chi Phí AI — Studio Thiết Kế M05
                 </span>
-                {editingPromptId && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingPromptId(null);
-                      setNewSavedPromptTitle('');
-                      setNewSavedPromptText('');
-                    }}
-                    className="text-xs font-bold text-slate-500 hover:text-slate-800"
-                  >
-                    Huỷ sửa
-                  </button>
-                )}
               </div>
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                <input
-                  type="text"
-                  value={newSavedPromptTitle}
-                  onChange={(e) => setNewSavedPromptTitle(e.target.value)}
-                  placeholder="Tên gợi nhớ (VD: Phối cảnh LED P2.5 Hội trường)..."
-                  className="sm:col-span-2 rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-800 focus:border-[#1553A2] focus:outline-none"
-                />
-                <select
-                  value={newSavedPromptCat}
-                  onChange={(e) =>
-                    setNewSavedPromptCat(e.target.value as 'tao_anh' | 'tao_poster' | 'tu_van')
-                  }
-                  className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 focus:border-[#1553A2] focus:outline-none"
-                >
-                  <option value="tao_anh">🏢 @TaoAnh (Phối cảnh 3D)</option>
-                  <option value="tao_poster">🖼️ @TaoAnhPoster (Banner/Poster)</option>
-                  <option value="tu_van">🔍 Phân tích &amp; Tư vấn ($0)</option>
-                </select>
-              </div>
-              <div className="mt-2 flex gap-2">
-                <textarea
-                  rows={2}
-                  value={newSavedPromptText}
-                  onChange={(e) => setNewSavedPromptText(e.target.value)}
-                  placeholder="Nhập nội dung câu lệnh Prompt (VD: @TaoAnh: Ghép màn hình LED P2.5 4800x2700mm vào 4 điểm chạm...)"
-                  className="flex-1 resize-none rounded-xl border border-slate-300 bg-white p-2.5 text-xs text-slate-800 focus:border-[#1553A2] focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    const text = newSavedPromptText.trim();
-                    if (!text) return;
-                    const title =
-                      newSavedPromptTitle.trim() ||
-                      text
-                        .replace(/^\s*@(?:taoanhposter|taoposter|tao[j]?anh)\s*:?\s*/i, '')
-                        .slice(0, 48) ||
-                      'Lệnh Prompt mới';
-                    if (editingPromptId) {
-                      const updated = promptLibrary.map((item) =>
-                        item.id === editingPromptId
-                          ? { ...item, title, prompt: text, category: newSavedPromptCat }
-                          : item
-                      );
-                      savePromptLibraryToStorage(updated);
-                      setEditingPromptId(null);
-                      setSuccessToast('Đã cập nhật câu lệnh trong Thư viện Prompt!');
-                    } else {
-                      const newItem = {
-                        id: `custom-${Date.now()}`,
-                        title,
-                        prompt: text,
-                        category: newSavedPromptCat,
-                        createdAt: new Date().toLocaleDateString('vi-VN'),
-                      };
-                      savePromptLibraryToStorage([newItem, ...promptLibrary]);
-                      setSuccessToast('Đã thêm lệnh mới vào Thư viện Prompt!');
-                    }
-                    setNewSavedPromptTitle('');
-                    setNewSavedPromptText('');
-                  }}
-                  disabled={!newSavedPromptText.trim()}
-                  className="shrink-0 rounded-xl bg-[#1553A2] px-4 py-2 text-xs font-extrabold text-white shadow-xs hover:bg-[#1E3A8A] disabled:opacity-40"
-                >
-                  {editingPromptId ? '💾 Cập nhật' : '+ Lưu vào thư viện'}
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowTokenFinOpsModal(false)}
+                className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-100"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Đóng</span>
+              </button>
             </div>
-
-            {/* Category Filter Tabs */}
-            <div className="flex items-center gap-1.5 border-b border-slate-200 bg-white px-4 py-2.5">
-              {[
-                { id: 'all', label: `Tất cả (${promptLibrary.length})` },
-                {
-                  id: 'tao_anh',
-                  label: `🏢 Phối cảnh @TaoAnh (${promptLibrary.filter((p) => p.category === 'tao_anh').length})`,
-                },
-                {
-                  id: 'tao_poster',
-                  label: `🖼️ Banner @TaoAnhPoster (${promptLibrary.filter((p) => p.category === 'tao_poster').length})`,
-                },
-                {
-                  id: 'tu_van',
-                  label: `🔍 Tư vấn $0 (${promptLibrary.filter((p) => p.category === 'tu_van').length})`,
-                },
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() =>
-                    setPromptLibCategoryFilter(
-                      tab.id as 'all' | 'tao_anh' | 'tao_poster' | 'tu_van'
-                    )
-                  }
-                  className={`rounded-lg px-3 py-1.5 text-xs font-bold transition ${
-                    promptLibCategoryFilter === tab.id
-                      ? 'bg-[#1553A2] text-white shadow-2xs'
-                      : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Saved Prompts List */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-2.5">
-              {promptLibrary
-                .filter(
-                  (item) =>
-                    promptLibCategoryFilter === 'all' || item.category === promptLibCategoryFilter
-                )
-                .map((item) => (
-                  <div
-                    key={item.id}
-                    className="rounded-xl border border-slate-200 bg-white p-3.5 shadow-2xs hover:border-blue-300 transition"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`rounded-md px-2 py-0.5 text-[10px] font-extrabold ${
-                              item.category === 'tao_poster'
-                                ? 'bg-pink-100 text-pink-700'
-                                : item.category === 'tao_anh'
-                                  ? 'bg-purple-100 text-purple-700'
-                                  : 'bg-emerald-100 text-emerald-700'
-                            }`}
-                          >
-                            {item.category === 'tao_poster'
-                              ? '@TaoAnhPoster'
-                              : item.category === 'tao_anh'
-                                ? '@TaoAnh 3D'
-                                : 'Tư vấn $0'}
-                          </span>
-                          <h4 className="truncate text-xs font-extrabold text-slate-900">
-                            {item.title}
-                          </h4>
-                          <span className="text-[10px] font-medium text-slate-400">
-                            · {item.createdAt}
-                          </span>
-                        </div>
-                        <p className="mt-1.5 text-xs text-slate-600 bg-slate-50 rounded-lg p-2 border border-slate-100 font-medium">
-                          {item.prompt}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="mt-2.5 flex flex-wrap items-center justify-end gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingPromptId(item.id);
-                          setNewSavedPromptTitle(item.title);
-                          setNewSavedPromptText(item.prompt);
-                          setNewSavedPromptCat(item.category);
-                        }}
-                        className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50"
-                      >
-                        ✏️ Sửa
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const filtered = promptLibrary.filter((p) => p.id !== item.id);
-                          savePromptLibraryToStorage(filtered);
-                          setSuccessToast(`Đã xoá lệnh "${item.title}" khỏi thư viện.`);
-                        }}
-                        className="rounded-lg border border-red-200 bg-red-50 px-2.5 py-1 text-[11px] font-bold text-red-600 hover:bg-red-100"
-                      >
-                        🗑 Xoá
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handlePromptChange(item.prompt);
-                          setShowPromptLibraryModal(false);
-                          setSuccessToast(`Đã chèn lệnh "${item.title}" vào ô chat.`);
-                        }}
-                        className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-1 text-[11px] font-extrabold text-[#1553A2] hover:bg-blue-100"
-                      >
-                        📥 Chèn vào ô chat
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          handlePromptChange(item.prompt);
-                          setShowPromptLibraryModal(false);
-                          executeChatSubmit(item.prompt);
-                        }}
-                        className="rounded-lg bg-[#7846FF] px-3 py-1 text-[11px] font-extrabold text-white shadow-2xs hover:bg-[#6D28D9]"
-                      >
-                        ⚡ Chạy lệnh ngay
-                      </button>
-                    </div>
-                  </div>
-                ))}
-            </div>
+            <AiFinOpsControlPanel
+              user={user}
+              defaultModule="05-ai-design"
+              showRecentLogs
+              onSummaryLoaded={(res) => setLiveTokenSummary(res.myStats)}
+            />
           </div>
         </div>
       )}

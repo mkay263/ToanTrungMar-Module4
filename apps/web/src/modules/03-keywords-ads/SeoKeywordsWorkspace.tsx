@@ -38,6 +38,8 @@ import { WebsiteDashboardHeader } from '@/components/common/WebsiteDashboardHead
 import { AnimatedMetricNumber } from '@/components/common/AnimatedMetricNumber';
 import { VerticalSectionNav } from '@/components/common/VerticalSectionNav';
 import { MktSpreadsheetCalcBar, useMktExcelSelection } from '@/components/common/MktSpreadsheetCalcBar';
+import { useVirtualRows } from '@/core/components/common/VirtualizedExcelGrid';
+import { LedSeoQualityScorerModal } from './LedSeoQualityScorerModal';
 
 const GscPerformanceChart = dynamic(
   () => import('./GscPerformanceChart').then((m) => m.GscPerformanceChart),
@@ -149,6 +151,7 @@ function formatWorkflowStatus(raw: string): string {
 
 export function SeoKeywordsWorkspace() {
   const { user } = useSession();
+  const [scoringArticleId, setScoringArticleId] = useState<number | null>(null);
   const { scope, hydrated, updateScope } = useDashboardScope();
   const canEditContent = user?.roleCode !== 'ADS';
 
@@ -458,6 +461,16 @@ export function SeoKeywordsWorkspace() {
     const kw = searchTerm.trim().toLowerCase();
     return list.filter((r) => r.key.toLowerCase().includes(kw));
   }, [seo?.tables.queries.rows, crossMatchedQueriesSet, searchTerm]);
+
+  const queryVirtualGrid = useVirtualRows({
+    totalCount: queryRowsFiltered.length,
+    rowHeight: 42,
+    overscan: 14,
+    enabledThreshold: 60,
+  });
+  const visibleQueryRows = queryVirtualGrid.isVirtualized
+    ? queryRowsFiltered.slice(queryVirtualGrid.startIndex, queryVirtualGrid.endIndex)
+    : queryRowsFiltered;
 
   const pageRowsFiltered = useMemo(() => {
     let list = seo?.tables.pages.rows || [];
@@ -1152,7 +1165,14 @@ export function SeoKeywordsWorkspace() {
               stats={seoExcelCalc.stats}
               onClear={seoExcelCalc.clearSelection}
             />
-            <div tabIndex={0} role="region" aria-label="Bảng từ khóa tìm kiếm kiểu Excel" className="overflow-x-auto max-h-[68vh]">
+            <div
+              ref={queryVirtualGrid.containerRef}
+              onScroll={queryVirtualGrid.handleScroll}
+              tabIndex={0}
+              role="region"
+              aria-label="Bảng từ khóa tìm kiếm kiểu Excel"
+              className="overflow-x-auto overflow-y-auto max-h-[68vh]"
+            >
               <table className="w-full text-xs border-separate border-spacing-0 [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
                 <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10">
                   <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
@@ -1178,8 +1198,17 @@ export function SeoKeywordsWorkspace() {
                       </td>
                     </tr>
                   ) : (
-                    queryRowsFiltered.map((r) => {
-                      const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
+                    <>
+                      {queryVirtualGrid.topSpacerHeight > 0 && (
+                        <tr aria-hidden="true">
+                          <td
+                            colSpan={7}
+                            style={{ height: queryVirtualGrid.topSpacerHeight, padding: 0, border: 0 }}
+                          />
+                        </tr>
+                      )}
+                      {visibleQueryRows.map((r) => {
+                        const cmp = formatSafePeriodComparison(r.clicks, r.previousClicks);
                       return (
                         <tr key={r.key} className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30">
                           <td className="py-2.5 px-4 font-medium text-slate-900 max-w-[320px] truncate" title={r.key}>
@@ -1239,7 +1268,16 @@ export function SeoKeywordsWorkspace() {
                           </td>
                         </tr>
                       );
-                    })
+                    })}
+                      {queryVirtualGrid.bottomSpacerHeight > 0 && (
+                        <tr aria-hidden="true">
+                          <td
+                            colSpan={7}
+                            style={{ height: queryVirtualGrid.bottomSpacerHeight, padding: 0, border: 0 }}
+                          />
+                        </tr>
+                      )}
+                    </>
                   )}
                 </tbody>
                 {queryRowsFiltered.length > 0 && (() => {
@@ -1458,7 +1496,16 @@ export function SeoKeywordsWorkspace() {
                         </span>
                       </td>
                       <td className="py-2.5 px-4 text-right text-slate-500 tabular-nums">
-                        {new Date(art.updatedAt).toLocaleDateString('vi-VN')}
+                        <div className="inline-flex items-center justify-end gap-2">
+                          <span>{new Date(art.updatedAt).toLocaleDateString('vi-VN')}</span>
+                          <button
+                            type="button"
+                            onClick={() => setScoringArticleId(art.contentId)}
+                            className="px-2 py-1 rounded-lg border border-blue-200 bg-blue-50 hover:bg-[#0F275C] hover:text-white text-[11px] font-bold text-[#0F275C] transition"
+                          >
+                            Chấm điểm B2B
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -1602,6 +1649,11 @@ export function SeoKeywordsWorkspace() {
       )}
         </div>
       </div>
+      <LedSeoQualityScorerModal
+        articleId={scoringArticleId}
+        onClose={() => setScoringArticleId(null)}
+        user={user}
+      />
     </div>
   );
 }

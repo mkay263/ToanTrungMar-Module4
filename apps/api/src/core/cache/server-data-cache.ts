@@ -21,11 +21,21 @@ interface ServerCacheEntry {
   domains: CacheDomain[];
 }
 
+export interface RealtimeRevisionEvent {
+  type: 'revision';
+  domains: CacheDomain[];
+  reason?: string;
+  revisions: Record<CacheDomain, number>;
+  serverDateVn: string;
+  serverTime: string;
+}
+
 interface GlobalServerCacheStore {
   revisions: Record<CacheDomain, number>;
   lastUpdatedAt: Record<CacheDomain, string>;
   responseCache: Map<string, ServerCacheEntry>;
   inflight: Map<string, Promise<unknown>>;
+  listeners: Set<(event: RealtimeRevisionEvent) => void>;
   epoch: number;
 }
 
@@ -48,6 +58,7 @@ function createInitialStore(): GlobalServerCacheStore {
     lastUpdatedAt,
     responseCache: new Map(),
     inflight: new Map(),
+    listeners: new Set(),
     epoch: 1,
   };
 }
@@ -55,6 +66,9 @@ function createInitialStore(): GlobalServerCacheStore {
 function getStore(): GlobalServerCacheStore {
   if (!globalStore.__toantrungServerCacheV2) {
     globalStore.__toantrungServerCacheV2 = createInitialStore();
+  }
+  if (!globalStore.__toantrungServerCacheV2.listeners) {
+    globalStore.__toantrungServerCacheV2.listeners = new Set();
   }
   return globalStore.__toantrungServerCacheV2;
 }
@@ -93,21 +107,64 @@ export function getDomainRevisionSignature(domains: CacheDomain[]): string {
   return unique.map((d) => `${d}=${store.revisions[d] ?? 1}`).join(',');
 }
 
-export function bumpDomainRevisions(domains: CacheDomain[], _reason?: string): void {
+export function subscribeDomainRevisionStream(
+  listener: (event: RealtimeRevisionEvent) => void,
+): () => void {
+  const store = getStore();
+  store.listeners.add(listener);
+  return () => {
+    store.listeners.delete(listener);
+  };
+}
+
+export function getCacheDiagnosticsSnapshot(): {
+  epoch: number;
+  cachedEntryCount: number;
+  inflightCount: number;
+  sseSubscriberCount: number;
+} {
+  const store = getStore();
+  return {
+    epoch: store.epoch,
+    cachedEntryCount: store.responseCache.size,
+    inflightCount: store.inflight.size,
+    sseSubscriberCount: store.listeners.size,
+  };
+}
+
+const SILENT_CACHE_EVICTION_REASONS = new Set<string>([
+  'ga4_live_snapshot_refreshed',
+  'ga4_realtime_refreshed',
+  'background_ga4_warmer',
+  'gads_live_snapshot_refreshed',
+  'gsc_live_snapshot_refreshed',
+  'keyword_derived_cache_refreshed',
+  'google_trends_refreshed',
+  'design_stale_job_expired',
+]);
+
+export function bumpDomainRevisions(domains: CacheDomain[], reason?: string): void {
   const store = getStore();
   const nowIso = new Date().toISOString();
   const targetSet = new Set<CacheDomain>(domains);
-
-  store.epoch += 1;
-  for (const domain of targetSet) {
-    store.revisions[domain] = (store.revisions[domain] || 1) + 1;
-    store.lastUpdatedAt[domain] = nowIso;
-  }
+  const isSilentReadCacheRefresh = Boolean(reason && SILENT_CACHE_EVICTION_REASONS.has(reason));
 
   for (const [key, entry] of store.responseCache.entries()) {
     if (entry.domains.some((d) => targetSet.has(d))) {
       store.responseCache.delete(key);
     }
+  }
+
+  // Passive read-cache refreshes only evict stale responseCache entries;
+  // they MUST NOT bump revision counters or broadcast SSE events (prevents read->SSE->read feedback loops).
+  if (isSilentReadCacheRefresh) {
+    return;
+  }
+
+  store.epoch += 1;
+  for (const domain of targetSet) {
+    store.revisions[domain] = (store.revisions[domain] || 1) + 1;
+    store.lastUpdatedAt[domain] = nowIso;
   }
 
   // Delete matching inflight entries so future readers don't join a pre-invalidation compute
@@ -116,6 +173,24 @@ export function bumpDomainRevisions(domains: CacheDomain[], _reason?: string): v
   for (const key of Array.from(store.inflight.keys())) {
     if (domainRe.test(key)) {
       store.inflight.delete(key);
+    }
+  }
+
+  if (store.listeners.size > 0 && targetSet.size > 0) {
+    const eventPayload: RealtimeRevisionEvent = {
+      type: 'revision',
+      domains: Array.from(targetSet),
+      reason,
+      revisions: { ...store.revisions },
+      serverDateVn: getVietnamDateKey(),
+      serverTime: nowIso,
+    };
+    for (const listener of Array.from(store.listeners)) {
+      try {
+        listener(eventPayload);
+      } catch {
+        // Isolate subscriber callback errors
+      }
     }
   }
 }

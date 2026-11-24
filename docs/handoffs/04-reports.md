@@ -41,3 +41,11 @@ Kho mã nguồn GitHub: `https://github.com/truongvanlong1905/ToanTrungMar` (nh�
 4. **Export đa định dạng đồng bộ**:
    - CSV, XLSX và DOCX cùng một scope số liệu, tuân thủ ẩn doanh thu theo Q08.
 
+
+
+---
+
+## 4. Nâng cấp Chuẩn Doanh Nghiệp Local — Enterprise Edition (24/11/2026)
+- **Click-to-Audit Data Lineage xuyên suốt Dashboard & M04**: Tích hợp `KpiAuditLineageDrawer.tsx` + `/api/v1/reports/audit-lineage` vào `dashboard/page.tsx` và `ReportsWorkspace.tsx`, cho phép bấm trực tiếp vào từng thẻ KPI (`Lead tiếp nhận`, `Lead hợp lệ`, `Đang báo giá`, `Chốt thành công`, `Báo giá quá hạn`) để đối chiếu danh sách mã hồ sơ gốc theo đúng phân quyền 8 vai trò BA (ẩn danh SĐT/tên khách với `MKT_STAFF`/`ADS`, giới hạn Lead sở hữu với `SALES`, tuyệt đối chưa thêm doanh thu/giá bán khi Q08 mở).
+- **Thanh Cảnh báo bất thường phễu (`FunnelAnomalyGuardStrip`) & Bảng điều hành ngân sách AI FinOps (`AiFinOpsControlPanel.tsx`)**: Hiển thị cảnh báo đứt gãy form/tỷ lệ spam/từ khóa tụt hạng và bảng theo dõi/khóa trần chi phí AI micro-USD ngày/tháng cho `BOD` (chỉ đọc) & `ADMIN` (cấu hình hạn mức).
+- **Quản trị Doanh nghiệp tại `/settings?tab=governance`**: Bổ sung `EnterpriseGovernancePanel.tsx` + `/api/v1/admin/governance` gồm Nhật ký kiểm toán bất biến `Giá trị cũ → Giá trị mới`, Trạm chẩn đoán Local (DB ping, Vault AES-256-GCM, 5 worker, kết nối SSE) và Kiểm định toàn vẹn sao lưu SHA-256.

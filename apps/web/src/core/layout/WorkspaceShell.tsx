@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
@@ -36,6 +37,12 @@ import { apiRequest } from '../http/client';
 import { publishDataSync, subscribeDataSync } from '../http/data-sync-bus';
 import { useSession } from '../session/SessionContext';
 import { formatCompactLeadCode } from '@/modules/01-leads/leads-helpers';
+import { SectionErrorBoundary } from '../components/common/WorkspaceFaultIsolation';
+
+const GlobalCommandPalette = dynamic(
+  () => import('../components/common/GlobalCommandPalette'),
+  { ssr: false },
+);
 
 interface NavItem {
   href: string;
@@ -116,6 +123,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
 
   const [mobileOpen, setMobileOpen] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [globalSearchText, setGlobalSearchText] = useState('');
   const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -160,6 +168,11 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+        return;
+      }
       const target = e.target as HTMLElement | null;
       const isInputFocused =
         target &&
@@ -710,11 +723,31 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                   ×
                 </button>
               ) : (
-                <kbd className="text-[10px] font-mono text-slate-400 bg-white/80 px-1.5 py-0.5 rounded-md shadow-[0_1px_0_rgba(15,23,42,0.06)] shrink-0">
-                  /
-                </kbd>
+                <button
+                  type="button"
+                  onClick={() => setCommandPaletteOpen(true)}
+                  title="Mở Thanh Lệnh Toàn Cục (Ctrl + K)"
+                  className="text-[10px] font-mono text-slate-500 hover:text-[#1E3A8A] bg-white/90 hover:bg-blue-50 px-1.5 py-0.5 rounded-md shadow-[0_1px_0_rgba(15,23,42,0.08)] shrink-0 transition"
+                >
+                  Ctrl K
+                </button>
               )}
             </div>
+          )}
+
+          {!showTopbarSearch && (
+            <button
+              type="button"
+              onClick={() => setCommandPaletteOpen(true)}
+              title="Mở Thanh Lệnh Toàn Cục (Ctrl + K)"
+              className="hidden md:inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-slate-100/80 hover:bg-slate-200/70 text-xs font-medium text-slate-600 transition"
+            >
+              <Search aria-hidden="true" className="w-3.5 h-3.5 text-slate-400" />
+              <span>Tìm &amp; Lệnh nhanh</span>
+              <kbd className="text-[10px] font-mono text-slate-500 bg-white px-1.5 py-0.5 rounded-md">
+                Ctrl K
+              </kbd>
+            </button>
           )}
 
           {showTopbarSearch && (
@@ -1159,7 +1192,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      {/* Vùng nội dung chính rộng 100% */}
+      {/* Vùng nội dung chính rộng 100% có cô lập lỗi SectionErrorBoundary */}
       <main
         id="main-workspace-content"
         tabIndex={-1}
@@ -1169,8 +1202,18 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
             : 'flex-1 w-full px-3 sm:px-4 lg:px-5 py-4 pb-20 md:pb-6 overflow-y-auto bg-[#F8FAFC] focus:outline-none'
         }
       >
-        {children}
+        <SectionErrorBoundary sectionTitle={currentBreadcrumb}>
+          {children}
+        </SectionErrorBoundary>
       </main>
+
+      {commandPaletteOpen && (
+        <GlobalCommandPalette
+          open={commandPaletteOpen}
+          onClose={() => setCommandPaletteOpen(false)}
+          user={user}
+        />
+      )}
 
       {/* Thanh điều hướng di động (< 768px) */}
       <nav

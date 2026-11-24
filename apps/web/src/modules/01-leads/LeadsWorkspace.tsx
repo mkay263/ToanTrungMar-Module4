@@ -11,7 +11,9 @@ import {
   Calendar,
   CheckCircle2,
   ChevronDown,
+  Calculator,
   Clock,
+  Columns2,
   Crown,
   Download,
   FileText,
@@ -86,6 +88,26 @@ const ProductCatalogModal = dynamic(
   () => import('./ProductCatalogModal').then((m) => m.ProductCatalogModal),
   { ssr: false },
 );
+const LeadExcelImportModal = dynamic(
+  () => import('./LeadExcelImportModal'),
+  { ssr: false },
+);
+const LeadRiskAndFraudModals = dynamic(
+  () => import('./LeadRiskAndFraudModals'),
+  { ssr: false },
+);
+const LeadSavedSmartViewsBar = dynamic(
+  () => import('./LeadSavedSmartViewsBar'),
+  { ssr: false },
+);
+const LedTechnicalSpecSheetModal = dynamic(
+  () => import('./LedTechnicalSpecSheetModal'),
+  { ssr: false },
+);
+const LeadSplitTriageView = dynamic(
+  () => import('./LeadSplitTriageView'),
+  { ssr: false },
+);
 const LeadActivityTimeline = dynamic(
   () => import('./LeadActivityTimeline').then((m) => m.LeadActivityTimeline),
   {
@@ -135,7 +157,9 @@ export function LeadsWorkspace() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
 
-  const [viewMode, setViewMode] = useState<'table' | 'kanban' | 'reminders'>('table');
+  const [viewMode, setViewMode] = useState<'table' | 'kanban' | 'split' | 'reminders'>('table');
+  const [showLedSpecModal, setShowLedSpecModal] = useState(false);
+  const [ledSpecTargetLead, setLedSpecTargetLead] = useState<LeadItemDto | null>(null);
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [specialAlertFilter, setSpecialAlertFilter] = useState<
     'none' | 'all_alerts' | 'active_dup' | 'won_returning' | 'lost_returning' | 'spam_probe'
@@ -274,6 +298,13 @@ export function LeadsWorkspace() {
     const pageParam = Number(params.get('page'));
     if (Number.isInteger(pageParam) && pageParam > 1) {
       setCurrentPage(pageParam);
+    }
+    if (params.get('view') === 'split') setViewMode('split');
+    if (params.get('quickFilter') === 'overdue') setOverdueOnly(true);
+    if (params.get('quickAction') === 'create-lead') setShowCreateModal(true);
+    if (params.get('quickAction') === 'led-spec') {
+      setLedSpecTargetLead(null);
+      setShowLedSpecModal(true);
     }
     const viewParam = params.get('view');
     if (viewParam === 'kanban' || viewParam === 'table') {
@@ -1783,6 +1814,25 @@ export function LeadsWorkspace() {
     }
   };
 
+  const handleDismissPriceAlertById = async (alertId: number, reason: string) => {
+    if (!user || !reason.trim()) return;
+    setSubmitting(true);
+    setErrorMsg(null);
+    try {
+      await apiRequest('/api/v1/leads/price-check-alerts', {
+        method: 'PATCH',
+        csrfToken: user.csrfToken,
+        body: { alertId, dismissReason: reason.trim() },
+      });
+      setFeedbackMsg('Đã gỡ cảnh báo dò giá và tự động bỏ cờ "Nghi dò giá" trên các Lead liên quan (UC01 5.3).');
+      await fetchLeads();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : 'Không thể gỡ cảnh báo dò giá.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleDismissPriceAlert = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!user || !dismissingAlert || !dismissAlertReason.trim()) return;
@@ -2661,7 +2711,36 @@ export function LeadsWorkspace() {
               <Kanban aria-hidden="true" className="w-3.5 h-3.5" />
               <span>Kanban</span>
             </button>
+            <button
+              type="button"
+              aria-pressed={viewMode === 'split'}
+              onClick={() => {
+                setViewMode('split');
+                setReminderFilter('none');
+              }}
+              title="Chế độ Duyệt Liên Hoàn 2 Cột (Lướt nhanh bằng phím ↑/↓)"
+              className={`min-h-7 px-2 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition ${
+                viewMode === 'split'
+                  ? 'bg-white text-[#0F275C] shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Columns2 aria-hidden="true" className="w-3.5 h-3.5" />
+              <span>Duyệt 2 cột</span>
+            </button>
           </div>
+          <button
+            type="button"
+            onClick={() => {
+              setLedSpecTargetLead(selectedLead || null);
+              setShowLedSpecModal(true);
+            }}
+            title="Lập Phiếu Đề Xuất Cấu Hình Kỹ Thuật Màn Hình LED B2B (Xuất Word/PDF)"
+            className="min-h-8 px-2.5 rounded-[10px] border border-blue-200 bg-blue-50/75 hover:bg-blue-100 text-[#0F275C] text-xs font-semibold inline-flex items-center gap-1 transition whitespace-nowrap"
+          >
+            <Calculator aria-hidden="true" className="w-3.5 h-3.5" />
+            <span>Phiếu Kỹ thuật LED</span>
+          </button>
         </div>
 
         {/* Cụm Giữa: Xuất/Nhập Excel + Tạo Lead */}
@@ -3217,7 +3296,27 @@ export function LeadsWorkspace() {
         </div>
       )}
 
-      {/* Main Content: Table View vs Kanban View */}
+      <LeadSavedSmartViewsBar
+        user={user}
+        currentFilters={{
+          statusFilter,
+          sourceWebsiteFilter,
+          overdueOnly,
+          unreceivedOnly,
+          specialAlertFilter,
+        }}
+        onApplyView={(f) => {
+          setStatusFilter(f.statusFilter || 'all');
+          setSourceWebsiteFilter(f.sourceWebsiteFilter || 'all');
+          setOverdueOnly(Boolean(f.overdueOnly));
+          setUnreceivedOnly(Boolean(f.unreceivedOnly));
+          setSpecialAlertFilter((f.specialAlertFilter as typeof specialAlertFilter) || 'none');
+          setReminderFilter('none');
+          setCurrentPage(1);
+        }}
+      />
+
+      {/* Main Content: Table View vs Split-View vs Kanban View */}
       {loading ? (
         <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-xs space-y-3 animate-pulse">
           <div className="h-10 bg-slate-100 rounded-xl w-full" />
@@ -3225,6 +3324,24 @@ export function LeadsWorkspace() {
             <div key={idx} className="h-14 bg-slate-50 rounded-xl w-full border border-slate-100" />
           ))}
         </div>
+      ) : viewMode === 'split' ? (
+        <LeadSplitTriageView
+          leads={displayedLeads}
+          allScopedLeads={leads}
+          user={user}
+          canEditLead={canEditLead}
+          onOpenFullModal={(leadId) => {
+            setSelectedLeadId(leadId);
+            setLeadDetailTab('info');
+          }}
+          onOpenLedSpec={(targetLead) => {
+            setLedSpecTargetLead(targetLead);
+            setShowLedSpecModal(true);
+          }}
+          onRefreshLeads={fetchLeads}
+          onFeedback={(msg) => setFeedbackMsg(msg)}
+          onError={(msg) => setErrorMsg(msg)}
+        />
       ) : viewMode === 'table' ? (
         <>
           {/* Mobile Card-View Alternative (< 768px) */}
@@ -3890,833 +4007,36 @@ export function LeadsWorkspace() {
         />
       )}
 
-      {/* Modal Nhập Danh Sách Lead Từ Excel (.xlsx / .csv) kèm Kiểm Tra Trùng Lặp Tức Thì */}
-      {showImportModal && (() => {
-        const seenPhonesInBatch = new Set<string>();
-        const evaluatedRows = importPreviewRows.map((row) => {
-          const rawDigits = (row.phone || '').replace(/\D/g, '');
-          const normPhone =
-            rawDigits.startsWith('84') && rawDigits.length >= 10
-              ? `0${rawDigits.slice(2)}`
-              : rawDigits.length === 9 && !rawDigits.startsWith('0')
-                ? `0${rawDigits}`
-                : rawDigits;
-          const normComp = (row.companyName || '').trim().toLowerCase();
+      {showLedSpecModal && (
+        <LedTechnicalSpecSheetModal
+          open={showLedSpecModal}
+          onClose={() => setShowLedSpecModal(false)}
+          user={user}
+          lead={ledSpecTargetLead || selectedLead || null}
+          onSavedToLead={(msg) => {
+            setFeedbackMsg(msg);
+            void fetchLeads();
+          }}
+        />
+      )}
 
-          const isDupInBatch = normPhone.length >= 8 && seenPhonesInBatch.has(normPhone);
-          if (normPhone.length >= 8) {
-            seenPhonesInBatch.add(normPhone);
-          }
-
-          const matchedLeads = leads.filter((l) => {
-            if (l.spamStatus !== 'NONE') return false;
-            const lPhone = (l.phone || '').replace(/\D/g, '');
-            const phoneHit = normPhone.length >= 8 && !lPhone.includes('*') && lPhone === normPhone;
-            const compHit =
-              normComp.length >= 5 && (l.companyName || '').trim().toLowerCase() === normComp;
-            return phoneHit || compHit;
-          });
-
-          const openMatch = matchedLeads.find(
-            (l) =>
-              l.pipelineStatus === 'new_lead' ||
-              l.pipelineStatus === 'quoting' ||
-              l.pipelineStatus === 'quote_sent',
-          );
-          const wonMatch = matchedLeads.find((l) => l.pipelineStatus === 'won');
-          const lostMatch = matchedLeads.find((l) => l.pipelineStatus === 'lost');
-
-          let rowStatus: 'OPEN_DUP' | 'IN_FILE_DUP' | 'WON_RETURNING' | 'LOST_RETURNING' | 'NEW_VALID' =
-            'NEW_VALID';
-          let matchedLead: LeadItemDto | null = null;
-
-          if (openMatch) {
-            rowStatus = 'OPEN_DUP';
-            matchedLead = openMatch;
-          } else if (isDupInBatch) {
-            rowStatus = 'IN_FILE_DUP';
-          } else if (wonMatch) {
-            rowStatus = 'WON_RETURNING';
-            matchedLead = wonMatch;
-          } else if (lostMatch) {
-            rowStatus = 'LOST_RETURNING';
-            matchedLead = lostMatch;
-          }
-
-          return {
-            ...row,
-            rowStatus,
-            matchedLead,
-          };
-        });
-
-        const openDupCount = evaluatedRows.filter(
-          (r) => r.rowStatus === 'OPEN_DUP' || r.rowStatus === 'IN_FILE_DUP',
-        ).length;
-        const wonReturningCount = evaluatedRows.filter((r) => r.rowStatus === 'WON_RETURNING').length;
-        const lostReturningCount = evaluatedRows.filter((r) => r.rowStatus === 'LOST_RETURNING').length;
-        const newValidCount = evaluatedRows.filter((r) => r.rowStatus === 'NEW_VALID').length;
-
-        const rowsToCommit = importSkipOpenDup
-          ? evaluatedRows.filter(
-              (r) => r.rowStatus !== 'OPEN_DUP' && r.rowStatus !== 'IN_FILE_DUP',
-            )
-          : evaluatedRows;
-
-        return (
-          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-            <div className="bg-white w-full max-w-5xl rounded-2xl shadow-2xl border border-slate-200 overflow-hidden my-auto flex flex-col max-h-[90vh]">
-              {/* Header */}
-              <div className="px-6 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-700 text-white flex items-center justify-center shadow-xs">
-                    <FolderUp className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h2 className="font-display font-bold text-slate-900 text-lg">
-                      Nhập danh sách Lead từ Excel (.xlsx / .csv)
-                    </h2>
-                    <p className="text-xs text-slate-500">
-                      Tự động chuẩn hóa SĐT và phát cảnh báo trùng lặp / khách cũ quay lại trên từng dòng trước khi lưu
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setImportFileName('5_Truong_Hop_Test_Mau.xlsx');
-                      setImportPreviewRows([
-                        {
-                          rowNumber: 6,
-                          phone: '0908100201',
-                          contactName: 'Anh Minh Hoàng (TH1: Khách cũ đã mua)',
-                          companyName: 'Công ty CP Trung tâm Hội nghị Ánh Dương',
-                          projectName: 'Màn hình LED Hội trường Tầng 6',
-                          email: 'minh.hoang@anhduong.vn',
-                          source: 'Website Toàn Trung',
-                          region: 'TP.HCM - TP. Thủ Đức',
-                          address: 'Khu Công Nghệ Cao, TP. Thủ Đức',
-                          productsText: 'Màn hình LED Indoor',
-                          note: 'Trùng với TT-20261101-0001 đã Chốt thành công',
-                        },
-                        {
-                          rowNumber: 7,
-                          phone: '0364759204',
-                          contactName: 'Anh Long (TH2: Khách thất bại quay lại)',
-                          companyName: 'Công ty TNHH Xây dựng Long Phát',
-                          projectName: 'Màn hình LED Phòng họp Tầng 2',
-                          email: 'long@longphat.vn',
-                          source: 'Zalo',
-                          region: 'TP.HCM - TP. Thủ Đức',
-                          address: 'Đường Võ Văn Ngân, TP. Thủ Đức',
-                          productsText: 'Màn hình LED Indoor',
-                          note: 'Trùng với TT-20261106-000720 từng Thất bại',
-                        },
-                        {
-                          rowNumber: 8,
-                          phone: '0908100204',
-                          contactName: 'Bác sĩ Khanh (TH3: Trùng Lead đang mở)',
-                          companyName: 'Bệnh viện Đa khoa Quốc tế Minh Tâm',
-                          projectName: 'Màn hình LED Sảnh khám & Đồng hồ LED',
-                          email: 'khanh@minhtamhospital.vn',
-                          source: 'Google Ads',
-                          region: 'TP.HCM - Quận 7',
-                          address: 'Nguyễn Lương Bằng, Quận 7',
-                          productsText: 'Màn hình LED Indoor',
-                          note: 'Trùng với TT-20261105-0004 đang mở',
-                        },
-                        {
-                          rowNumber: 9,
-                          phone: '0918888999',
-                          contactName: 'Chị Lan (TH4: Khách mới hợp lệ)',
-                          companyName: 'Nhà máy Sản xuất Hòa Bình',
-                          projectName: 'Bảng điện tử Năng suất & An toàn',
-                          email: 'lan.bql@hoabinhfactory.vn',
-                          source: 'Zalo',
-                          region: 'Bình Dương',
-                          address: 'KCN VSIP 1, Thuận An, Bình Dương',
-                          productsText: 'Bảng Năng suất',
-                          note: 'Khách hàng mới hoàn toàn',
-                        },
-                        {
-                          rowNumber: 10,
-                          phone: '0918888999',
-                          contactName: 'Chị Lan (TH5: Lặp SĐT trong cùng file Excel)',
-                          companyName: 'Nhà máy Sản xuất Hòa Bình',
-                          projectName: 'Bảng điện tử Năng suất (Dòng lặp)',
-                          email: 'lan.bql@hoabinhfactory.vn',
-                          source: 'Website Toàn Trung',
-                          region: 'Bình Dương',
-                          address: 'KCN VSIP 1, Thuận An, Bình Dương',
-                          productsText: 'Bảng Năng suất',
-                          note: 'Trùng SĐT với dòng #9 ngay trong file Excel',
-                        },
-                      ]);
-                    }}
-                    className="h-9 px-3 rounded-xl border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-bold inline-flex items-center gap-1.5 transition"
-                  >
-                    <span>⚡ Nạp 5 trường hợp mẫu để test ngay</span>
-                  </button>
-                  <a
-                    href="/api/v1/leads/export?template=1"
-                    className="h-9 px-3 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-[#1E3A8A] text-xs font-bold inline-flex items-center gap-1.5 transition"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Tải file Excel mẫu (.xlsx)</span>
-                  </a>
-                  <button
-                    type="button"
-                    onClick={() => setShowImportModal(false)}
-                    className="p-2 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
-                  >
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
-
-              {/* Body */}
-              <div className="p-6 overflow-y-auto space-y-4 flex-1">
-                {/* Upload File or Paste */}
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <div
-                    onClick={() => importFileInputRef.current?.click()}
-                    className="cursor-pointer rounded-xl border-2 border-dashed border-emerald-300 bg-emerald-50/40 hover:bg-emerald-50/80 p-4 flex flex-col items-center justify-center text-center transition"
-                  >
-                    <input
-                      ref={importFileInputRef}
-                      type="file"
-                      accept=".xlsx,.csv,.tsv"
-                      className="hidden"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (!file || !user) return;
-                        setImportFileName(file.name);
-                        setImportParsing(true);
-                        setErrorMsg(null);
-                        void (async () => {
-                          try {
-                            const fd = new FormData();
-                            fd.append('file', file);
-                            const res = await apiRequest<{
-                              rows: typeof importPreviewRows;
-                            }>('/api/v1/leads/export', {
-                              method: 'POST',
-                              csrfToken: user.csrfToken,
-                              isFormData: true,
-                              body: fd,
-                            });
-                            setImportPreviewRows(res.rows || []);
-                          } catch (err) {
-                            setErrorMsg(
-                              err instanceof Error ? err.message : 'Không thể đọc file Excel.',
-                            );
-                          } finally {
-                            setImportParsing(false);
-                            if (importFileInputRef.current) {
-                              importFileInputRef.current.value = '';
-                            }
-                          }
-                        })();
-                      }}
-                    />
-                    <FolderUp className="w-7 h-7 text-emerald-700 mb-1.5" />
-                    <p className="text-sm font-bold text-slate-800">
-                      {importFileName
-                        ? `Đã chọn: ${importFileName}`
-                        : 'Bấm để chọn file Excel (.xlsx, .csv)'}
-                    </p>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      Hỗ trợ cả file Mẫu Nhập Lead và file Xuất Excel từ hệ thống Toàn Trung
-                    </p>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-3 flex flex-col gap-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-slate-700">
-                        Hoặc dán trực tiếp các dòng copy từ bảng Excel:
-                      </span>
-                      <button
-                        type="button"
-                        disabled={!importPastedText.trim() || importParsing}
-                        onClick={() => {
-                          if (!user || !importPastedText.trim()) return;
-                          setImportParsing(true);
-                          setErrorMsg(null);
-                          void (async () => {
-                            try {
-                              const fd = new FormData();
-                              fd.append('pastedText', importPastedText);
-                              const res = await apiRequest<{
-                                rows: typeof importPreviewRows;
-                              }>('/api/v1/leads/export', {
-                                method: 'POST',
-                                csrfToken: user.csrfToken,
-                                isFormData: true,
-                                body: fd,
-                              });
-                              setImportPreviewRows(res.rows || []);
-                            } catch (err) {
-                              setErrorMsg(
-                                err instanceof Error ? err.message : 'Không thể phân tích dữ liệu dán.',
-                              );
-                            } finally {
-                              setImportParsing(false);
-                            }
-                          })();
-                        }}
-                        className="h-7 px-2.5 rounded-lg bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold disabled:opacity-40 transition"
-                      >
-                        Kiểm tra dữ liệu dán
-                      </button>
-                    </div>
-                    <textarea
-                      rows={2}
-                      value={importPastedText}
-                      onChange={(e) => setImportPastedText(e.target.value)}
-                      placeholder="Copy các dòng từ Excel (Số điện thoại | Người liên hệ | Công ty | Dự án...) và dán vào đây..."
-                      className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs focus:outline-none focus:border-[#1E3A8A]"
-                    />
-                  </div>
-                </div>
-
-                {/* Summary & Instant Duplicate Detection Table */}
-                {importParsing ? (
-                  <div className="p-8 text-center text-sm font-semibold text-slate-600 bg-slate-50 rounded-xl border border-slate-200">
-                    Đang đọc file Excel và đối chiếu trùng lặp với cơ sở dữ liệu...
-                  </div>
-                ) : evaluatedRows.length > 0 ? (
-                  <div className="space-y-3">
-                    {/* KPI Strip for Import Preview */}
-                    <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl bg-slate-50 border border-slate-200">
-                      <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
-                        <span className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800">
-                          Tổng cộng: {evaluatedRows.length} dòng
-                        </span>
-                        <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-700">
-                          Mới hợp lệ: {newValidCount}
-                        </span>
-                        <span className="px-2.5 py-1 rounded-lg bg-emerald-100 text-emerald-900 border border-emerald-300">
-                          Khách cũ quay lại (Đã mua): {wonReturningCount}
-                        </span>
-                        <span className="px-2.5 py-1 rounded-lg bg-blue-100 text-[#1E3A8A] border border-blue-300">
-                          Khách quay lại (Thất bại): {lostReturningCount}
-                        </span>
-                        <span className="px-2.5 py-1 rounded-lg bg-rose-100 text-rose-900 border border-rose-300">
-                          Cảnh báo trùng Lead đang mở: {openDupCount}
-                        </span>
-                      </div>
-
-                      <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-800 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={importSkipOpenDup}
-                          onChange={(e) => setImportSkipOpenDup(e.target.checked)}
-                          className="rounded border-slate-300 text-[#1E3A8A]"
-                        />
-                        <span>Tự động bỏ qua dòng đang Trùng Lead đang mở ({openDupCount})</span>
-                      </label>
-                    </div>
-
-                    {/* Preview Table */}
-                    <div className="border border-slate-200 rounded-xl overflow-hidden max-h-[340px] overflow-y-auto">
-                      <table className="w-full text-left border-collapse text-xs">
-                        <thead className="bg-slate-100 text-slate-700 sticky top-0 z-10 border-b border-slate-200">
-                          <tr>
-                            <th className="py-2.5 px-3 font-bold">Dòng</th>
-                            <th className="py-2.5 px-3 font-bold">Số điện thoại</th>
-                            <th className="py-2.5 px-3 font-bold">Khách hàng / Công ty</th>
-                            <th className="py-2.5 px-3 font-bold">Dự án &amp; Nguồn</th>
-                            <th className="py-2.5 px-3 font-bold">Sản phẩm</th>
-                            <th className="py-2.5 px-3 font-bold">Trạng thái Kiểm tra Trùng</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200">
-                          {evaluatedRows.map((r, idx) => (
-                            <tr
-                              key={`${r.rowNumber}-${idx}`}
-                              className={
-                                r.rowStatus === 'OPEN_DUP' || r.rowStatus === 'IN_FILE_DUP'
-                                  ? 'bg-rose-50/70'
-                                  : r.rowStatus === 'WON_RETURNING'
-                                    ? 'bg-emerald-50/50'
-                                    : r.rowStatus === 'LOST_RETURNING'
-                                      ? 'bg-blue-50/40'
-                                      : 'bg-white'
-                              }
-                            >
-                              <td className="py-2 px-3 font-mono text-slate-500">#{r.rowNumber}</td>
-                              <td className="py-2 px-3 font-mono font-bold text-slate-900">
-                                {r.phone}
-                              </td>
-                              <td className="py-2 px-3">
-                                <div className="font-semibold text-slate-900">
-                                  {r.companyName || r.contactName || 'Khách liên hệ'}
-                                </div>
-                                {r.contactName && r.companyName && (
-                                  <div className="text-[11px] text-slate-500">{r.contactName}</div>
-                                )}
-                              </td>
-                              <td className="py-2 px-3">
-                                <div className="text-slate-800 truncate max-w-[180px]">
-                                  {r.projectName || r.region}
-                                </div>
-                                <span className="text-[11px] text-slate-500">{r.source}</span>
-                              </td>
-                              <td className="py-2 px-3 text-slate-700 max-w-[160px] truncate">
-                                {r.productsText}
-                              </td>
-                              <td className="py-2 px-3">
-                                {r.rowStatus === 'OPEN_DUP' && r.matchedLead && (
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="px-2 py-0.5 rounded bg-rose-600 text-white font-bold text-[11px]">
-                                      CẢNH BÁO TRÙNG LEAD ({r.matchedLead.leadCode})
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setShowImportModal(false);
-                                        setSelectedLeadId(r.matchedLead!.id);
-                                        setLeadDetailTab('info');
-                                      }}
-                                      className="text-[11px] font-bold text-[#1E3A8A] underline"
-                                    >
-                                      Xem hồ sơ →
-                                    </button>
-                                  </div>
-                                )}
-                                {r.rowStatus === 'IN_FILE_DUP' && (
-                                  <span className="px-2 py-0.5 rounded bg-amber-600 text-white font-bold text-[11px]">
-                                    TRÙNG SĐT TRONG FILE EXCEL
-                                  </span>
-                                )}
-                                {r.rowStatus === 'WON_RETURNING' && r.matchedLead && (
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold text-[11px]">
-                                      KHÁCH CŨ QUAY LẠI ({r.matchedLead.leadCode})
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setShowImportModal(false);
-                                        setSelectedLeadId(r.matchedLead!.id);
-                                        setLeadDetailTab('info');
-                                      }}
-                                      className="text-[11px] font-bold text-emerald-800 underline"
-                                    >
-                                      Xem hồ sơ đã mua →
-                                    </button>
-                                  </div>
-                                )}
-                                {r.rowStatus === 'LOST_RETURNING' && r.matchedLead && (
-                                  <div className="flex flex-wrap items-center gap-1.5">
-                                    <span className="px-2 py-0.5 rounded bg-blue-100 border border-blue-300 text-[#1E3A8A] font-bold text-[11px]">
-                                      KHÁCH QUAY LẠI ({r.matchedLead.leadCode})
-                                    </span>
-                                    <button
-                                      type="button"
-                                      onClick={() => {
-                                        setShowImportModal(false);
-                                        setSelectedLeadId(r.matchedLead!.id);
-                                        setLeadDetailTab('info');
-                                      }}
-                                      className="text-[11px] font-bold text-[#1E3A8A] underline"
-                                    >
-                                      Xem hồ sơ cũ →
-                                    </button>
-                                  </div>
-                                )}
-                                {r.rowStatus === 'NEW_VALID' && (
-                                  <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold text-[11px]">
-                                    Mới hợp lệ
-                                  </span>
-                                )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-slate-200">
-                    Chọn file Excel (`.xlsx`, `.csv`) hoặc dán danh sách từ Excel để xem trước kết quả kiểm tra trùng lặp.
-                  </div>
-                )}
-              </div>
-
-              {/* Footer */}
-              <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-3">
-                <span className="text-xs text-slate-500">
-                  {evaluatedRows.length > 0
-                    ? `Sẵn sàng nhập ${rowsToCommit.length} / ${evaluatedRows.length} dòng vào hệ thống`
-                    : 'Chưa có dữ liệu xem trước'}
-                </span>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowImportModal(false)}
-                    className="h-9 px-4 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold"
-                  >
-                    Đóng
-                  </button>
-                  <button
-                    type="button"
-                    disabled={rowsToCommit.length === 0 || importCommitting}
-                    onClick={() => {
-                      if (!user || rowsToCommit.length === 0) return;
-                      setImportCommitting(true);
-                      setErrorMsg(null);
-                      void (async () => {
-                        try {
-                          const res = await apiRequest<{
-                            createdCount: number;
-                            failedCount: number;
-                          }>('/api/v1/leads/export', {
-                            method: 'POST',
-                            csrfToken: user.csrfToken,
-                            body: { rows: rowsToCommit },
-                          });
-                          setShowImportModal(false);
-                          setFeedbackMsg(
-                            `Đã nhập thành công ${res.createdCount} hồ sơ Lead từ Excel${
-                              res.failedCount > 0 ? ` (${res.failedCount} dòng lỗi bị bỏ qua)` : ''
-                            }.`,
-                          );
-                          await fetchLeads();
-                        } catch (err) {
-                          setErrorMsg(
-                            err instanceof Error ? err.message : 'Lỗi khi nhập danh sách Excel.',
-                          );
-                        } finally {
-                          setImportCommitting(false);
-                        }
-                      })();
-                    }}
-                    className="h-9 px-5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-sm disabled:opacity-40 transition"
-                  >
-                    <FolderUp className="w-4 h-4" />
-                    <span>
-                      {importCommitting
-                        ? 'Đang nhập dữ liệu...'
-                        : `Nhập ${rowsToCommit.length} hồ sơ vào hệ thống`}
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* Investigative Popover for Separate Warnings (UI-03) */}
-      {investigativeLead && (() => {
-        const evalResult = fraudByLeadId.get(investigativeLead.id) || evaluateLeadFraudCriteria(investigativeLead, leads, priceCheckAlerts);
-        return (
-          <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-            <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl border border-slate-200 overflow-hidden text-sm animate-in fade-in zoom-in-95 duration-150">
-              <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3">
-                <div>
-                  <span className="font-mono text-xs font-bold text-[#1E3A8A]">
-                    {investigativeLead.leadCode}
-                  </span>
-                  <h3 className="font-display font-bold text-slate-900 text-base mt-0.5">
-                    Chi tiết Cảnh báo & Bằng chứng Đối chiếu
-                  </h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setInvestigativeLead(null)}
-                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div className="p-5 space-y-3">
-                {evalResult.duplicateScenario === 'SCENARIO_1_ACTIVE_DUP' && (
-                  <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-950 space-y-2">
-                    <strong className="font-bold block text-sm">
-                      Kịch bản 1 (UC01 1.5): [CẢNH BÁO TRÙNG LEAD] — Trùng khách khi Lead cũ đang mở
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      Khách hàng gửi thông tin qua nhiều kênh cùng lúc. Hồ sơ gốc đang mở:{' '}
-                      <strong className="font-mono text-[#1E3A8A]">
-                        {evalResult.matchedCustomerLead?.leadCode || investigativeLead.duplicateOfLeadCode || 'Lead cũ'}
-                      </strong>{' '}
-                      (Phụ trách:{' '}
-                      <strong>{evalResult.matchedCustomerLead?.assignedSalesName || investigativeLead.assignedSalesName || 'NVKD'}</strong>
-                      , Trạng thái:{' '}
-                      <strong>
-                        {evalResult.matchedCustomerLead
-                          ? PIPELINE_STATUS_LABELS[evalResult.matchedCustomerLead.pipelineStatus]
-                          : 'Đang mở'}
-                      </strong>
-                      ).
-                    </p>
-                    <div className="flex flex-wrap items-center gap-2 pt-1">
-                      {evalResult.matchedCustomerLead && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const targetId = evalResult.matchedCustomerLead!.id;
-                            setInvestigativeLead(null);
-                            setSelectedLeadId(targetId);
-                            setLeadDetailTab('info');
-                          }}
-                          className="h-8 px-3 rounded-lg bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition"
-                        >
-                          <span>Mở xem hồ sơ đang mở ({evalResult.matchedCustomerLead.leadCode}) →</span>
-                        </button>
-                      )}
-                      {canEditLead(investigativeLead) && investigativeLead.pipelineStatus !== 'lost' && (
-                        <button
-                          type="button"
-                          disabled={submitting}
-                          onClick={() => {
-                            void (async () => {
-                              if (!user) return;
-                              setSubmitting(true);
-                              try {
-                                await apiRequest(`/api/v1/leads/${investigativeLead.id}`, {
-                                  method: 'PATCH',
-                                  csrfToken: user.csrfToken,
-                                  body: {
-                                    action: 'transition_pipeline',
-                                    expectedVersion: investigativeLead.version,
-                                    toStatus: 'lost',
-                                    reason: 'Trùng Lead',
-                                    noteContent: `Đóng nhanh theo Kịch bản 1 (UC01 1.5) do trùng với ${evalResult.matchedCustomerLead?.leadCode || investigativeLead.duplicateOfLeadCode || 'Lead đang mở'}`,
-                                    markQuoteResponded: false,
-                                    bypassPriceCheckConfirmed: false,
-                                  },
-                                });
-                                setFeedbackMsg(
-                                  `Đã đóng hồ sơ ${investigativeLead.leadCode} với lý do "Trùng Lead" (Kịch bản 1 UC01 1.5).`,
-                                );
-                                setInvestigativeLead(null);
-                                await fetchLeads();
-                              } catch (err) {
-                                setErrorMsg(err instanceof Error ? err.message : 'Lỗi đóng Lead trùng.');
-                              } finally {
-                                setSubmitting(false);
-                              }
-                            })();
-                          }}
-                          className="h-8 px-3 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition"
-                        >
-                          <span>Đóng nhanh Lead này (Thất bại · Lý do: Trùng Lead)</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {evalResult.duplicateScenario === 'SCENARIO_2_WON_RETURNING' && (
-                  <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-slate-900 space-y-2">
-                    <strong className="font-bold block text-sm text-emerald-900">
-                      [KHÁCH CŨ QUAY LẠI] — Khách đã mua hàng thành công trước đây
-                    </strong>
-                    <p className="text-xs leading-relaxed text-slate-700">
-                      Khách hàng đã từng chốt hợp đồng thành công và nay quay lại mua dự án mới. Hồ sơ đã mua trước đây:{' '}
-                      <strong className="font-mono text-emerald-900">
-                        {evalResult.matchedCustomerLead?.leadCode || investigativeLead.duplicateOfLeadCode || 'Hồ sơ cũ'}
-                      </strong>{' '}
-                      · NVKD từng phụ trách:{' '}
-                      <strong>{evalResult.matchedCustomerLead?.assignedSalesName || 'NVKD cũ'}</strong> · Trạng thái cũ:{' '}
-                      <strong className="text-emerald-700">Chốt thành công</strong>.
-                    </p>
-                    {evalResult.matchedCustomerLead && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const targetId = evalResult.matchedCustomerLead!.id;
-                          setInvestigativeLead(null);
-                          setSelectedLeadId(targetId);
-                          setLeadDetailTab('info');
-                        }}
-                        className="h-8 px-3 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition"
-                      >
-                        <span>Mở xem hồ sơ đã mua ({evalResult.matchedCustomerLead.leadCode}) →</span>
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {evalResult.duplicateScenario === 'SCENARIO_2_LOST_RETURNING' && (
-                  <div className="p-4 rounded-xl bg-blue-50 border border-blue-200 text-slate-900 space-y-2">
-                    <strong className="font-bold block text-sm text-[#1E3A8A]">
-                      [KHÁCH QUAY LẠI] — Khách từng hỏi trước đây nhưng chưa chốt (Thất bại)
-                    </strong>
-                    <p className="text-xs leading-relaxed text-slate-700">
-                      Khách hàng từng liên hệ trước đây nhưng chưa chốt được hợp đồng, nay quay lại hỏi lại. Hồ sơ cũ:{' '}
-                      <strong className="font-mono text-[#1E3A8A]">
-                        {evalResult.matchedCustomerLead?.leadCode || investigativeLead.duplicateOfLeadCode || 'Hồ sơ cũ'}
-                      </strong>{' '}
-                      · NVKD từng phụ trách:{' '}
-                      <strong>{evalResult.matchedCustomerLead?.assignedSalesName || 'NVKD cũ'}</strong> · Kết quả lần trước:{' '}
-                      <strong className="text-rose-700">
-                        {evalResult.matchedCustomerLead
-                          ? `Thất bại${evalResult.matchedCustomerLead.lostReason ? ` (${evalResult.matchedCustomerLead.lostReason})` : ''}`
-                          : 'Thất bại'}
-                      </strong>
-                      .
-                    </p>
-                    {evalResult.matchedCustomerLead && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const targetId = evalResult.matchedCustomerLead!.id;
-                          setInvestigativeLead(null);
-                          setSelectedLeadId(targetId);
-                          setLeadDetailTab('info');
-                        }}
-                        className="h-8 px-3 rounded-lg bg-[#1E3A8A] hover:bg-blue-900 text-white text-xs font-bold inline-flex items-center gap-1.5 shadow-2xs transition"
-                      >
-                        <span>Mở xem hồ sơ cũ ({evalResult.matchedCustomerLead.leadCode}) →</span>
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {evalResult.duplicateScenario === 'SCENARIO_3_MULTI_CONTRACTOR' && (
-                  <div className="p-4 rounded-xl bg-purple-50 border border-purple-200 text-purple-950 space-y-2">
-                    <strong className="font-bold block text-sm">
-                      Kịch bản 3 (UC01 1.5): [DỰ ÁN NHIỀU BÊN HỎI GIÁ] — Cùng dự án, khác nhà thầu
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      Có <strong>{evalResult.projectContractors.length + 1} nhà thầu</strong> đang cùng hỏi báo giá cho dự án/địa chỉ lắp đặt này.{' '}
-                      <strong>Quy tắc xử lý:</strong> Không gộp Lead, không chuyển về 1 người; giữ nguyên các NVKD độc lập và báo Quản lý để đồng bộ giá sàn.
-                    </p>
-                    <div className="space-y-1 pt-1">
-                      {evalResult.projectContractors.map((c) => (
-                        <div
-                          key={c.leadId}
-                          className="px-2.5 py-1.5 rounded-lg bg-white border border-purple-200 flex items-center justify-between text-xs"
-                        >
-                          <span className="font-semibold text-slate-800 truncate">
-                            {c.leadCode} · {c.companyName}
-                          </span>
-                          <span className="text-purple-800 font-bold shrink-0">
-                            Sales: {c.assignedSalesName} ({PIPELINE_STATUS_LABELS[c.pipelineStatus]})
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {evalResult.hasPriceProbeBehavior && (
-                  <div className="p-4 rounded-xl bg-orange-50 border border-orange-200 text-orange-950 space-y-1.5">
-                    <strong className="font-bold block text-sm">
-                      Nghi vấn khảo giá / dò giá (Không tự động quy kết là Spam)
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      {evalResult.priceProbeReason ||
-                        'Hồ sơ có dấu hiệu hỏi đơn giá vật tư rời hoặc trùng thông tin trong danh sách cảnh báo dò giá nội bộ.'}
-                    </p>
-                  </div>
-                )}
-
-                {evalResult.hasDuplicatePhone && (
-                  <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 space-y-1">
-                    <strong className="font-bold block text-sm">
-                      Phát hiện trùng số điện thoại ({evalResult.phoneSubmitCount30d} lần trong 30 ngày)
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      Số điện thoại <strong>{investigativeLead.phone}</strong> đã gửi yêu cầu{' '}
-                      <strong>{evalResult.phoneSubmitCount30d} lần</strong>
-                      {investigativeLead.duplicateOfLeadCode
-                        ? ` (Trùng với hồ sơ ${investigativeLead.duplicateOfLeadCode})`
-                        : ''}
-                      .
-                    </p>
-                  </div>
-                )}
-
-                {evalResult.duplicateProjectName && (
-                  <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 space-y-1">
-                    <strong className="font-bold block text-sm">
-                      Phát hiện trùng tên dự án: {evalResult.duplicateProjectName}
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      Tên công trình / dự án trùng khớp với hồ sơ{' '}
-                      <strong className="font-mono text-[#1E3A8A]">
-                        {evalResult.duplicateProjectPartnerCode || 'khác'}
-                      </strong>{' '}
-                      nhưng sử dụng thông tin liên hệ khác nhau.
-                    </p>
-                  </div>
-                )}
-
-                {investigativeLead.hasMissingSubjectContent && (
-                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-950 space-y-1">
-                    <strong className="font-bold block text-xs">
-                      Biểu mẫu thiếu nội dung tiêu đề (chứa biến mẫu chưa điền)
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      Hệ thống đã ẩn biến mẫu khỏi bảng danh sách chính và giữ nguyên giá trị gốc trong nhật ký để kiểm tra:{' '}
-                      <code className="px-1.5 py-0.5 rounded bg-white border border-amber-200 font-mono text-[11px]">
-                        {investigativeLead.rawProjectName || '—'}
-                      </code>
-                    </p>
-                  </div>
-                )}
-
-                {user && ['ADMIN', 'BOD', 'SALES_LEAD', 'MKT_LEAD'].includes(user.roleCode) && (
-                  <details className="rounded-xl bg-slate-50 border border-slate-200 p-3 text-xs text-slate-700">
-                    <summary className="font-semibold cursor-pointer select-none">
-                      Chi tiết nguồn kỹ thuật (dành cho quản lý &amp; kiểm tra)
-                    </summary>
-                    <div className="mt-2 space-y-1 text-[11px] text-slate-600">
-                      <div>Website nguồn: <strong>{investigativeLead.sourceWebsite || 'Chưa xác định'}</strong></div>
-                      <div>Phương thức trích xuất kỹ thuật: <code className="font-mono">{investigativeLead.technicalSourceMethod || 'unknown'}</code></div>
-                      <div>Kênh marketing chuẩn hóa: <strong>{investigativeLead.tracking?.marketingSource || 'Chưa xác định'}</strong></div>
-                      {investigativeLead.tracking?.landingPageUrl && (
-                        <div className="break-all">Landing URL: {investigativeLead.tracking.landingPageUrl}</div>
-                      )}
-                    </div>
-                  </details>
-                )}
-
-                {evalResult.hasBlacklistedOrSpam && investigativeLead.spamStatus !== 'NONE' && (
-                  <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-950 space-y-1">
-                    <strong className="font-bold block text-sm">
-                      Cờ Spam ({investigativeLead.spamStatus === 'CONFIRMED' ? 'Đã xác nhận loại trừ' : 'Đang chờ duyệt'})
-                    </strong>
-                    <p className="text-xs leading-relaxed">
-                      Lý do ghi nhận: <strong>{investigativeLead.spamReason || evalResult.spamOrBurnerReason || 'Chưa cập nhật'}</strong>
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setInvestigativeLead(null)}
-                  className="h-9 px-4 rounded-xl border border-slate-200 bg-white font-semibold text-slate-600"
-                >
-                  Đóng
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const targetId = investigativeLead.id;
-                    setInvestigativeLead(null);
-                    setSelectedLeadId(targetId);
-                    setLeadDetailTab('info');
-                  }}
-                  className="h-9 px-4 rounded-xl bg-[#1E3A8A] hover:bg-[#2563EB] text-white font-bold"
-                >
-                  Sửa thông tin Lead
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {showImportModal && (
+        <LeadExcelImportModal
+          open={showImportModal}
+          onClose={() => setShowImportModal(false)}
+          user={user}
+          leads={leads}
+          onImported={async (msg) => {
+            setFeedbackMsg(msg);
+            await fetchLeads();
+          }}
+          onOpenLeadDetail={(leadId) => {
+            setSelectedLeadId(leadId);
+            setLeadDetailTab('info');
+          }}
+          onError={(msg) => setErrorMsg(msg)}
+        />
+      )}
 
       {/* Modal / Dialog Chi tiết Lead & Chỉnh sửa Trực tiếp theo Phân quyền (Giao diện Gọn, Hiện đại) */}
       {selectedLead && (() => {
@@ -6639,263 +5959,34 @@ export function LeadsWorkspace() {
         );
       })()}
 
-      {/* UC01 4.6f: Hộp thoại nhắc đăng Cảnh báo dò giá khi chuyển sang "Thất bại" với lý do "Đối thủ khảo giá" */}
-      {competitorPromptLead && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-2xl shadow-2xl border border-orange-200 overflow-hidden text-sm animate-in fade-in zoom-in-95 duration-150">
-            <div className="px-5 py-4 bg-orange-50 border-b border-orange-200 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <ShieldAlert className="w-5 h-5 text-orange-600 shrink-0" />
-                <h3 className="font-display font-bold text-orange-950 text-base">
-                  Đăng Cảnh báo Dò giá Nội bộ? (UC01 4.6f)
-                </h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setCompetitorPromptLead(null)}
-                className="p-1 rounded-lg text-orange-700 hover:bg-orange-100"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <form onSubmit={(e) => void handleCreatePriceAlert(e)} className="p-5 space-y-3.5">
-              <p className="text-xs text-slate-600 leading-relaxed">
-                Bạn vừa đóng hồ sơ <strong className="font-mono text-[#1E3A8A]">{competitorPromptLead.leadCode}</strong> ({competitorPromptLead.companyName || competitorPromptLead.phone}) với lý do <strong>&quot;Đối thủ khảo giá&quot;</strong>. Bạn có muốn đăng cảnh báo lên danh sách nội bộ để toàn công ty cảnh giác không?
-              </p>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Căn cứ nghi ngờ dò giá *
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={priceCheckReason}
-                  onChange={(e) => setPriceCheckReason(e.target.value)}
-                  placeholder="VD: Hỏi giá rời nhiều kích thước P2/P3 nhưng từ chối cho địa chỉ khảo sát..."
-                  className="w-full h-10 px-3 rounded-xl border border-slate-200 text-xs focus:outline-none focus:border-orange-500"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Ảnh chụp cuộc trò chuyện (Không bắt buộc)
-                </label>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp"
-                  onChange={(e) => setPriceCheckFile(e.target.files?.[0] || null)}
-                  className="text-xs w-full"
-                />
-              </div>
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setCompetitorPromptLead(null)}
-                  className="h-9 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-600 text-xs font-semibold"
-                >
-                  Bỏ qua
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting}
-                  className="h-9 px-4 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold shadow-2xs"
-                >
-                  {submitting ? 'Đang đăng...' : 'Đăng cảnh báo dò giá'}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* UC01 5.2 & 5.3: Danh sách Cảnh báo Dò giá Nội bộ (Tìm kiếm SĐT/Email/Công ty, lọc Đang hiển thị / Đã gỡ, Gỡ cảnh báo kèm lý do) */}
-      {showPriceAlertDirectory && (
-        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-white w-full max-w-4xl max-h-[88vh] rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden text-sm animate-in fade-in zoom-in-95 duration-150">
-            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-3 shrink-0">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-orange-600 text-white grid place-items-center shrink-0">
-                  <ShieldAlert className="w-5 h-5" />
-                </div>
-                <div>
-                  <h2 className="font-display font-bold text-slate-900 text-base sm:text-lg">
-                    Danh sách Cảnh báo Dò giá Nội bộ (UC01 5.2 &amp; 5.3)
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Tra cứu SĐT, công ty nghi đối thủ khảo giá để tránh bị khai thác thông tin giá B2B Toàn Trung
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowPriceAlertDirectory(false);
-                  setDismissingAlert(null);
-                }}
-                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 hover:bg-slate-200/60"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-4 border-b border-slate-200 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
-              <div className="flex items-center gap-1.5">
-                {(
-                  [
-                    { id: 'ACTIVE', label: `Đang hiển thị (${priceCheckAlerts.filter((a) => a.status === 'ACTIVE').length})` },
-                    { id: 'DISMISSED', label: `Đã gỡ (${priceCheckAlerts.filter((a) => a.status === 'DISMISSED').length})` },
-                    { id: 'ALL', label: `Tất cả (${priceCheckAlerts.length})` },
-                  ] as const
-                ).map((tab) => (
-                  <button
-                    key={tab.id}
-                    type="button"
-                    onClick={() => setAlertStatusFilter(tab.id)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition ${
-                      alertStatusFilter === tab.id
-                        ? 'bg-orange-600 text-white shadow-2xs'
-                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200/70'
-                    }`}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
-
-              <div className="relative w-full sm:w-72">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={alertSearchQuery}
-                  onChange={(e) => setAlertSearchQuery(e.target.value)}
-                  placeholder="Tìm theo SĐT, Tên công ty, Mã Lead..."
-                  className="w-full h-9 pl-9 pr-3 rounded-xl border border-slate-200 text-xs focus:outline-none focus:border-orange-600"
-                />
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/50">
-              {priceCheckAlerts
-                .filter((a) => {
-                  if (alertStatusFilter !== 'ALL' && a.status !== alertStatusFilter) return false;
-                  if (!alertSearchQuery.trim()) return true;
-                  const q = alertSearchQuery.trim().toLowerCase();
-                  return (
-                    a.phone.toLowerCase().includes(q) ||
-                    (a.companyName || '').toLowerCase().includes(q) ||
-                    a.leadCode.toLowerCase().includes(q) ||
-                    a.reasonEvidence.toLowerCase().includes(q)
-                  );
-                })
-                .map((alert) => {
-                  const canDismissThisAlert =
-                    alert.status === 'ACTIVE' &&
-                    user &&
-                    (alert.reportedById === user.id || user.roleCode === 'ADMIN');
-                  return (
-                    <div
-                      key={alert.id}
-                      className={`p-4 rounded-xl border bg-white shadow-2xs space-y-2.5 ${
-                        alert.status === 'ACTIVE' ? 'border-orange-200' : 'border-slate-200 opacity-75'
-                      }`}
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="space-y-0.5">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span
-                              className={`px-2 py-0.5 rounded-md text-[11px] font-bold ${
-                                alert.status === 'ACTIVE'
-                                  ? 'bg-orange-100 text-orange-900 border border-orange-300'
-                                  : 'bg-slate-100 text-slate-600 border border-slate-200'
-                              }`}
-                            >
-                              {alert.status === 'ACTIVE' ? 'Đang hiển thị' : 'Đã gỡ'}
-                            </span>
-                            <span className="font-mono font-bold text-[#1E3A8A] text-sm">
-                              SĐT: {alert.phone}
-                            </span>
-                            {alert.companyName && (
-                              <span className="font-bold text-slate-900 text-sm">
-                                · {alert.companyName}
-                              </span>
-                            )}
-                            <span className="text-xs font-mono text-slate-500">
-                              ({alert.leadCode})
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-500">
-                            Người đăng: <strong className="text-slate-700">{alert.reportedByName}</strong> · Thời điểm:{' '}
-                            {new Date(alert.createdAt).toLocaleString('vi-VN')}
-                          </p>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          {alert.chatScreenshotDownloadUrl && (
-                            <a
-                              href={alert.chatScreenshotDownloadUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="h-8 px-3 rounded-lg bg-blue-50 hover:bg-blue-100 border border-blue-200 text-[#1E3A8A] text-xs font-bold inline-flex items-center gap-1"
-                            >
-                              <span>Xem ảnh chụp đoạn chat</span>
-                            </a>
-                          )}
-                          {canDismissThisAlert && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setDismissingAlert(alert);
-                                setDismissAlertReason('');
-                              }}
-                              className="h-8 px-3 rounded-lg bg-slate-100 hover:bg-rose-50 hover:text-rose-700 border border-slate-200 text-slate-700 text-xs font-bold transition"
-                            >
-                              Gỡ cảnh báo (5.3)
-                            </button>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="p-3 rounded-lg bg-orange-50/60 border border-orange-100 text-xs text-slate-800 whitespace-pre-line">
-                        <strong>Căn cứ &amp; Nhật ký cảnh báo:</strong> {alert.reasonEvidence}
-                      </div>
-
-                      {dismissingAlert?.id === alert.id && (
-                        <form
-                          onSubmit={(e) => void handleDismissPriceAlert(e)}
-                          className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
-                        >
-                          <input
-                            type="text"
-                            required
-                            value={dismissAlertReason}
-                            onChange={(e) => setDismissAlertReason(e.target.value)}
-                            placeholder="Nhập lý do gỡ bắt buộc (VD: Nhầm khách thật, đã xác minh địa chỉ công trình)..."
-                            className="flex-1 h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs"
-                          />
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => setDismissingAlert(null)}
-                              className="h-9 px-3 rounded-lg border border-slate-200 bg-white text-xs font-semibold text-slate-600"
-                            >
-                              Hủy
-                            </button>
-                            <button
-                              type="submit"
-                              disabled={submitting}
-                              className="h-9 px-3.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold"
-                            >
-                              Xác nhận gỡ cảnh báo
-                            </button>
-                          </div>
-                        </form>
-                      )}
-                    </div>
-                  );
-                })}
-            </div>
-          </div>
-        </div>
+      {(investigativeLead || competitorPromptLead || showPriceAlertDirectory) && (
+        <LeadRiskAndFraudModals
+          user={user}
+          leads={leads}
+          priceCheckAlerts={priceCheckAlerts}
+          fraudByLeadId={fraudByLeadId}
+          investigativeLead={investigativeLead}
+          onCloseInvestigative={() => setInvestigativeLead(null)}
+          canEditInvestigativeLead={investigativeLead ? canEditLead(investigativeLead) : false}
+          onOpenLeadDetail={(leadId) => {
+            setSelectedLeadId(leadId);
+            setLeadDetailTab('info');
+          }}
+          competitorPromptLead={competitorPromptLead}
+          onCloseCompetitorPrompt={() => setCompetitorPromptLead(null)}
+          priceCheckReason={priceCheckReason}
+          onChangePriceCheckReason={setPriceCheckReason}
+          onChangePriceCheckFile={setPriceCheckFile}
+          onSubmitPriceAlert={handleCreatePriceAlert}
+          showPriceAlertDirectory={showPriceAlertDirectory}
+          onClosePriceAlertDirectory={() => setShowPriceAlertDirectory(false)}
+          onDismissPriceAlertSubmit={handleDismissPriceAlertById}
+          submitting={submitting}
+          setSubmitting={setSubmitting}
+          onRefreshLeads={fetchLeads}
+          onFeedback={(msg) => setFeedbackMsg(msg)}
+          onError={(msg) => setErrorMsg(msg)}
+        />
       )}
     </div>
   );
