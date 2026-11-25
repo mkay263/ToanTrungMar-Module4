@@ -57,7 +57,6 @@ import {
   KpiAuditLineageDrawer,
   type LineageMetricType,
 } from '@/core/components/common/KpiAuditLineageDrawer';
-import { AiFinOpsControlPanel } from '@/core/components/common/AiFinOpsControlPanel';
 
 const ReportDocComposer = dynamic(
   () => import('./ReportDocComposer').then((m) => m.ReportDocComposer),
@@ -2547,8 +2546,6 @@ export function ReportsWorkspace() {
           </div>
         </form>
       </dialog>
-
-      <AiFinOpsControlPanel user={user} />
 
       <KpiAuditLineageDrawer
         open={Boolean(auditLineageMetric)}
