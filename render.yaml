@@ -1,0 +1,57 @@
+# Toàn Trung CRM V2 — Render Blueprint
+# Tài liệu triển khai: https://render.com/docs/blueprint-spec
+# Lưu ý hạ tầng:
+# - Persistent Disk (/data) yêu cầu plan từ "starter" trở lên (Render Free tier không hỗ trợ Persistent Disk).
+# - Giữ 1 instance (không autoscale >1) khi dùng SQLite trên Persistent Disk.
+# - Khi nâng cấp lên PostgreSQL Managed sau này: gắn biến DATABASE_URL từ Render Postgres
+#   và có thể chuyển `npm run release:migrate` sang `preDeployCommand`.
+
+services:
+  - type: web
+    name: toantrung-crm-v2
+    runtime: node
+    region: singapore
+    plan: starter
+    branch: main
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    buildCommand: npm ci --include=dev && npm run build && npm run artifact:prune
+    # Chạy migration + catalog seed ở startCommand vì Persistent Disk (/data) chỉ được mount lúc runtime,
+    # KHÔNG được mount trong buildCommand hoặc preDeployCommand. Cả hai lệnh đều idempotent.
+    startCommand: npm run release:migrate && npm start
+    disk:
+      name: toantrung-v2-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        value: file:/data/independent_v2.db
+      - key: STORAGE_ROOT
+        value: /data/storage
+      - key: BACKUP_ROOT
+        value: /data/storage/backups
+      - key: SKIP_SEED_ACCOUNTS
+        value: "true"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: VAULT_MASTER_KEY
+        generateValue: true
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: GMAIL_PUSH_VERIFICATION_TOKEN
+        generateValue: true
+      - key: GEMINI_TEXT_MODEL
+        value: gemini-2.5-flash
+      # Các biến bí mật/tích hợp cần điền trực tiếp trên Render Dashboard (không commit vào Git):
+      - key: PUBLIC_WEBHOOK_BASE_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
