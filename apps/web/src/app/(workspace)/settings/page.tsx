@@ -4,8 +4,12 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRight,
+  Building2,
   Check,
+  CheckCircle2,
+  DatabaseBackup,
   Globe,
+  HardDrive,
   History,
   Image as ImageIcon,
   LayoutTemplate,
@@ -24,6 +28,13 @@ import {
 import type { ImageCropConfig, PublicBrandingDto } from '@toantrung/contracts';
 import { apiRequest, ApiClientError } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
+import { GoogleOAuthManager } from '@/components/google-oauth/GoogleOAuthManager';
+import { AdminSyncCenterPanel } from '@/components/settings/AdminSyncCenterPanel';
+import dynamic from 'next/dynamic';
+const EnterpriseGovernancePanel = dynamic(
+  () => import('@/components/settings/EnterpriseGovernancePanel'),
+  { ssr: false },
+);
 
 interface AuditItem {
   id: number;
@@ -46,6 +57,49 @@ export default function SettingsPage() {
 
   const [adminBranding, setAdminBranding] = useState<PublicBrandingDto>(branding);
   const [audits, setAudits] = useState<AuditItem[]>([]);
+
+  // Sub-tab navigation: 'system_health' | 'branding_identity' | 'google_integrations' | 'governance'
+  const [activeSettingsTab, setActiveSettingsTab] = useState<'system_health' | 'branding_identity' | 'google_integrations' | 'governance'>('google_integrations');
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const t = new URLSearchParams(window.location.search).get('tab');
+    if (t === 'branding' || t === 'branding_identity') setActiveSettingsTab('branding_identity');
+    else if (t === 'health' || t === 'system_health') setActiveSettingsTab('system_health');
+    else if (t === 'sync' || t === 'google_integrations') setActiveSettingsTab('google_integrations');
+    else if (t === 'governance' || t === 'diagnostics' || t === 'audit') setActiveSettingsTab('governance');
+  }, []);
+
+  // Human-Friendly System Health & 1-Click Backup State (Enhancement 8)
+  const [backingUp, setBackingUp] = useState(false);
+  const [lastBackupTime, setLastBackupTime] = useState<string>('Chưa có bản sao lưu thủ công');
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const [storageMetrics, setStorageMetrics] = useState<{
+    dbSizeBytes: number;
+    storageFilesBytes: number;
+    totalUsedBytes: number;
+    storageFileCount: number;
+  } | null>(null);
+  const [backupHistory, setBackupHistory] = useState<
+    Array<{
+      backupId: string;
+      fileName: string;
+      fileSizeBytes: number;
+      sha256: string;
+      restoreVerified: boolean;
+      createdAt: string;
+      createdBy: string;
+    }>
+  >([]);
+
+  // Company Profile State (Enhancement 9)
+  const [companyName, setCompanyName] = useState('CÔNG TY CỔ PHẦN ĐIỆN TỬ VIỄN THÔNG TOÀN TRUNG');
+  const [companyHotline, setCompanyHotline] = useState('1900 599 817 - 0913 888 817');
+  const [companyAddress, setCompanyAddress] = useState(
+    'Số 72 Đường số 7, KDC Cityland Center Hills, P.7, Q. Gò Vấp, TP.HCM',
+  );
+  const [companyTaxCode, setCompanyTaxCode] = useState('0303716891');
+  const [companyProfileMsg, setCompanyProfileMsg] = useState<string | null>(null);
 
   // 1. "Logo hiển thị" Draft State (Simplified: only preview, upload/replace, restore default, Cancel & Save)
   const [pendingLogoFile, setPendingLogoFile] = useState<File | null>(null);
@@ -133,14 +187,55 @@ export default function SettingsPage() {
   const loadAdminBranding = useCallback(async () => {
     if (!isAdmin) return;
     try {
-      const res = await apiRequest<{
-        branding: PublicBrandingDto;
-        recentAudits: AuditItem[];
-      }>('/api/v1/settings/branding?scope=admin');
+      const [res, backupRes] = await Promise.all([
+        apiRequest<{
+          branding: PublicBrandingDto;
+          recentAudits: AuditItem[];
+        }>('/api/v1/settings/branding?scope=admin'),
+        apiRequest<{
+          companyProfile: {
+            companyName: string;
+            companyTaxCode: string;
+            companyHotline: string;
+            companyAddress: string;
+          };
+          storage: {
+            dbSizeBytes: number;
+            storageFilesBytes: number;
+            totalUsedBytes: number;
+            storageFileCount: number;
+          };
+          backups: Array<{
+            backupId: string;
+            fileName: string;
+            fileSizeBytes: number;
+            sha256: string;
+            restoreVerified: boolean;
+            createdAt: string;
+            createdBy: string;
+          }>;
+        }>('/api/v1/settings/backup'),
+      ]);
       setAdminBranding(res.branding);
       setBrandingState(res.branding);
       setAudits(res.recentAudits || []);
       syncAllFromBranding(res.branding);
+
+      if (backupRes.companyProfile) {
+        setCompanyName(backupRes.companyProfile.companyName);
+        setCompanyTaxCode(backupRes.companyProfile.companyTaxCode);
+        setCompanyHotline(backupRes.companyProfile.companyHotline);
+        setCompanyAddress(backupRes.companyProfile.companyAddress);
+      }
+      if (backupRes.storage) {
+        setStorageMetrics(backupRes.storage);
+      }
+      if (backupRes.backups) {
+        setBackupHistory(backupRes.backups);
+        if (backupRes.backups.length > 0 && backupRes.backups[0]) {
+          setLastBackupTime(new Date(backupRes.backups[0].createdAt).toLocaleString('vi-VN'));
+        }
+      }
     } catch {
       // Keep fallback state
     }
@@ -199,7 +294,7 @@ export default function SettingsPage() {
     };
   }, [dragMode]);
 
-  if (!user) return null;
+  if (!user || !isAdmin) return null;
 
   // --- Section 1: "Logo hiển thị" Handlers ---
   const handleSaveLogo = async () => {
@@ -438,7 +533,11 @@ export default function SettingsPage() {
   const activeLogoDraftUrl =
     pendingLogoPreview || adminBranding.logo.url || '/brand/logo-toan-trung.png';
   const activeHeroDraftUrl =
-    pendingHeroPreview || adminBranding.loginHero.url || '/brand/showroom-toan-trung.webp';
+    pendingHeroPreview ||
+    (adminBranding.loginHero.url &&
+    adminBranding.loginHero.url !== '/brand/showroom-toan-trung.webp'
+      ? adminBranding.loginHero.url
+      : '/brand/login-hero-led-building.jpg');
   const effectiveHeroZoom = Math.max(
     1,
     draftHeroCrop.zoom / Math.max(0.6, draftHeroCrop.frameScale || 1),
@@ -453,102 +552,489 @@ export default function SettingsPage() {
       adminBranding.dashboardBanner.imageUrl ||
       '/brand/showroom-toan-trung.webp';
 
+  const handleOneClickBackup = async () => {
+    if (backingUp) return;
+    setBackingUp(true);
+    setBackupNotice(null);
+    try {
+      const res = await apiRequest<{
+        backup: {
+          backupId: string;
+          fileName: string;
+          fileSizeBytes: number;
+          sha256: string;
+          restoreVerified: boolean;
+          createdAt: string;
+          createdBy: string;
+        };
+        backups: Array<{
+          backupId: string;
+          fileName: string;
+          fileSizeBytes: number;
+          sha256: string;
+          restoreVerified: boolean;
+          createdAt: string;
+          createdBy: string;
+        }>;
+        storage: {
+          dbSizeBytes: number;
+          storageFilesBytes: number;
+          totalUsedBytes: number;
+          storageFileCount: number;
+        };
+      }>('/api/v1/settings/backup', {
+        method: 'POST',
+        csrfToken: user?.csrfToken,
+        body: { action: 'create_backup' },
+      });
+
+      const nowStr = new Date(res.backup.createdAt).toLocaleString('vi-VN');
+      setLastBackupTime(nowStr);
+      setBackupHistory(res.backups || [res.backup]);
+      if (res.storage) setStorageMetrics(res.storage);
+      setBackupNotice(
+        `Đã sao lưu cơ sở dữ liệu (${res.backup.fileName}, ${(res.backup.fileSizeBytes / 1024).toFixed(1)} KB, SHA-256: ${res.backup.sha256.slice(0, 12)}…) & kiểm tra khôi phục (Restore Verification) thành công lúc ${nowStr}.`,
+      );
+      await loadAdminBranding();
+    } catch (err) {
+      setBackupNotice(
+        err instanceof Error ? `Lỗi sao lưu: ${err.message}` : 'Không thể thực hiện sao lưu dữ liệu.',
+      );
+    } finally {
+      setBackingUp(false);
+    }
+  };
+
+  const handleSaveCompanyProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      const res = await apiRequest<{
+        companyProfile: {
+          companyName: string;
+          companyTaxCode: string;
+          companyHotline: string;
+          companyAddress: string;
+        };
+      }>('/api/v1/settings/backup', {
+        method: 'POST',
+        csrfToken: user?.csrfToken,
+        body: {
+          action: 'save_company_profile',
+          companyName,
+          companyTaxCode,
+          companyHotline,
+          companyAddress,
+        },
+      });
+      setBrandingState({
+        ...adminBranding,
+        organizationName: res.companyProfile.companyName,
+      });
+      setCompanyProfileMsg(
+        'Đã lưu Thông tin Pháp nhân & Hồ sơ Công ty vào cơ sở dữ liệu thành công. Header và mẫu báo cáo A4 đã được đồng bộ.',
+      );
+      await loadAdminBranding();
+    } catch (err) {
+      setCompanyProfileMsg(
+        err instanceof Error ? `Lỗi lưu hồ sơ: ${err.message}` : 'Không thể lưu hồ sơ công ty.',
+      );
+    }
+  };
+
   return (
-    <div className="space-y-8">
-      {/* Page Title */}
-      <div>
-        <h1 className="font-display text-2xl sm:text-3xl font-bold text-ink tracking-tight">
-          Cài đặt thương hiệu
-        </h1>
-        <p className="text-[13px] text-ink-muted mt-1">
-          Quản lý tập trung Logo hiển thị, hình nền toàn trang Đăng nhập và Banner trang Tổng quan.
-        </p>
+    <div className="space-y-6">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+        <div>
+          <h1 className="font-display text-2xl sm:text-3xl font-bold text-ink tracking-tight">
+            Cài đặt
+          </h1>
+          <p className="text-[13px] text-ink-muted mt-1">
+            Đồng bộ dữ liệu, nhận diện thương hiệu và sao lưu hệ thống.
+          </p>
+        </div>
+
+        <div
+          role="tablist"
+          aria-label="Phân mục cài đặt hệ thống"
+          className="inline-flex p-1 rounded-xl bg-white border border-slate-200/90 shadow-xs self-start"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSettingsTab === 'branding_identity'}
+            onClick={() => setActiveSettingsTab('branding_identity')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-all ${
+              activeSettingsTab === 'branding_identity'
+                ? 'bg-[#1E3A8A] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Building2 className="w-3.5 h-3.5" />
+            <span>Thương hiệu &amp; Thông tin</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSettingsTab === 'google_integrations'}
+            onClick={() => setActiveSettingsTab('google_integrations')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-all ${
+              activeSettingsTab === 'google_integrations'
+                ? 'bg-[#1E3A8A] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5 text-blue-400" />
+            <span>Đồng bộ Mail · GA4 · Ads</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSettingsTab === 'system_health'}
+            onClick={() => setActiveSettingsTab('system_health')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-all ${
+              activeSettingsTab === 'system_health'
+                ? 'bg-[#1E3A8A] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Lưu trữ &amp; Sao lưu</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeSettingsTab === 'governance'}
+            onClick={() => setActiveSettingsTab('governance')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 transition-all ${
+              activeSettingsTab === 'governance'
+                ? 'bg-[#1E3A8A] text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <History className="w-3.5 h-3.5" />
+            <span>Kiểm toán &amp; Chẩn đoán Local</span>
+          </button>
+        </div>
       </div>
 
-      {/* Section 0: Environment & Security Overview */}
-      <section className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        <div className="lg:col-span-6 bg-white border border-slate-200/80 rounded-2xl p-6 shadow-card">
-          <div className="flex items-center gap-3 pb-4 border-b border-slate-100">
-            <div className="w-9 h-9 rounded-xl bg-brand-soft text-brand grid place-items-center">
-              <Globe className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="font-display text-base font-bold text-ink">
-                Ngôn ngữ & Múi giờ chuẩn
-              </h2>
-              <p className="text-xs text-ink-muted">Thiết lập chuẩn nghiệp vụ Việt Nam</p>
-            </div>
-          </div>
+      {/* =====================================================================
+          SUB-TAB: GOOGLE OAUTH 2.0 INTEGRATION (MODULES 02, 03, 04)
+      ===================================================================== */}
+      {activeSettingsTab === 'governance' && <EnterpriseGovernancePanel />}
 
-          <div className="mt-4 grid grid-cols-2 gap-3 text-xs">
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
-              <span className="text-slate-400 block mb-1">Ngôn ngữ giao diện</span>
-              <strong className="font-bold text-ink">Tiếng Việt (Chuẩn dấu)</strong>
-            </div>
-            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70">
-              <span className="text-slate-400 block mb-1">Múi giờ hiển thị</span>
-              <strong className="font-bold text-ink">Asia/Ho_Chi_Minh (UTC+7)</strong>
-            </div>
-          </div>
+      {activeSettingsTab === 'google_integrations' && (
+        <div className="space-y-6">
+          <AdminSyncCenterPanel />
+          <GoogleOAuthManager returnPath="/settings" />
         </div>
+      )}
 
-        <div className="lg:col-span-6 bg-white border border-slate-200/80 rounded-2xl p-6 shadow-card">
-          <div className="flex items-center gap-3 pb-4 border-b border-slate-100">
-            <div className="w-9 h-9 rounded-xl bg-emerald-50 text-emerald-600 grid place-items-center">
-              <ShieldCheck className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="font-display text-base font-bold text-ink">
-                Kiểm soát quyền Cài đặt thương hiệu
-              </h2>
-              <p className="text-xs text-ink-muted">Bảo vệ cả trên giao diện và API máy chủ</p>
-            </div>
-          </div>
+      {/* =====================================================================
+          SUB-TAB 1: NON-TECHNICAL, HUMAN-FRIENDLY SYSTEM HEALTH & BACKUP (ENHANCEMENT 8)
+      ===================================================================== */}
+      {activeSettingsTab === 'system_health' && (
+        <div className="space-y-6">
+          <section className="bg-white rounded-xl border border-slate-200/80 p-6 shadow-xs space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-100">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-slate-50 border border-slate-200 text-[#1E3A8A] grid place-items-center shrink-0">
+                  <HardDrive className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="font-display text-lg font-extrabold text-slate-900">
+                    Lưu trữ &amp; Sao lưu dữ liệu
+                  </h2>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Dung lượng cơ sở dữ liệu, tệp đính kèm và bản sao lưu dự phòng.
+                  </p>
+                </div>
+              </div>
 
-          <div className="mt-4 space-y-2.5 text-xs">
-            <div className="flex items-center justify-between py-1.5 border-b border-slate-100">
-              <span className="text-slate-600">Quyền chỉnh sửa & xuất bản</span>
-              <span className="px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 font-bold">
-                Chỉ Quản trị viên (ADMIN)
+              {/* 1-Click Backup Button */}
+              <div className="flex flex-col sm:items-end gap-1">
+                <button
+                  type="button"
+                  disabled={backingUp}
+                  onClick={handleOneClickBackup}
+                  className="h-10 px-5 rounded-xl bg-[#1E3A8A] hover:bg-[#2563EB] text-white text-xs font-bold inline-flex items-center gap-2 shadow-sm transition-colors disabled:opacity-60"
+                >
+                  <DatabaseBackup className="w-4 h-4" />
+                  <span>
+                    {backingUp ? 'Đang tạo bản sao lưu...' : 'Tạo bản sao lưu'}
+                  </span>
+                </button>
+                <span className="text-[11px] text-slate-500">
+                  Bản gần nhất: <strong className="text-slate-700">{lastBackupTime}</strong>
+                </span>
+              </div>
+            </div>
+
+            {backupNotice && (
+              <div
+                role="status"
+                className={`p-3.5 rounded-xl text-xs font-semibold flex items-center justify-between ${
+                  backupNotice.startsWith('Lỗi') || backupNotice.startsWith('Không thể')
+                    ? 'bg-red-50 border border-red-200 text-red-700'
+                    : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                }`}
+              >
+                <span>{backupNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setBackupNotice(null)}
+                  className="font-bold underline ml-3"
+                >
+                  Đóng
+                </button>
+              </div>
+            )}
+
+            {/* Real Storage Usage Bar */}
+            <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200/80 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 font-bold text-slate-900">
+                  <HardDrive className="w-4 h-4 text-[#2563EB]" />
+                  <span>Dung lượng đã dùng</span>
+                </div>
+                <strong className="font-mono text-sm font-extrabold text-[#1E3A8A]">
+                  {storageMetrics
+                    ? `${(storageMetrics.totalUsedBytes / (1024 * 1024)).toFixed(2)} MB · ${storageMetrics.storageFileCount} tệp`
+                    : 'Đang kiểm tra...'}
+                </strong>
+              </div>
+
+              <div className="w-full h-3 rounded-full bg-slate-200 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-[#1E3A8A] to-[#2563EB]"
+                  style={{
+                    width: storageMetrics
+                      ? `${Math.max(4, Math.min(100, (storageMetrics.totalUsedBytes / (100 * 1024 * 1024)) * 100))}%`
+                      : '5%',
+                  }}
+                />
+              </div>
+
+              {storageMetrics && (
+                <div className="text-[11px] text-slate-500">
+                  Cơ sở dữ liệu: {(storageMetrics.dbSizeBytes / 1024).toFixed(1)} KB · Kho tệp &amp; sao lưu: {(storageMetrics.storageFilesBytes / 1024).toFixed(1)} KB
+                </div>
+              )}
+            </div>
+
+            {backupHistory.length > 0 && (
+              <div className="rounded-xl border border-slate-200/80 overflow-hidden">
+                <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200/80 text-xs font-bold text-slate-800">
+                  Lịch sử sao lưu ({backupHistory.length})
+                </div>
+                <div className="divide-y divide-slate-100 max-h-44 overflow-y-auto">
+                  {backupHistory.slice(0, 5).map((b) => (
+                    <div
+                      key={b.backupId}
+                      className="px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div>
+                        <span className="font-semibold text-slate-900">{b.fileName}</span>
+                        <span className="text-slate-500 ml-2">
+                          ({(b.fileSizeBytes / 1024).toFixed(1)} KB)
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {b.restoreVerified && (
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-[11px] font-semibold">
+                            Đã kiểm tra
+                          </span>
+                        )}
+                        <span className="text-slate-500">
+                          {new Date(b.createdAt).toLocaleString('vi-VN')}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+              <div className="p-4 rounded-xl bg-white border border-slate-200/80 flex items-center justify-between">
+                <div>
+                  <span className="text-slate-400 block">Ngôn ngữ &amp; Múi giờ</span>
+                  <strong className="font-bold text-slate-900 mt-0.5 block">
+                    Tiếng Việt · GMT+7
+                  </strong>
+                </div>
+                <Globe className="w-5 h-5 text-[#2563EB]" />
+              </div>
+              <div className="p-4 rounded-xl bg-white border border-slate-200/80 flex items-center justify-between">
+                <div>
+                  <span className="text-slate-400 block">Quyền truy cập tệp</span>
+                  <strong className="font-bold text-slate-900 mt-0.5 block">
+                    Nội bộ theo vai trò
+                  </strong>
+                </div>
+                <ShieldCheck className="w-5 h-5 text-emerald-600" />
+              </div>
+            </div>
+          </section>
+
+          {/* Audit Trail inside System Health Tab */}
+          <section className="bg-white border border-slate-200/80 rounded-xl overflow-hidden shadow-xs">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2.5">
+              <History className="w-4 h-4 text-brand" />
+              <h3 className="font-display text-sm font-bold text-ink">
+                Nhật ký hoạt động quản trị gần đây
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="bg-slate-50/80 text-slate-500 border-b border-slate-200/80">
+                    <th className="py-3 px-5 font-bold">Thời điểm</th>
+                    <th className="py-3 px-5 font-bold">Người thực hiện</th>
+                    <th className="py-3 px-5 font-bold">Hoạt động</th>
+                    <th className="py-3 px-5 font-bold">Đối tượng</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {audits.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="py-6 text-center text-slate-400">
+                        Chưa có bản ghi hoạt động nào.
+                      </td>
+                    </tr>
+                  ) : (
+                    audits.map((a) => (
+                      <tr key={a.id}>
+                        <td className="py-3 px-5 text-slate-500 whitespace-nowrap">
+                          {new Date(a.createdAt).toLocaleString('vi-VN')}
+                        </td>
+                        <td className="py-3 px-5 font-semibold text-ink">{a.actorName}</td>
+                        <td className="py-3 px-5">
+                          <span className="px-2 py-0.5 rounded bg-slate-100 text-brand font-semibold text-[11px]">
+                            {a.action}
+                          </span>
+                        </td>
+                        <td className="py-3 px-5 text-slate-600">
+                          {a.targetType} {a.targetId ? `(${a.targetId})` : ''}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {/* =====================================================================
+          SUB-TAB 2: DEDICATED "THƯƠNG HIỆU & THÔNG TIN CÔNG TY" (ENHANCEMENT 9)
+      ===================================================================== */}
+      {activeSettingsTab === 'branding_identity' && (
+        <div id="branding" className="space-y-6">
+          {/* =====================================================================
+              SECTION 0: THÔNG TIN PHÁP NHÂN & HỒ SƠ CÔNG TY (COMPANY PROFILE)
+          ===================================================================== */}
+          <section className="bg-white border border-slate-200/80 rounded-xl p-6 shadow-xs space-y-5">
+            <div className="flex items-center justify-between gap-3 pb-4 border-b border-slate-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-50 text-[#1E3A8A] grid place-items-center shrink-0">
+                  <Building2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="font-display text-lg font-bold text-slate-900">
+                    Thông tin Pháp nhân & Hồ sơ Công ty
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Hiển thị trên thanh tiêu đề hệ thống, mẫu xuất Excel (.xlsx) và tiêu đề Báo cáo A4
+                  </p>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-blue-50 text-[#1E3A8A] text-[11px] font-bold">
+                Chuẩn nhận diện Toàn Trung
               </span>
             </div>
-            <div className="flex items-center justify-between py-1.5">
-              <span className="text-slate-600">Cơ chế bản nháp (Draft)</span>
-              <span className="px-2.5 py-1 rounded-full bg-brand-soft text-brand font-bold">
-                Xem trước trực tiếp · Chỉ áp dụng khi Lưu
-              </span>
-            </div>
-          </div>
-        </div>
-      </section>
 
-      {/* Main Brand Settings Area — ADMIN ONLY */}
-      {!isAdmin ? (
-        <div className="bg-white border border-slate-200/80 rounded-2xl p-8 text-center shadow-card">
-          <p className="text-sm font-bold text-ink">
-            Quyền chỉnh sửa Cài đặt thương hiệu chỉ dành cho Quản trị viên (ADMIN)
-          </p>
-          <p className="text-xs text-ink-muted mt-1">
-            Vai trò hiện tại của bạn ({user.roleName}) không có quyền thay đổi cấu hình thương hiệu
-            chung.
-          </p>
-        </div>
-      ) : (
-        <div id="branding" className="space-y-8">
-          {/* Official Logo Discrepancy Approval Flag */}
-          <div className="p-4 rounded-2xl bg-amber-50/90 border border-amber-200 text-amber-950 text-xs flex items-start gap-3 leading-relaxed">
-            <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <strong className="font-bold block mb-0.5">
-                Lưu ý đối chiếu biến thể Logo công ty (Chờ phê duyệt)
-              </strong>
-              Ảnh chụp tham chiếu trang đăng nhập có biến thể biểu tượng chữ <strong>T</strong>{' '}
-              (&ldquo;TOÀN TRUNG LED DISPLAY SOLUTIONS&rdquo;) chưa có file vector/PNG gốc tách
-              rời. Hệ thống hiện sử dụng <strong>Logo Hồ sơ năng lực chính thức</strong> (
-              <code>/brand/logo-toan-trung.png</code> — &ldquo;TOÀN TRUNG SINCE 2006&rdquo;) và cho
-              phép Quản trị viên tải lên bản thay thế chính thức tại đây ngay khi được phê duyệt.
-            </div>
-          </div>
+            {companyProfileMsg && (
+              <div
+                role="status"
+                className={`p-3.5 rounded-xl text-xs font-semibold ${
+                  companyProfileMsg.startsWith('Lỗi') || companyProfileMsg.startsWith('Không thể')
+                    ? 'bg-red-50 border border-red-200 text-red-700'
+                    : 'bg-emerald-50 border border-emerald-200 text-emerald-800'
+                }`}
+              >
+                {companyProfileMsg}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveCompanyProfile} className="space-y-4 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Tên công ty / Pháp nhân hiển thị
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={companyName}
+                    onChange={(e) => setCompanyName(e.target.value)}
+                    placeholder="Toàn Trung Telecom JSC"
+                    className="w-full h-10 px-3.5 rounded-xl border border-slate-200 bg-white font-semibold text-slate-900 focus:border-[#2563EB] focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Mã số thuế (Tax Code)
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={companyTaxCode}
+                    onChange={(e) => setCompanyTaxCode(e.target.value)}
+                    placeholder="0304567890"
+                    className="w-full h-10 px-3.5 rounded-xl border border-slate-200 bg-white font-mono font-bold text-slate-900 focus:border-[#2563EB] focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Tổng đài / Hotline Kinh doanh
+                  </label>
+                  <input
+                    type="text"
+                    value={companyHotline}
+                    onChange={(e) => setCompanyHotline(e.target.value)}
+                    placeholder="1900 636 888"
+                    className="w-full h-10 px-3.5 rounded-xl border border-slate-200 bg-white font-semibold text-slate-900 focus:border-[#2563EB] focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1.5">
+                    Địa chỉ Trụ sở / Showroom chính
+                  </label>
+                  <input
+                    type="text"
+                    value={companyAddress}
+                    onChange={(e) => setCompanyAddress(e.target.value)}
+                    placeholder="Địa chỉ công ty..."
+                    className="w-full h-10 px-3.5 rounded-xl border border-slate-200 bg-white font-medium text-slate-900 focus:border-[#2563EB] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-slate-100 flex items-center justify-end">
+                <button
+                  type="submit"
+                  className="h-9 px-5 rounded-xl bg-[#1E3A8A] hover:bg-[#2563EB] text-white font-bold inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>Lưu Thông tin Công ty</span>
+                </button>
+              </div>
+            </form>
+          </section>
 
           {/* =====================================================================
               SECTION 1: LOGO HIỂN THỊ (SIMPLIFIED)
@@ -765,7 +1251,7 @@ export default function SettingsPage() {
                     draggable={false}
                     onError={(e) => {
                       (e.currentTarget as HTMLImageElement).src =
-                        '/brand/showroom-toan-trung.webp';
+                        '/brand/login-hero-led-building.jpg';
                     }}
                     style={{
                       objectPosition: `${heroPosX}% ${heroPosY}%`,
@@ -988,101 +1474,120 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                {/* Complete Login Page Viewport Container (Full Background + Top-Left Logo + Centered Form) */}
+                {/* Complete Login Page Viewport Container (60% Architectural LED Hero + 40% Split White Card) */}
                 <div className="rounded-2xl bg-slate-100 border border-slate-200/90 p-4 flex items-center justify-center min-h-[390px]">
                   <div
-                    className={`relative rounded-2xl overflow-hidden shadow-elevated border border-slate-300/80 flex flex-col justify-between bg-slate-950 transition-all ${
+                    className={`relative rounded-2xl overflow-hidden shadow-elevated border border-slate-300/80 flex bg-white transition-all ${
                       loginPreviewDevice === 'mobile'
-                        ? 'w-[256px] h-[410px]'
-                        : 'w-full h-[360px]'
+                        ? 'w-[260px] h-[410px] flex-col'
+                        : 'w-full h-[360px] flex-row'
                     }`}
                   >
-                    {/* Full-Viewport Background Image reflecting draft crop, position & zoom */}
-                    <div aria-hidden="true" className="absolute inset-0 z-0 overflow-hidden">
+                    {/* LEFT (60% on Desktop): Curved Architectural LED Building Facade + Dynamic Crop Binding */}
+                    <div
+                      className={`relative overflow-hidden bg-slate-900 shrink-0 ${
+                        loginPreviewDevice === 'mobile' ? 'w-full h-[145px]' : 'w-[60%] h-full'
+                      }`}
+                      style={
+                        loginPreviewDevice === 'desktop'
+                          ? { clipPath: 'polygon(0 0, 100% 0, 82% 100%, 0 100%)' }
+                          : undefined
+                      }
+                    >
                       <img
                         src={activeHeroDraftUrl}
                         alt={draftHeroAlt}
                         onError={(e) => {
                           (e.currentTarget as HTMLImageElement).src =
-                            '/brand/showroom-toan-trung.webp';
+                            '/brand/login-hero-led-building.jpg';
                         }}
                         style={{
                           objectPosition: `${heroPosX}% ${heroPosY}%`,
                           transform: `scale(${effectiveHeroZoom.toFixed(3)})`,
                           transformOrigin: `${heroPosX}% ${heroPosY}%`,
                         }}
-                        className="w-full h-full object-cover select-none"
+                        className="w-full h-full object-cover select-none transition-transform duration-150"
                       />
-                      <div className="absolute inset-0 bg-slate-950/50 backdrop-blur-[1px]" />
-                      <div className="absolute inset-0 bg-gradient-to-b from-slate-950/40 via-transparent to-slate-950/60" />
+
+                      {/* Brand Overlay Badge if custom image or mobile */}
+                      {(pendingHeroPreview || !adminBranding.loginHero.isDefault) && (
+                        <div className="absolute top-3 left-3 z-10 inline-flex items-center gap-2 bg-white/95 backdrop-blur-md px-2.5 py-1 rounded-lg shadow border border-white/70">
+                          <img
+                            src={activeLogoDraftUrl}
+                            alt={adminBranding.logo.altText || 'Logo'}
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).src =
+                                '/brand/logo-toan-trung.png';
+                            }}
+                            className="h-4 w-auto max-w-[80px] object-contain"
+                          />
+                          <div className="pl-1.5 border-l border-slate-200 leading-none">
+                            <span className="block text-[7px] font-extrabold text-[#0B3B8C] uppercase">
+                              TOÀN TRUNG
+                            </span>
+                            <span className="block text-[6px] font-semibold text-slate-500 uppercase tracking-wider mt-0.5">
+                              LED DISPLAY SOLUTIONS
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
-                    {/* Top-Left Single Logo */}
-                    <div className="relative z-10 px-4 pt-3.5 flex items-center justify-start">
-                      <div className="inline-flex items-center bg-white/95 backdrop-blur-md px-2.5 py-1.5 rounded-xl shadow border border-white/60">
-                        <img
-                          src={activeLogoDraftUrl}
-                          alt={adminBranding.logo.altText || 'Logo'}
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).src =
-                              '/brand/logo-toan-trung.png';
-                          }}
-                          className="h-5 w-auto max-w-[110px] object-contain"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Centered Compact Login Card (No duplicate logo, no header image strip) */}
-                    <div className="relative z-10 flex-1 flex items-center justify-center px-3 py-2">
-                      <div
-                        className={`bg-white/95 backdrop-blur-md border border-white/80 rounded-xl shadow-xl p-4 space-y-2.5 ${
-                          loginPreviewDevice === 'mobile' ? 'w-full' : 'w-[250px]'
-                        }`}
-                      >
+                    {/* RIGHT (40% on Desktop): Modern White Split-Card with "Đăng nhập", inputs & blue button */}
+                    <div
+                      className={`relative z-10 flex flex-col justify-center bg-white px-4 py-3 ${
+                        loginPreviewDevice === 'mobile'
+                          ? 'flex-1 w-full'
+                          : 'w-[46%] -ml-[6%] h-full'
+                      }`}
+                    >
+                      <div className="w-full max-w-[210px] mx-auto space-y-2.5">
                         <div>
-                          <strong className="font-display text-sm font-bold text-ink block">
+                          <strong className="font-display text-sm font-bold text-[#0F172A] block leading-tight">
                             Đăng nhập
                           </strong>
-                          <p className="text-[10px] text-ink-muted mt-0.5">
-                            Vui lòng nhập thông tin tài khoản để tiếp tục
+                          <p className="text-[9px] text-slate-500 mt-0.5">
+                            Chào mừng bạn quay trở lại hệ thống
                           </p>
                         </div>
 
-                        <div className="space-y-1.5">
+                        <div className="space-y-2">
                           <div>
-                            <span className="block text-[9px] font-semibold text-ink mb-0.5">
+                            <span className="block text-[8.5px] font-semibold text-slate-700 mb-0.5">
                               Email hoặc tên đăng nhập
                             </span>
-                            <div className="h-7 px-2 rounded-lg border border-slate-200 bg-white flex items-center gap-1.5 text-[10px] text-slate-400">
-                              <User className="w-3 h-3 shrink-0" />
-                              <span className="truncate">Nhập email hoặc tên đăng nhập</span>
+                            <div className="h-6.5 px-2 rounded-md border border-slate-200 bg-white flex items-center gap-1.5 text-[9px] text-slate-400">
+                              <User className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate">Nhập tài khoản của bạn</span>
                             </div>
                           </div>
 
                           <div>
-                            <span className="block text-[9px] font-semibold text-ink mb-0.5">
+                            <span className="block text-[8.5px] font-semibold text-slate-700 mb-0.5">
                               Mật khẩu
                             </span>
-                            <div className="h-7 px-2 rounded-lg border border-slate-200 bg-white flex items-center gap-1.5 text-[10px] text-slate-400">
-                              <Lock className="w-3 h-3 shrink-0" />
-                              <span>••••••••••••</span>
+                            <div className="h-6.5 px-2 rounded-md border border-slate-200 bg-white flex items-center gap-1.5 text-[9px] text-slate-400">
+                              <Lock className="w-2.5 h-2.5 shrink-0" />
+                              <span>Nhập mật khẩu</span>
                             </div>
                           </div>
                         </div>
 
-                        <div className="flex items-center justify-between text-[9px] text-slate-500 pt-0.5">
-                          <span>Ghi nhớ đăng nhập</span>
-                          <span className="text-brand font-semibold">Quên mật khẩu?</span>
+                        <div className="flex items-center justify-between text-[8.5px] text-slate-500">
+                          <span>☐ Ghi nhớ đăng nhập</span>
+                          <span className="text-[#1E40AF] font-semibold">Quên mật khẩu?</span>
                         </div>
 
-                        <div className="h-7 rounded-lg bg-brand text-white text-[10px] font-bold flex items-center justify-center gap-1 shadow-sm">
+                        <div className="h-7 rounded-md bg-[#0B3B8C] text-white text-[9.5px] font-semibold flex items-center justify-center gap-1 shadow-xs">
                           <span>Đăng nhập</span>
-                          <ArrowRight className="w-3 h-3" />
+                          <ArrowRight className="w-2.5 h-2.5" />
+                        </div>
+
+                        <div className="pt-1 border-t border-slate-100 text-center text-[7.5px] text-slate-400">
+                          © 2026 Toàn Trung. All rights reserved.
                         </div>
                       </div>
                     </div>
-
-                    <div aria-hidden="true" className="h-2 relative z-10" />
                   </div>
                 </div>
               </div>
@@ -1443,56 +1948,6 @@ export default function SettingsPage() {
                 <Check className="w-4 h-4" />
                 <span>{busySection === 'banner' ? 'Đang lưu...' : 'Lưu thay đổi'}</span>
               </button>
-            </div>
-          </section>
-
-          {/* =====================================================================
-              SECTION 4: RECENT AUDIT TRAIL
-          ===================================================================== */}
-          <section className="bg-white border border-slate-200/80 rounded-2xl overflow-hidden shadow-card">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2.5">
-              <History className="w-4 h-4 text-brand" />
-              <h3 className="font-display text-sm font-bold text-ink">
-                Nhật ký kiểm toán (Audit Trail) gần đây
-              </h3>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="bg-slate-50/80 text-slate-500 border-b border-slate-200/80">
-                    <th className="py-3 px-5 font-bold">Thời điểm</th>
-                    <th className="py-3 px-5 font-bold">Người thực hiện</th>
-                    <th className="py-3 px-5 font-bold">Hành động</th>
-                    <th className="py-3 px-5 font-bold">Đối tượng</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {audits.length === 0 ? (
-                    <tr>
-                      <td colSpan={4} className="py-6 text-center text-slate-400">
-                        Chưa có bản ghi kiểm toán nào.
-                      </td>
-                    </tr>
-                  ) : (
-                    audits.map((a) => (
-                      <tr key={a.id}>
-                        <td className="py-3 px-5 text-slate-500 whitespace-nowrap">
-                          {new Date(a.createdAt).toLocaleString('vi-VN')}
-                        </td>
-                        <td className="py-3 px-5 font-semibold text-ink">{a.actorName}</td>
-                        <td className="py-3 px-5">
-                          <code className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-100 text-brand">
-                            {a.action}
-                          </code>
-                        </td>
-                        <td className="py-3 px-5 text-slate-600">
-                          {a.targetType} {a.targetId ? `(${a.targetId})` : ''}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
             </div>
           </section>
         </div>

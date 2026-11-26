@@ -1,11 +1,48 @@
 import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 import type { ApiErrorPayload, ApiSuccess } from '@toantrung/contracts';
+import { logServerEvent } from '../logging/logger';
 
-const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const globalRateStore = globalThis as unknown as {
+  __toantrungRateBuckets?: Map<string, { count: number; resetAt: number }>;
+  __toantrungRatePruneCounter?: number;
+};
+
+function getRateBuckets(): Map<string, { count: number; resetAt: number }> {
+  if (!globalRateStore.__toantrungRateBuckets) {
+    globalRateStore.__toantrungRateBuckets = new Map();
+  }
+  return globalRateStore.__toantrungRateBuckets;
+}
+
+const MAX_RATE_BUCKET_ENTRIES = 5_000;
+
+export function safeSecretEquals(
+  provided: string | null | undefined,
+  expected: string | null | undefined,
+): boolean {
+  if (!provided || !expected) return false;
+  const a = Buffer.from(provided, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 export function checkRateLimit(key: string, maxRequests = 20, windowMs = 60_000): boolean {
   const now = Date.now();
+  const rateBuckets = getRateBuckets();
+  const counter = (globalRateStore.__toantrungRatePruneCounter =
+    (globalRateStore.__toantrungRatePruneCounter || 0) + 1);
+  if ((counter % 100 === 0 && rateBuckets.size > 100) || rateBuckets.size >= MAX_RATE_BUCKET_ENTRIES) {
+    for (const [k, v] of rateBuckets.entries()) {
+      if (v.resetAt <= now) rateBuckets.delete(k);
+    }
+    while (rateBuckets.size >= MAX_RATE_BUCKET_ENTRIES) {
+      const oldestKey = rateBuckets.keys().next().value;
+      if (!oldestKey) break;
+      rateBuckets.delete(oldestKey);
+    }
+  }
   const existing = rateBuckets.get(key);
   if (!existing || existing.resetAt <= now) {
     rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
@@ -19,11 +56,59 @@ export function checkRateLimit(key: string, maxRequests = 20, windowMs = 60_000)
 }
 
 export function getClientIp(req: Request): string {
-  const forwarded = req.headers.get('x-forwarded-for');
-  if (forwarded) {
-    return forwarded.split(',')[0].trim();
+  const raw =
+    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    req.headers.get('x-real-ip')?.trim() ||
+    '127.0.0.1';
+  const cleaned = raw.replace(/[^\da-fA-F.:]/g, '').slice(0, 64);
+  return cleaned || '127.0.0.1';
+}
+
+export function resolvePublicOrigin(req: Request, env: NodeJS.ProcessEnv = process.env): string {
+  const url = new URL(req.url);
+  const forwardedHost = req.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const hostHeader = forwardedHost || req.headers.get('host')?.trim() || '';
+  const forwardedProto = req.headers.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+  const proto =
+    forwardedProto === 'https' || forwardedProto === 'http'
+      ? forwardedProto
+      : url.protocol.replace(':', '');
+
+  if (hostHeader && !/^0\.0\.0\.0(?::\d+)?$/.test(hostHeader)) {
+    return `${proto}://${hostHeader}`;
   }
-  return req.headers.get('x-real-ip') || '127.0.0.1';
+
+  const configuredBase = (env.PUBLIC_WEBHOOK_BASE_URL || env.RENDER_EXTERNAL_URL || '').trim();
+  if (configuredBase) {
+    try {
+      return new URL(configuredBase).origin;
+    } catch {
+      // Fallback to request URL origin
+    }
+  }
+
+  return url.origin;
+}
+
+export function enforceMutationRateLimit(
+  req: Request,
+  scope: string,
+  actorKey: string | number,
+  maxRequests = 30,
+  windowMs = 60_000,
+): NextResponse<ApiErrorPayload> | null {
+  const ip = getClientIp(req);
+  const key = `mut:${scope}:${actorKey}:${ip}`;
+  if (!checkRateLimit(key, maxRequests, windowMs)) {
+    const res = jsonError(
+      'RATE_LIMITED',
+      'Thao tác gửi quá nhanh. Vui lòng đợi một lát rồi thử lại.',
+      429,
+    );
+    res.headers.set('Retry-After', String(Math.max(1, Math.ceil(windowMs / 1000))));
+    return res;
+  }
+  return null;
 }
 
 export function jsonSuccess<T, M = Record<string, unknown>>(
@@ -33,7 +118,11 @@ export function jsonSuccess<T, M = Record<string, unknown>>(
   headers?: HeadersInit,
 ): NextResponse<ApiSuccess<T, M>> {
   return NextResponse.json(
-    meta ? { data, meta } : { data },
+    {
+      ok: true as const,
+      data,
+      ...(meta !== undefined ? { meta } : {}),
+    },
     {
       status,
       headers: {
@@ -52,6 +141,9 @@ export function jsonError(
   details?: unknown,
 ): NextResponse<ApiErrorPayload> {
   const requestId = crypto.randomUUID();
+  if (status >= 500) {
+    logServerEvent('error', 'http', message, { requestId, code, status });
+  }
   return NextResponse.json(
     {
       error: {

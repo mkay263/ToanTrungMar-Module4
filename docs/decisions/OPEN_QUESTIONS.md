@@ -16,13 +16,13 @@ Việc cần làm: Chốt provider/major/runtime rồi lập ADR trước khi sc
 
 ## Q02
 
-**UC03 và đặc tả Tracking/SEO.** Trạng thái: MỞ.
+**UC03 và đặc tả Tracking/SEO (Mâu thuẫn quyền sửa Nguồn/Chiến dịch).** Trạng thái: MỞ.
 
-Nguồn/khác biệt: M02/M03 có tab trống; UC01 gọi UC03-1/UC03-4. DFD 5.0 có SEO nhưng chưa có use case đủ.
+Nguồn/khác biệt: Đã có tài liệu UC03 và UC05, tuy nhiên còn mâu thuẫn trực tiếp giữa **UC01 / PERMISSIONS.md** (ghi chỉ Nhân viên Ads được chỉnh Nguồn/Chiến dịch theo `UC03-4`) và **UC03 BR5** (ghi Chiến dịch/Nguồn marketing do hệ thống tự ghi nhận, không ai được sửa tay kể cả Marketing, Ads). Ngoài ra chưa chốt ai có thẩm quyền cuối cùng xác nhận Spam (`spamStatus = CONFIRMED`) khi Marketing và Kinh doanh đánh giá khác nhau.
 
-Đầu mối đề nghị: BA + Nhóm 2 + Nhóm 3.
+Đầu mối đề nghị: BA + Nhóm 1 + Nhóm 2 + Nhóm 3.
 
-Việc cần làm: Bổ sung input/output, quyền sửa Nguồn/Chiến dịch, validation/history và luồng SEO; mapping SEO → M03 là đề xuất tổ chức.
+Việc cần làm: BA xác nhận giữ quyền sửa tay có kiểm soát cho `ADS` (`UC03-4`) hay khóa hoàn toàn theo `UC03 BR5`, và chốt vai trò duyệt cuối cho Spam. Giữ nguyên ma trận quyền hiện tại, chưa tự ý mở hay đóng quyền này trong code.
 
 ## Q03
 
@@ -153,3 +153,13 @@ Nguồn/khác biệt: Hình UC06 kiểm tra token theo user/dự án; chưa có 
 Đầu mối đề nghị: BA + Core + Nhóm 3/5 + vận hành.
 
 Việc cần làm: Chốt chính sách và nguồn metric; không giả token/cost, không tự mua/cấp dịch vụ hoặc hứa tải/restore.
+
+## Q16
+
+**Quyền sử dụng trực tiếp công cụ "Gắn Màn LED Nhanh & Xuất MKT" cho `MKT_STAFF` / `MKT_LEAD`.** Trạng thái: MỞ.
+
+Nguồn/khác biệt: Theo ma trận BA tại [PERMISSIONS.md](../PERMISSIONS.md), quyền `AI_DESIGN` (`AI thiết kế: phối cảnh 3D và banner`) hiện chỉ cấp cho `DESIGNER` và `ADMIN`, còn `MKT_STAFF`, `ADS`, `MKT_LEAD` gửi Brief từ M03/M04 sang M05 (`submit_marketing_brief`). Người dùng đề xuất cho phép `MKT_STAFF` / `MKT_LEAD` thao tác trực tiếp trên tab "Gắn Màn LED Nhanh & Xuất MKT" để tự gắn LED lên ảnh và xuất bộ ấn phẩm đa kênh giảm thao tác thủ công, nhưng vẫn phải ẩn danh Lead theo UC01 (không lộ SĐT, email hay thông tin cá nhân khách hàng).
+
+Đầu mối đề nghị: BA + Trưởng phòng Marketing + Nhóm 5 + Core.
+
+Việc cần làm: Chờ BA/Ban Giám đốc chốt mở quyền chính thức trước khi thay đổi `ROLE_MATRIX`; tạm thời giữ nguyên ma trận BA hiện tại trong mã nguồn.

@@ -115,7 +115,6 @@ export const ROLE_PERMISSION_MATRIX: Record<RoleCode, readonly BaPermissionKey[]
     'LEAD_UPDATE_PIPELINE',
     'LEAD_REASSIGN',
     'ATTACHMENT_UPLOAD_VIEW',
-    'TRACKING_ADS_OPTIMIZE',
     'DASHBOARD_VIEW',
     'EXPORT_DATA',
   ],
@@ -143,6 +142,7 @@ export function hasBaPermission(role: RoleCode, permission: BaPermissionKey): bo
  * Standard API Envelopes (docs/API_CONTRACTS.md)
  */
 export interface ApiSuccess<T, M = Record<string, unknown>> {
+  ok: true;
   data: T;
   meta?: M;
 }
@@ -180,6 +180,7 @@ export interface SessionUserDto {
   email: string;
   phone: string | null;
   avatarUrl: string | null;
+  coverUrl?: string | null;
   roleCode: RoleCode;
   roleName: string;
   department: DepartmentCode;
@@ -205,6 +206,8 @@ export const UpdateProfileSchema = z
       .nullable()
       .optional(),
     removeAvatar: z.boolean().optional(),
+    removeCover: z.boolean().optional(),
+    coverPreset: z.string().trim().max(120).optional(),
   })
   .strict();
 
@@ -258,6 +261,7 @@ export interface AdminUserDto {
   email: string;
   phone: string | null;
   avatarUrl: string | null;
+  coverUrl?: string | null;
   roleId: number;
   roleCode: RoleCode;
   roleName: string;
@@ -265,6 +269,17 @@ export interface AdminUserDto {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface TeamDirectoryMemberDto {
+  id: number;
+  fullName: string;
+  roleCode: RoleCode;
+  roleName: string;
+  department: DepartmentCode;
+  avatarUrl: string | null;
+  coverUrl: string | null;
+  isActive: boolean;
 }
 
 export const CreateUserSchema = z.object({
@@ -383,3 +398,100 @@ export const UpdateBrandingMetaSchema = z.object({
 });
 
 export type UpdateBrandingMetaDto = z.infer<typeof UpdateBrandingMetaSchema>;
+
+/**
+ * Monetary & BigInt Safe Serialization Helpers (Shared FE/BE)
+ * 1 currency unit = 1,000,000 micros.
+ */
+export const CONTRACT_MICRO_SCALE = 1_000_000n;
+
+export const BigIntStringSchema = z
+  .string()
+  .trim()
+  .regex(/^-?\d+$/, 'Giá trị số nguyên lớn (BigInt) phải là chuỗi chữ số hợp lệ.');
+
+export interface MonetaryAmountDto {
+  /** Chuỗi số nguyên biểu diễn đơn vị nhỏ nhất (VNĐ nguyên hoặc micros) để JSON không mất độ chính xác */
+  rawAmountString: string;
+  /** Đơn vị tiền tệ gốc (VD: 'VND' | 'USD') — không tự quy đổi tỷ giá khi chưa có nguồn */
+  currency: 'VND' | 'USD';
+  /** Đơn vị thang đo: 'unit' (1 = 1 VNĐ) hoặc 'micros' (1,000,000 = 1 đơn vị tiền tệ) */
+  scale: 'unit' | 'micros';
+  /** Chuỗi thập phân hiển thị chuẩn xác (VD: "1250000" hoặc "0.0425") */
+  formattedDecimal: string;
+}
+
+export function formatMicrosToDecimal(micros: bigint): string {
+  const isNeg = micros < 0n;
+  const abs = isNeg ? -micros : micros;
+  const whole = abs / CONTRACT_MICRO_SCALE;
+  const frac = abs % CONTRACT_MICRO_SCALE;
+  if (frac === 0n) return `${isNeg ? '-' : ''}${whole.toString(10)}`;
+  const fracStr = frac.toString(10).padStart(6, '0').replace(/0+$/, '');
+  return `${isNeg ? '-' : ''}${whole.toString(10)}.${fracStr}`;
+}
+
+export function toMonetaryAmountDto(
+  amount: bigint | null | undefined,
+  currency: 'VND' | 'USD',
+  scale: 'unit' | 'micros',
+): MonetaryAmountDto | null {
+  if (amount === null || amount === undefined) return null;
+  return {
+    rawAmountString: amount.toString(10),
+    currency,
+    scale,
+    formattedDecimal: scale === 'micros' ? formatMicrosToDecimal(amount) : amount.toString(10),
+  };
+}
+
+/**
+ * Shared BA Lead Tier Predicates (L1 / L2 / L3) — Single Source of Truth for M02 & M04
+ * - L1: Tổng Lead thu nhận (mọi Lead)
+ * - L2: Lead hợp lệ (!isSpam)
+ * - L3: Lead hiệu quả truyền về Ads / tính CPL (UC03 BR6: trừ Spam tự động auto_excluded & Spam đã xác nhận confirmed_excluded)
+ */
+export function isL2Valid(lead: { isSpam: boolean }): boolean {
+  return !lead.isSpam;
+}
+
+export function isL3Effective(lead: {
+  isSpam: boolean;
+  spamAdsExclusionStatus?: string | null;
+  tracking?: { isRepeatLead?: boolean | null } | null;
+}): boolean {
+  return (
+    !lead.isSpam &&
+    lead.spamAdsExclusionStatus !== 'auto_excluded' &&
+    lead.spamAdsExclusionStatus !== 'confirmed_excluded' &&
+    !lead.tracking?.isRepeatLead
+  );
+}
+
+export function getL2PrismaWhere() {
+  return { isSpam: false } as const;
+}
+
+export function getL3PrismaWhere() {
+  return {
+    isSpam: false,
+    spamAdsExclusionStatus: {
+      notIn: ['auto_excluded', 'confirmed_excluded'],
+    },
+    OR: [
+      { tracking: { is: null } },
+      { tracking: { isRepeatLead: false } },
+    ],
+  };
+}
+
+export * from '../01-leads';
+export * from '../02-tracking-sync';
+export * from '../03-keywords-ads';
+export * from '../04-reports';
+export * from '../05-ai-design';
+
+
+
+export * from './ui-vocabulary';
+export * from './dashboard-spec';

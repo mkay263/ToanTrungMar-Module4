@@ -2,195 +2,205 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { prisma } from '@toantrung/database';
-import {
-  ImageCropConfigSchema,
-  type AssetSlot,
-  type BrandingAssetSlotDto,
-  type CoverPosition,
-  type DashboardBannerDto,
-  type ImageCropConfig,
-  type PublicBrandingDto,
-  type UpdateBrandingMetaDto,
+import type {
+  AssetSlot,
+  CoverPosition,
+  ImageCropConfig,
+  PublicBrandingDto,
+  UpdateBrandingMetaDto,
 } from '@toantrung/contracts';
 import { APP_CONFIG } from '../config';
 import { recordAuditLog } from '../audit';
+import { bumpDomainRevisions, getOrComputeScopedCache } from '../cache/server-data-cache';
 import { validateAndSanitizeImageBuffer } from './image-validator';
 
-const DEFAULT_CROP: ImageCropConfig = {
-  zoom: 1,
-  offsetX: 0,
-  offsetY: 0,
-  frameScale: 1,
-};
+const BRANDING_SETTING_KEYS = [
+  'organizationName',
+  'workspaceName',
+  'loginHeadline',
+  'loginSubheadline',
+  'footerText',
+  'logoAltText',
+  'heroAltText',
+  'heroCoverPosition',
+  'heroCrop',
+  'bannerHeadline',
+  'bannerDescription',
+  'bannerShowButton',
+  'bannerButtonLabel',
+  'bannerButtonHref',
+  'bannerShowImage',
+  'bannerImageAlt',
+];
 
-const DEFAULT_SETTINGS: Record<string, string> = {
-  organizationName: 'Toàn Trung',
-  workspaceName: 'Toàn Trung',
-  loginHeadline: 'Đăng nhập',
-  loginSubheadline: 'Chào mừng bạn quay trở lại hệ thống nội bộ Toàn Trung',
-  footerText: '© 2026 Toàn Trung · Hệ thống quản lý nội bộ dành cho nhân sự công ty',
-  logoAltText: 'Logo Công ty Toàn Trung',
-  heroAltText: 'Không gian trưng bày giải pháp màn hình LED Toàn Trung',
-  heroCoverPosition: 'center',
-  heroCropJson: JSON.stringify(DEFAULT_CROP),
-  bannerHeadline: 'Quản lý tập trung. Phối hợp hiệu quả.',
-  bannerDescription:
-    'Kết nối xuyên suốt hoạt động Kinh doanh, Marketing, Quảng cáo và Thiết kế trên một nền tảng thống nhất theo đúng ma trận phân quyền 8 vai trò BA.',
-  bannerShowButton: 'true',
-  bannerButtonLabel: 'Khám phá 5 phân hệ',
-  bannerButtonHref: '/leads',
-  bannerShowImage: 'true',
-  bannerImageAlt: 'Phòng trưng bày giải pháp màn hình LED Toàn Trung',
-};
-
-function getBrandingDir(): string {
+function getBrandingStorageDir(): string {
   const dir = path.join(APP_CONFIG.getStorageRoot(), 'branding');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-function getAvatarDir(): string {
-  const dir = path.join(APP_CONFIG.getStorageRoot(), 'avatars');
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
+const DEFAULT_BRANDING: PublicBrandingDto = {
+  organizationName: 'Toàn Trung',
+  workspaceName: 'Không gian làm việc',
+  loginHeadline: 'Đăng nhập',
+  loginSubheadline: 'Chào mừng bạn quay trở lại hệ thống nội bộ Toàn Trung',
+  footerText: '© 2026 Toàn Trung · Hệ thống quản lý nội bộ dành cho nhân sự công ty',
+  logo: {
+    slot: 'logo',
+    url: APP_CONFIG.defaultLogoUrl,
+    isDefault: true,
+    altText: 'Logo Công ty Toàn Trung',
+    coverPosition: 'center',
+    crop: { zoom: 1, offsetX: 0, offsetY: 0, frameScale: 1 },
+    mimeType: 'image/png',
+    fileSizeBytes: null,
+    width: 280,
+    height: 80,
+    updatedAt: null,
+    updatedByName: null,
+    recommendedSpec: 'Kích thước khuyến nghị: 280x80px (PNG trong suốt, tối đa 2MB)',
+  },
+  loginHero: {
+    slot: 'login_hero',
+    url: APP_CONFIG.defaultHeroUrl,
+    isDefault: true,
+    altText: 'Không gian trưng bày giải pháp màn hình LED Toàn Trung',
+    coverPosition: 'center',
+    crop: { zoom: 1, offsetX: 0, offsetY: 0, frameScale: 1 },
+    mimeType: 'image/webp',
+    fileSizeBytes: null,
+    width: 1920,
+    height: 1080,
+    updatedAt: null,
+    updatedByName: null,
+    recommendedSpec: 'Kích thước khuyến nghị: 1920x1080px (JPG/WebP chất lượng cao, tối đa 5MB)',
+  },
+  dashboardBanner: {
+    headline: 'Toàn Trung LED Portal',
+    description: 'Nền tảng quản lý quan hệ khách hàng và điều hành chiến dịch màn hình LED Toàn Trung',
+    showButton: false,
+    buttonLabel: 'Xem chi tiết',
+    buttonHref: '/dashboard',
+    showImage: true,
+    imageUrl: null,
+    imageAlt: 'Banner Dashboard',
+    isDefaultImage: true,
+    updatedAt: null,
+    updatedByName: null,
+  },
+};
 
-function parseCropConfig(rawJson: string | null | undefined): ImageCropConfig {
-  if (!rawJson) return { ...DEFAULT_CROP };
-  try {
-    const parsed = ImageCropConfigSchema.safeParse(JSON.parse(rawJson));
-    if (parsed.success) return parsed.data;
-  } catch {
-    // Fallback
-  }
-  return { ...DEFAULT_CROP };
-}
-
-export async function getPublicBrandingConfig(): Promise<PublicBrandingDto> {
-  const rows = await prisma.systemSetting.findMany();
-  const map: Record<string, string> = { ...DEFAULT_SETTINGS };
-  let bannerMetaUpdatedAt: string | null = null;
-  for (const r of rows) {
-    map[r.key] = r.value;
-    if (r.key.startsWith('banner') && r.updatedAt) {
-      const iso = r.updatedAt.toISOString();
-      if (!bannerMetaUpdatedAt || iso > bannerMetaUpdatedAt) {
-        bannerMetaUpdatedAt = iso;
+export async function getPublicBrandingConfig(bypassCache = false): Promise<PublicBrandingDto> {
+  const cached = await getOrComputeScopedCache<PublicBrandingDto>({
+    key: 'public-branding',
+    domains: ['branding'],
+    ttlMs: 300_000,
+    bypassCache,
+    compute: async () => {
+      // Fetch ONLY branding setting keys in parallel with active assets (avoids scanning multi-MB JSON blobs)
+      const [settingsRows, activeAssets] = await Promise.all([
+        prisma.systemSetting.findMany({
+          where: { key: { in: BRANDING_SETTING_KEYS } },
+        }),
+        prisma.brandingAsset.findMany({
+          where: { isActive: true },
+          include: { uploadedBy: true },
+        }),
+      ]);
+      const settings: Record<string, string> = {};
+      for (const s of settingsRows) {
+        settings[s.key] = s.value;
       }
+
+  const branding: PublicBrandingDto = JSON.parse(JSON.stringify(DEFAULT_BRANDING));
+
+  if (settings.organizationName) branding.organizationName = settings.organizationName;
+  if (settings.workspaceName) branding.workspaceName = settings.workspaceName;
+  if (settings.loginHeadline) branding.loginHeadline = settings.loginHeadline;
+  if (settings.loginSubheadline) branding.loginSubheadline = settings.loginSubheadline;
+  if (settings.footerText) branding.footerText = settings.footerText;
+
+  if (settings.logoAltText) branding.logo.altText = settings.logoAltText;
+  if (settings.heroAltText) branding.loginHero.altText = settings.heroAltText;
+  if (settings.heroCoverPosition) branding.loginHero.coverPosition = settings.heroCoverPosition as CoverPosition;
+  if (settings.heroCrop) {
+    try {
+      branding.loginHero.crop = JSON.parse(settings.heroCrop);
+    } catch {
+      // ignore
     }
   }
 
-  const activeAssets = await prisma.brandingAsset.findMany({
-    where: { isActive: true },
-    orderBy: { createdAt: 'desc' },
-    include: {
-      uploadedBy: {
-        select: { fullName: true },
-      },
+  if (settings.bannerHeadline) branding.dashboardBanner.headline = settings.bannerHeadline;
+  if (settings.bannerDescription) branding.dashboardBanner.description = settings.bannerDescription;
+  if (settings.bannerShowButton !== undefined) branding.dashboardBanner.showButton = settings.bannerShowButton === 'true';
+  if (settings.bannerButtonLabel) branding.dashboardBanner.buttonLabel = settings.bannerButtonLabel;
+  if (settings.bannerButtonHref) branding.dashboardBanner.buttonHref = settings.bannerButtonHref;
+  if (settings.bannerShowImage !== undefined) branding.dashboardBanner.showImage = settings.bannerShowImage === 'true';
+  if (settings.bannerImageAlt) branding.dashboardBanner.imageAlt = settings.bannerImageAlt;
+
+  for (const asset of activeAssets) {
+    const assetUrl = `/api/v1/settings/branding/asset/${encodeURIComponent(asset.objectKey)}`;
+    if (asset.slot === 'logo') {
+      branding.logo.url = assetUrl;
+      branding.logo.isDefault = false;
+      branding.logo.altText = asset.altText || branding.logo.altText;
+      branding.logo.coverPosition = (asset.coverPosition as CoverPosition) || 'center';
+      if (asset.cropJson) {
+        try {
+          branding.logo.crop = JSON.parse(asset.cropJson);
+        } catch {}
+      }
+      branding.logo.mimeType = asset.mimeType;
+      branding.logo.fileSizeBytes = asset.fileSizeBytes;
+      branding.logo.width = asset.width;
+      branding.logo.height = asset.height;
+      branding.logo.updatedAt = asset.createdAt.toISOString();
+      branding.logo.updatedByName = asset.uploadedBy?.fullName || null;
+    } else if (asset.slot === 'login_hero') {
+      branding.loginHero.url = assetUrl;
+      branding.loginHero.isDefault = false;
+      branding.loginHero.altText = asset.altText || branding.loginHero.altText;
+      branding.loginHero.coverPosition = (asset.coverPosition as CoverPosition) || 'center';
+      if (asset.cropJson) {
+        try {
+          branding.loginHero.crop = JSON.parse(asset.cropJson);
+        } catch {}
+      }
+      branding.loginHero.mimeType = asset.mimeType;
+      branding.loginHero.fileSizeBytes = asset.fileSizeBytes;
+      branding.loginHero.width = asset.width;
+      branding.loginHero.height = asset.height;
+      branding.loginHero.updatedAt = asset.createdAt.toISOString();
+      branding.loginHero.updatedByName = asset.uploadedBy?.fullName || null;
+    } else if (asset.slot === 'dashboard_banner') {
+      branding.dashboardBanner.imageUrl = assetUrl;
+      branding.dashboardBanner.isDefaultImage = false;
+      branding.dashboardBanner.imageAlt = asset.altText || branding.dashboardBanner.imageAlt;
+      branding.dashboardBanner.updatedAt = asset.createdAt.toISOString();
+      branding.dashboardBanner.updatedByName = asset.uploadedBy?.fullName || null;
+    }
+  }
+
+      return branding;
     },
   });
+  return cached.data;
+}
 
-  const activeLogo = activeAssets.find((a) => a.slot === 'logo');
-  const activeHero = activeAssets.find((a) => a.slot === 'login_hero');
-  const activeBanner = activeAssets.find((a) => a.slot === 'dashboard_banner');
+const ALLOWED_COVER_POSITIONS = new Set(['center', 'top', 'bottom', 'left', 'right']);
 
-  const heroCrop = parseCropConfig(activeHero?.cropJson || map.heroCropJson);
-
-  const logoDto: BrandingAssetSlotDto = activeLogo
-    ? {
-        slot: 'logo',
-        url: `/api/v1/settings/branding/asset/${encodeURIComponent(activeLogo.objectKey)}`,
-        isDefault: false,
-        altText: activeLogo.altText || map.logoAltText,
-        coverPosition: 'center',
-        crop: { ...DEFAULT_CROP },
-        mimeType: activeLogo.mimeType,
-        fileSizeBytes: activeLogo.fileSizeBytes,
-        width: activeLogo.width,
-        height: activeLogo.height,
-        updatedAt: activeLogo.createdAt.toISOString(),
-        updatedByName: activeLogo.uploadedBy.fullName,
-        recommendedSpec: 'PNG/WebP nền trong suốt · Tỷ lệ ~3.5:1 (khuyến nghị 420×120px, tối đa 2 MB)',
-      }
-    : {
-        slot: 'logo',
-        url: APP_CONFIG.defaultLogoUrl,
-        isDefault: true,
-        altText: map.logoAltText,
-        coverPosition: 'center',
-        crop: { ...DEFAULT_CROP },
-        mimeType: 'image/png',
-        fileSizeBytes: null,
-        width: null,
-        height: null,
-        updatedAt: null,
-        updatedByName: null,
-        recommendedSpec: 'PNG/WebP nền trong suốt · Tỷ lệ ~3.5:1 (khuyến nghị 420×120px, tối đa 2 MB)',
-      };
-
-  const heroDto: BrandingAssetSlotDto = activeHero
-    ? {
-        slot: 'login_hero',
-        url: `/api/v1/settings/branding/asset/${encodeURIComponent(activeHero.objectKey)}`,
-        isDefault: false,
-        altText: activeHero.altText || map.heroAltText,
-        coverPosition: (activeHero.coverPosition || map.heroCoverPosition || 'center') as CoverPosition,
-        crop: heroCrop,
-        mimeType: activeHero.mimeType,
-        fileSizeBytes: activeHero.fileSizeBytes,
-        width: activeHero.width,
-        height: activeHero.height,
-        updatedAt: activeHero.createdAt.toISOString(),
-        updatedByName: activeHero.uploadedBy.fullName,
-        recommendedSpec: 'WebP/JPG/PNG thực tế công ty · Tỷ lệ 16:9 hoặc 16:10 (khuyến nghị 1200×750px, tối đa 5 MB)',
-      }
-    : {
-        slot: 'login_hero',
-        url: APP_CONFIG.defaultHeroUrl,
-        isDefault: true,
-        altText: map.heroAltText,
-        coverPosition: (map.heroCoverPosition || 'center') as CoverPosition,
-        crop: heroCrop,
-        mimeType: 'image/webp',
-        fileSizeBytes: null,
-        width: null,
-        height: null,
-        updatedAt: null,
-        updatedByName: null,
-        recommendedSpec: 'WebP/JPG/PNG thực tế công ty · Tỷ lệ 16:9 hoặc 16:10 (khuyến nghị 1200×750px, tối đa 5 MB)',
-      };
-
-  const showBannerImage = map.bannerShowImage !== 'false';
-  const bannerImageUrl = !showBannerImage
-    ? null
-    : activeBanner
-      ? `/api/v1/settings/branding/asset/${encodeURIComponent(activeBanner.objectKey)}`
-      : APP_CONFIG.defaultHeroUrl;
-
-  const dashboardBanner: DashboardBannerDto = {
-    headline: map.bannerHeadline ?? '',
-    description: map.bannerDescription ?? '',
-    showButton: map.bannerShowButton !== 'false',
-    buttonLabel: map.bannerButtonLabel || 'Khám phá 5 phân hệ',
-    buttonHref: map.bannerButtonHref || '/leads',
-    showImage: showBannerImage,
-    imageUrl: bannerImageUrl,
-    imageAlt: activeBanner?.altText || map.bannerImageAlt || DEFAULT_SETTINGS.bannerImageAlt,
-    isDefaultImage: !activeBanner,
-    updatedAt: activeBanner ? activeBanner.createdAt.toISOString() : bannerMetaUpdatedAt,
-    updatedByName: activeBanner ? activeBanner.uploadedBy.fullName : null,
-  };
-
-  return {
-    organizationName: map.organizationName,
-    workspaceName: map.workspaceName,
-    loginHeadline: map.loginHeadline,
-    loginSubheadline: map.loginSubheadline,
-    footerText: map.footerText,
-    logo: logoDto,
-    loginHero: heroDto,
-    dashboardBanner,
-  };
+function sanitizeBannerButtonHref(rawHref: string): string {
+  const trimmed = rawHref.trim();
+  if (!trimmed) return '/leads';
+  if (
+    (trimmed.startsWith('/') && !trimmed.startsWith('//')) ||
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('http://')
+  ) {
+    return trimmed;
+  }
+  return '/leads';
 }
 
 export async function updateBrandingMetadata(
@@ -198,92 +208,58 @@ export async function updateBrandingMetadata(
   input: UpdateBrandingMetaDto,
   ipAddress?: string,
 ): Promise<PublicBrandingDto> {
-  const kvPairs: Array<[string, string]> = [];
+  const updates: Array<{ key: string; value: string }> = [];
 
-  const stringFields: Array<keyof UpdateBrandingMetaDto> = [
-    'organizationName',
-    'workspaceName',
-    'loginHeadline',
-    'loginSubheadline',
-    'footerText',
-    'logoAltText',
-    'heroAltText',
-    'heroCoverPosition',
-    'bannerHeadline',
-    'bannerDescription',
-    'bannerButtonLabel',
-    'bannerButtonHref',
-    'bannerImageAlt',
-  ];
-
-  for (const field of stringFields) {
-    const val = input[field];
-    if (typeof val === 'string') {
-      kvPairs.push([field, val]);
-    }
+  if (input.organizationName !== undefined) updates.push({ key: 'organizationName', value: input.organizationName });
+  if (input.workspaceName !== undefined) updates.push({ key: 'workspaceName', value: input.workspaceName });
+  if (input.loginHeadline !== undefined) updates.push({ key: 'loginHeadline', value: input.loginHeadline });
+  if (input.loginSubheadline !== undefined) updates.push({ key: 'loginSubheadline', value: input.loginSubheadline });
+  if (input.footerText !== undefined) updates.push({ key: 'footerText', value: input.footerText });
+  if (input.logoAltText !== undefined) updates.push({ key: 'logoAltText', value: input.logoAltText });
+  if (input.heroAltText !== undefined) updates.push({ key: 'heroAltText', value: input.heroAltText });
+  if (input.heroCoverPosition !== undefined && ALLOWED_COVER_POSITIONS.has(input.heroCoverPosition)) {
+    updates.push({ key: 'heroCoverPosition', value: input.heroCoverPosition });
   }
-
-  if (typeof input.bannerShowButton === 'boolean') {
-    kvPairs.push(['bannerShowButton', String(input.bannerShowButton)]);
+  if (input.heroCrop !== undefined) {
+    const safeCrop = {
+      zoom: Math.max(1, Math.min(3, Number(input.heroCrop.zoom) || 1)),
+      offsetX: Math.max(-50, Math.min(50, Number(input.heroCrop.offsetX) || 0)),
+      offsetY: Math.max(-50, Math.min(50, Number(input.heroCrop.offsetY) || 0)),
+      frameScale: Math.max(0.6, Math.min(1.2, Number(input.heroCrop.frameScale) || 1)),
+    };
+    updates.push({ key: 'heroCrop', value: JSON.stringify(safeCrop) });
   }
-
-  if (typeof input.bannerShowImage === 'boolean') {
-    kvPairs.push(['bannerShowImage', String(input.bannerShowImage)]);
+  if (input.bannerHeadline !== undefined) updates.push({ key: 'bannerHeadline', value: input.bannerHeadline });
+  if (input.bannerDescription !== undefined) updates.push({ key: 'bannerDescription', value: input.bannerDescription });
+  if (input.bannerShowButton !== undefined) updates.push({ key: 'bannerShowButton', value: String(input.bannerShowButton) });
+  if (input.bannerButtonLabel !== undefined) updates.push({ key: 'bannerButtonLabel', value: input.bannerButtonLabel });
+  if (input.bannerButtonHref !== undefined) {
+    updates.push({ key: 'bannerButtonHref', value: sanitizeBannerButtonHref(input.bannerButtonHref) });
   }
+  if (input.bannerShowImage !== undefined) updates.push({ key: 'bannerShowImage', value: String(input.bannerShowImage) });
+  if (input.bannerImageAlt !== undefined) updates.push({ key: 'bannerImageAlt', value: input.bannerImageAlt });
 
-  const serializedCrop = input.heroCrop ? JSON.stringify(input.heroCrop) : undefined;
-  if (serializedCrop) {
-    kvPairs.push(['heroCropJson', serializedCrop]);
+  for (const item of updates) {
+    await prisma.systemSetting.upsert({
+      where: { key: item.key },
+      update: { value: item.value, updatedById: actorUserId },
+      create: { key: item.key, value: item.value, updatedById: actorUserId },
+    });
   }
-
-  await prisma.$transaction(async (tx) => {
-    for (const [key, value] of kvPairs) {
-      await tx.systemSetting.upsert({
-        where: { key },
-        update: { value, updatedById: actorUserId },
-        create: { key, value, updatedById: actorUserId },
-      });
-    }
-
-    if (input.logoAltText) {
-      await tx.brandingAsset.updateMany({
-        where: { slot: 'logo', isActive: true },
-        data: { altText: input.logoAltText },
-      });
-    }
-
-    if (input.heroAltText || input.heroCoverPosition || serializedCrop) {
-      await tx.brandingAsset.updateMany({
-        where: { slot: 'login_hero', isActive: true },
-        data: {
-          ...(input.heroAltText ? { altText: input.heroAltText } : {}),
-          ...(input.heroCoverPosition ? { coverPosition: input.heroCoverPosition } : {}),
-          ...(serializedCrop ? { cropJson: serializedCrop } : {}),
-        },
-      });
-    }
-
-    if (input.bannerImageAlt) {
-      await tx.brandingAsset.updateMany({
-        where: { slot: 'dashboard_banner', isActive: true },
-        data: { altText: input.bannerImageAlt },
-      });
-    }
-  });
 
   await recordAuditLog({
     actorUserId,
     action: 'BRANDING_METADATA_UPDATED',
-    targetType: 'system_settings',
-    targetId: 'branding',
-    details: input as Record<string, unknown>,
+    targetType: 'branding',
+    details: input,
     ipAddress,
   });
 
-  return getPublicBrandingConfig();
+  bumpDomainRevisions(['branding'], 'branding_meta_updated');
+  return getPublicBrandingConfig(true);
 }
 
-export async function uploadBrandingAsset(input: {
+export async function uploadBrandingAsset(params: {
   actorUserId: number;
   slot: AssetSlot;
   fileBuffer: Buffer;
@@ -294,86 +270,60 @@ export async function uploadBrandingAsset(input: {
   ipAddress?: string;
 }): Promise<PublicBrandingDto> {
   const maxBytes =
-    input.slot === 'logo' ? APP_CONFIG.maxLogoSizeBytes : APP_CONFIG.maxHeroSizeBytes;
+    params.slot === 'logo'
+      ? APP_CONFIG.maxLogoSizeBytes
+      : APP_CONFIG.maxHeroSizeBytes;
 
   const validated = validateAndSanitizeImageBuffer(
-    input.fileBuffer,
-    input.declaredMimeType,
+    params.fileBuffer,
+    params.declaredMimeType,
     maxBytes,
   );
 
-  const randomId = crypto.randomUUID();
-  const objectKey = `${input.slot}-${randomId}-${validated.sha256.slice(0, 12)}.${validated.extension}`;
-  const fullPath = path.join(getBrandingDir(), objectKey);
+  const randomId = crypto.randomUUID().slice(0, 8);
+  const objectKey = `brand-${params.slot}-${randomId}-${validated.sha256.slice(0, 10)}.${validated.extension}`;
+  const fullPath = path.join(getBrandingStorageDir(), objectKey);
 
-  fs.writeFileSync(fullPath, validated.sanitizedBuffer, { flag: 'wx' });
+  fs.writeFileSync(fullPath, validated.sanitizedBuffer);
 
-  const defaultAlt =
-    input.slot === 'logo'
-      ? DEFAULT_SETTINGS.logoAltText
-      : input.slot === 'dashboard_banner'
-        ? DEFAULT_SETTINGS.bannerImageAlt
-        : DEFAULT_SETTINGS.heroAltText;
+  // Deactivate existing active assets in this slot
+  await prisma.brandingAsset.updateMany({
+    where: { slot: params.slot, isActive: true },
+    data: { isActive: false },
+  });
 
-  const cropJson = input.crop ? JSON.stringify(input.crop) : null;
-
-  await prisma.$transaction(async (tx) => {
-    await tx.brandingAsset.updateMany({
-      where: { slot: input.slot, isActive: true },
-      data: { isActive: false },
-    });
-
-    await tx.brandingAsset.create({
-      data: {
-        slot: input.slot,
-        objectKey,
-        mimeType: validated.mimeType,
-        fileSizeBytes: validated.sanitizedBuffer.length,
-        width: validated.width,
-        height: validated.height,
-        sha256: validated.sha256,
-        altText: input.altText?.trim() || defaultAlt,
-        coverPosition: input.coverPosition || 'center',
-        cropJson,
-        isActive: true,
-        uploadedById: input.actorUserId,
-      },
-    });
-
-    if (input.slot === 'login_hero' && cropJson) {
-      await tx.systemSetting.upsert({
-        where: { key: 'heroCropJson' },
-        update: { value: cropJson, updatedById: input.actorUserId },
-        create: { key: 'heroCropJson', value: cropJson, updatedById: input.actorUserId },
-      });
-    }
-
-    if (input.slot === 'dashboard_banner') {
-      await tx.systemSetting.upsert({
-        where: { key: 'bannerShowImage' },
-        update: { value: 'true', updatedById: input.actorUserId },
-        create: { key: 'bannerShowImage', value: 'true', updatedById: input.actorUserId },
-      });
-    }
+  await prisma.brandingAsset.create({
+    data: {
+      slot: params.slot,
+      objectKey,
+      mimeType: validated.mimeType,
+      fileSizeBytes: validated.fileSize,
+      width: validated.width,
+      height: validated.height,
+      sha256: validated.sha256,
+      altText: params.altText || (params.slot === 'logo' ? 'Logo' : 'Ảnh nền'),
+      coverPosition: params.coverPosition || 'center',
+      cropJson: params.crop ? JSON.stringify(params.crop) : null,
+      isActive: true,
+      uploadedById: params.actorUserId,
+    },
   });
 
   await recordAuditLog({
-    actorUserId: input.actorUserId,
+    actorUserId: params.actorUserId,
     action: 'BRANDING_ASSET_UPLOADED',
     targetType: 'branding_asset',
     targetId: objectKey,
     details: {
-      slot: input.slot,
+      slot: params.slot,
+      fileSizeBytes: validated.fileSize,
       mimeType: validated.mimeType,
-      bytes: validated.sanitizedBuffer.length,
-      width: validated.width,
-      height: validated.height,
-      crop: input.crop,
     },
-    ipAddress: input.ipAddress,
+    ipAddress: params.ipAddress,
   });
 
-  return getPublicBrandingConfig();
+  bumpDomainRevisions(['branding'], 'branding_asset_uploaded');
+  return getPublicBrandingConfig(true);
 }
 
 export async function resetBrandingAssetToDefault(
@@ -381,66 +331,48 @@ export async function resetBrandingAssetToDefault(
   slot: AssetSlot,
   ipAddress?: string,
 ): Promise<PublicBrandingDto> {
-  await prisma.$transaction(async (tx) => {
-    await tx.brandingAsset.updateMany({
-      where: { slot, isActive: true },
-      data: { isActive: false },
-    });
-
-    if (slot === 'login_hero') {
-      await tx.systemSetting.upsert({
-        where: { key: 'heroCropJson' },
-        update: { value: JSON.stringify(DEFAULT_CROP), updatedById: actorUserId },
-        create: { key: 'heroCropJson', value: JSON.stringify(DEFAULT_CROP), updatedById: actorUserId },
-      });
-    }
+  await prisma.brandingAsset.updateMany({
+    where: { slot, isActive: true },
+    data: { isActive: false },
   });
 
   await recordAuditLog({
     actorUserId,
-    action: 'BRANDING_ASSET_RESET_DEFAULT',
+    action: 'BRANDING_ASSET_RESET',
     targetType: 'branding_asset',
     targetId: slot,
+    details: { slot },
     ipAddress,
   });
 
-  return getPublicBrandingConfig();
+  bumpDomainRevisions(['branding'], 'branding_asset_reset');
+  return getPublicBrandingConfig(true);
 }
 
-export async function readBrandingAssetBinary(objectKey: string): Promise<{
-  buffer: Buffer;
-  mimeType: string;
-} | null> {
-  if (/^avatar-\d+-[a-f0-9-]+-[a-f0-9]{12}\.(png|jpg|webp)$/.test(objectKey)) {
-    const fullPath = path.join(getAvatarDir(), objectKey);
-    if (!fs.existsSync(fullPath)) return null;
-    const ext = path.extname(objectKey).toLowerCase();
-    const mimeType =
-      ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-    return {
-      buffer: fs.readFileSync(fullPath),
-      mimeType,
-    };
+export async function readBrandingAssetBinary(
+  objectKey: string,
+): Promise<{ buffer: Buffer; mimeType: string } | null> {
+  const sanitized = path.basename(objectKey);
+
+  // Check branding directory
+  const brandingPath = path.join(APP_CONFIG.getStorageRoot(), 'branding', sanitized);
+  if (fs.existsSync(brandingPath)) {
+    const buffer = fs.readFileSync(brandingPath);
+    const asset = await prisma.brandingAsset.findFirst({
+      where: { objectKey: sanitized },
+    });
+    const mimeType = asset?.mimeType || (sanitized.endsWith('.png') ? 'image/png' : 'image/jpeg');
+    return { buffer, mimeType };
   }
 
-  if (
-    !/^(logo|login_hero|dashboard_banner)-[a-f0-9-]+-[a-f0-9]{12}\.(png|jpg|webp)$/.test(
-      objectKey,
-    )
-  ) {
-    return null;
+  // Check avatars directory
+  const avatarPath = path.join(APP_CONFIG.getStorageRoot(), 'avatars', sanitized);
+  if (fs.existsSync(avatarPath)) {
+    const buffer = fs.readFileSync(avatarPath);
+    const mimeType = sanitized.endsWith('.png') ? 'image/png' : sanitized.endsWith('.webp') ? 'image/webp' : 'image/jpeg';
+    return { buffer, mimeType };
   }
 
-  const record = await prisma.brandingAsset.findUnique({
-    where: { objectKey },
-  });
-  if (!record) return null;
-
-  const fullPath = path.join(getBrandingDir(), objectKey);
-  if (!fs.existsSync(fullPath)) return null;
-
-  return {
-    buffer: fs.readFileSync(fullPath),
-    mimeType: record.mimeType,
-  };
+  return null;
 }
+
