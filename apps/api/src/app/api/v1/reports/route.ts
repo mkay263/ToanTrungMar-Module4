@@ -1,4 +1,4 @@
-import { jsonError, jsonSuccess } from '../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../core/http';
 import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   createDispatchNotification,
@@ -21,6 +21,7 @@ export async function GET(request: Request) {
         preset: url.searchParams.get('preset'),
         from: url.searchParams.get('from') || url.searchParams.get('fromDate'),
         to: url.searchParams.get('to') || url.searchParams.get('toDate'),
+        granularity: url.searchParams.get('granularity'),
         page: Number(url.searchParams.get('page') || url.searchParams.get('pendingPage') || 1),
         pageSize: Number(url.searchParams.get('pageSize') || 20),
         detailPage: Number(url.searchParams.get('detailPage') || 1),
@@ -63,6 +64,8 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const auth = await requirePermissionSession(request, 'DASHBOARD_VIEW');
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(request, 'reports_post', auth.user.id, 30, 60_000);
+  if (limited) return limited;
 
   try {
     const raw = (await request.json()) as Record<string, unknown>;

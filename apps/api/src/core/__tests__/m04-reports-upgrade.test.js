@@ -77,6 +77,12 @@ const { prisma } = require('@toantrung/database');
 const { getM04ResultsReportSpec } = require('../../modules/04-reports/m04-spec.service.ts');
 const { generateScopedReportExportBuffer } = require('../../modules/04-reports/service.ts');
 const { generateScopedReportDocxBuffer } = require('../../modules/04-reports/docx-builder.ts');
+const {
+  previewReportExcelImport,
+  commitReportExcelImport,
+  listReportExcelImportBatches,
+  deleteReportExcelImportBatch,
+} = require('../../modules/04-reports/excel-import.service.ts');
 
 test.after(async () => {
   await prisma.$disconnect();
@@ -194,4 +200,170 @@ test('M04 XLSX & DOCX exports include clean Vietnamese headers and scoped tables
   assert.ok(docXml.includes('Đã báo giá'));
   assert.equal(docXml.includes('Ghi chú định nghĩa BA'), false);
   assert.equal(docXml.includes('Lead hiệu quả (L3)'), false);
+});
+
+test('M04 Period Breakdown reconciles 100% across day, week, month, and year granularities', async () => {
+  const adminUser = {
+    id: 1,
+    email: 'admin@toantrung.vn',
+    fullName: 'Quản trị viên',
+    roleCode: 'ADMIN',
+    roleName: 'Quản trị viên',
+  };
+
+  for (const granularity of ['day', 'week', 'month', 'year']) {
+    const m04 = await getM04ResultsReportSpec(adminUser, {
+      websiteId: 'all',
+      preset: 'CUSTOM',
+      from: '2026-10-01',
+      to: '2026-11-26',
+      granularity,
+      bypassCache: true,
+    });
+    assert.ok(m04.periodBreakdown, `periodBreakdown missing for ${granularity}`);
+    assert.equal(m04.periodBreakdown.granularity, granularity);
+    assert.ok(m04.periodBreakdown.buckets.length >= 1);
+
+    const sumRec = m04.periodBreakdown.buckets.reduce((s, b) => s + b.receivedLeadCount, 0);
+    const sumVal = m04.periodBreakdown.buckets.reduce((s, b) => s + b.validLeadCount, 0);
+    const sumWon = m04.periodBreakdown.buckets.reduce((s, b) => s + b.wonLeadCount, 0);
+    assert.equal(sumRec, m04.metrics.receivedLeadCount, `received mismatch on ${granularity}`);
+    assert.equal(sumVal, m04.metrics.validLeadCount, `valid mismatch on ${granularity}`);
+    assert.equal(sumWon, m04.metrics.wonLeadCount, `won mismatch on ${granularity}`);
+  }
+});
+
+test('M04 Catalog exposes all 25 active Toan Trung products + separate CHUA_GAN_MA audit row', async () => {
+  const adminUser = {
+    id: 1,
+    email: 'admin@toantrung.vn',
+    fullName: 'Quản trị viên',
+    roleCode: 'ADMIN',
+    roleName: 'Quản trị viên',
+  };
+  const m04 = await getM04ResultsReportSpec(adminUser, {
+    websiteId: 'all',
+    preset: 'CUSTOM',
+    from: '2026-01-01',
+    to: '2026-11-26',
+    granularity: 'month',
+    bypassCache: true,
+  });
+
+  const { prisma } = require('@toantrung/database');
+  const activeDbProducts = await prisma.product.count({ where: { isActive: true } });
+  const catalog = m04.tables.byProductCatalog || [];
+  const classifiedOnly = catalog.filter((r) => !r.isUnclassifiedProduct);
+  assert.ok(activeDbProducts >= 25, 'DB must have at least the 25 canonical products');
+  assert.equal(classifiedOnly.length, activeDbProducts, 'Must include all active catalog products from DB');
+  const codes = new Set(classifiedOnly.map((r) => r.productCode));
+  assert.ok(codes.has('LED_INDOOR'));
+  assert.ok(codes.has('LED_OUTDOOR'));
+  assert.ok(codes.has('BOARD_MARATHON'));
+  assert.ok(codes.has('BOARD_PRODUCTIVITY'));
+  assert.ok(codes.has('OTHER_REPAIR'));
+
+  const summaries = m04.tables.productCategorySummaries || [];
+  const ledGroup = summaries.find((s) => s.categoryGroup === 'led_screen');
+  const boardGroup = summaries.find((s) => s.categoryGroup === 'electronic_board');
+  const otherGroup = summaries.find((s) => s.categoryGroup === 'other');
+  assert.ok((ledGroup?.catalogProductCount || 0) >= 8);
+  assert.ok((boardGroup?.catalogProductCount || 0) >= 12);
+  assert.ok((otherGroup?.catalogProductCount || 0) >= 5);
+  assert.equal(
+    (ledGroup?.catalogProductCount || 0) +
+      (boardGroup?.catalogProductCount || 0) +
+      (otherGroup?.catalogProductCount || 0),
+    activeDbProducts,
+  );
+
+  const unclassRow = catalog.find((r) => r.isUnclassifiedProduct);
+  if (m04.metrics.unclassifiedProductLeadCount > 0) {
+    assert.ok(unclassRow, 'CHUA_GAN_MA row required when unclassified leads exist');
+    assert.equal(unclassRow.productCode, 'CHUA_GAN_MA');
+    assert.equal(unclassRow.leadCount, m04.metrics.unclassifiedProductLeadCount);
+  }
+});
+
+test('M04 Export 7 sheets + Template XLSX + Round-trip Excel/CSV Import with Q08 strip & cleanup', async () => {
+  const adminUser = {
+    id: 1,
+    email: 'admin@toantrung.vn',
+    fullName: 'Quản trị viên',
+    roleCode: 'ADMIN',
+    roleName: 'Quản trị viên',
+  };
+
+  // 1. Upgraded 7-sheet report export
+  const fullExp = await generateScopedReportExportBuffer(
+    adminUser,
+    { websiteId: 'all', preset: '30d', granularity: 'week' },
+    'xlsx',
+  );
+  const fullEntries = readZipTextEntries(fullExp.buffer);
+  const wbXml = fullEntries.get('xl/workbook.xml') || '';
+  assert.ok(wbXml.includes('ChuoiThoiGian'), 'Missing ChuoiThoiGian sheet');
+  assert.ok(wbXml.includes('NhuCauSanPham'), 'Missing NhuCauSanPham sheet');
+  assert.ok(wbXml.includes('MauImportDoiSoat'), 'Missing MauImportDoiSoat sheet');
+
+  // 2. Template export -> round-trip XLSX preview
+  const tplExp = await generateScopedReportExportBuffer(
+    adminUser,
+    { websiteId: 'all', preset: '30d', granularity: 'month' },
+    'xlsx',
+    { mode: 'template', granularity: 'month' },
+  );
+  const xlsxPreview = await previewReportExcelImport(adminUser, {
+    buffer: tplExp.buffer,
+    fileName: tplExp.fileName,
+    granularity: 'month',
+    websiteId: 'all',
+    preset: '30D',
+  });
+  const { prisma } = require('@toantrung/database');
+  const activeDbProducts = await prisma.product.count({ where: { isActive: true } });
+  assert.equal(xlsxPreview.summary.errorRows, 0, 'Exported template must re-import with 0 errors');
+  assert.equal(xlsxPreview.summary.totalRows, activeDbProducts, 'Template should contain all active catalog rows');
+
+  // 3. CSV import with Q08 revenue column + invalid product code + commit & delete cleanup
+  const csvSample = [
+    'ma_san_pham,ky_bao_cao,tong_lead,lead_hop_le,da_bao_gia,chot_thanh_cong,Doanh thu (VND),ghi_chu',
+    'LED_INDOOR,2026-11,5,5,2,1,250000000,Kiem thu hop le',
+    'BOARD_MARATHON,2026-11,2,2,1,0,0,Hop le',
+    'MA_KHONG_TON_TAI,2026-11,3,3,0,0,0,Se bi bao loi',
+  ].join('\n');
+  const csvPreview = await previewReportExcelImport(adminUser, {
+    buffer: Buffer.from(csvSample, 'utf8'),
+    fileName: 'kiem_thu_import_m04.csv',
+    granularity: 'month',
+    websiteId: 'all',
+    preset: '30D',
+  });
+  assert.equal(csvPreview.summary.totalRows, 3);
+  assert.equal(csvPreview.summary.errorRows, 1);
+  assert.ok(
+    csvPreview.warnings.some((w) => w.includes('Q08')),
+    'Must warn and strip prohibited Q08 revenue column',
+  );
+
+  const saved = await commitReportExcelImport(adminUser, {
+    buffer: Buffer.from(csvSample, 'utf8'),
+    fileName: 'kiem_thu_import_m04.csv',
+    granularity: 'month',
+    websiteId: 'all',
+    preset: '30D',
+  });
+  assert.equal(saved.rows.length, 2, 'Commit must store only valid/warning rows and exclude error rows');
+  const listed = await listReportExcelImportBatches(adminUser);
+  assert.ok(listed.some((b) => b.id === saved.id));
+
+  const delRes = await deleteReportExcelImportBatch(adminUser, saved.id);
+  assert.equal(delRes.deleted, true);
+  // Clean up test audit logs created by the round-trip test
+  await prisma.auditLog.deleteMany({
+    where: {
+      targetType: 'ReportExcelImport',
+      targetId: saved.id,
+    },
+  });
 });

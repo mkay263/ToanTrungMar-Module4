@@ -269,7 +269,7 @@ export function AdsExcelTableSection({
     const sortList = (list: TableDisplayRow[]): TableDisplayRow[] => {
       if (!sortCol) return list;
       const factor = sortDir === 'ascending' ? 1 : -1;
-      return [...list].sort((a, b) => {
+      return list.toSorted((a, b) => {
         if (sortCol === 'campaignName') {
           return factor * textCollator.compare(a.campaign.campaignName, b.campaign.campaignName);
         }

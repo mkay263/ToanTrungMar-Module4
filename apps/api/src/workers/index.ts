@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { prisma } from '@toantrung/database';
 import { AiDesignProviderFactory } from '../modules/05-ai-design/providers';
+import { APP_CONFIG, getConfiguredWebhookSecret } from '../core/config';
 import { logServerEvent, summarizeError } from '../core/logging/logger';
 import { upsertActionableNotification } from '../core/notifications/service';
 import { bumpDomainRevisions, getVietnamDateKey } from '../core/cache/server-data-cache';
@@ -51,7 +52,7 @@ export async function runScheduledD3SyncJob(slot: 'FULL_0200' | 'LIGHT_1100' | '
 export async function runHourlyGclidRetryJob() {
   const res = await retryUnresolvedGclids();
   if (res.resolved > 0) {
-    bumpDomainRevisions(['leads', 'tracking', 'reports'], 'gclid_retry_resolved');
+    bumpDomainRevisions(['leads', 'tracking', 'ads', 'reports'], 'gclid_retry_resolved');
   }
   return res;
 }
@@ -296,6 +297,7 @@ export interface WorkerJobHistoryItem {
 
 function hasLiveOAuthVaultRuntime(): { connected: boolean; hasAdsCustomer: boolean } {
   const candidates = [
+    path.join(APP_CONFIG.getStorageRoot(), 'config', 'google-realtime-config.json'),
     path.join(process.cwd(), 'config', 'google-realtime-config.json'),
     path.join(process.cwd(), 'apps', 'web', 'config', 'google-realtime-config.json'),
   ];
@@ -326,7 +328,7 @@ export function getAdapterReadinessMatrix(): AdapterConnectionStatusItem[] {
   const hasGa4Gsc = Boolean(
     oauthRuntime.connected || process.env.GOOGLE_SERVICE_ACCOUNT_JSON?.trim(),
   );
-  const hasWebhookSecret = Boolean(process.env.WEBHOOK_SHARED_SECRET?.trim());
+  const hasWebhookSecret = Boolean(getConfiguredWebhookSecret());
   let hasCatalogGeminiKey = false;
   try {
     hasCatalogGeminiKey = Boolean(
@@ -347,10 +349,10 @@ export function getAdapterReadinessMatrix(): AdapterConnectionStatusItem[] {
       name: 'Webhook Form Website & GTM (toantrung.com.vn, bangled.vn, manhinhled.net.vn, bangdientu.com.vn)',
       moduleScope: 'M01 Leads & M02 Tracking',
       mode: hasWebhookSecret ? 'LIVE_CONNECTED' : 'SIMULATED_FALLBACK',
-      envKeysRequired: ['WEBHOOK_SHARED_SECRET'],
+      envKeysRequired: ['WEBHOOK_SECRET'],
       description: hasWebhookSecret
         ? 'Đã cấu hình khóa xác thực Webhook nhận Lead trực tiếp từ các website.'
-        : 'Đang mở chế độ nhận Payload thử nghiệm nội bộ (chưa khóa WEBHOOK_SHARED_SECRET).',
+        : 'Đang mở chế độ nhận Payload thử nghiệm nội bộ (chưa khóa WEBHOOK_SECRET / WEBHOOK_SHARED_SECRET).',
     },
     {
       code: 'GOOGLE_ADS_API',

@@ -21,6 +21,7 @@
     "db:seed:catalog": "npm --workspace @toantrung/database run db:seed:catalog",
     "db:seed:demo": "npm --workspace @toantrung/database run db:seed:demo",
     "db:provision:admin": "npm --workspace @toantrung/database run db:provision:admin",
+    "db:disable-demo-accounts": "npm --workspace @toantrung/database run db:disable-demo-accounts",
     "test:core": "node --test --test-concurrency=1 apps/api/src/core/__tests__/*.test.js",
     "check:scope": "node scripts/check-scope.js",
     "context:task": "node scripts/prepare-context.js",

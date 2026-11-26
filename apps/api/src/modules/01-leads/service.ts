@@ -1536,7 +1536,7 @@ export async function reassignLeadSales(
       requiredPermission: 'LEAD_VIEW_OWN',
     },
   });
-  bumpDomainRevisions(['leads', 'notifications'], 'lead_reassigned');
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads', 'notifications'], 'lead_reassigned');
 
   return result;
 }
@@ -2225,7 +2225,7 @@ export async function createProductCatalogItem(
     },
   });
 
-  bumpDomainRevisions(['leads', 'design'], 'product_catalog_created');
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'design'], 'product_catalog_created');
   const catalog = await listProductCatalogWithGroups(true);
   const createdDto = catalog.products.find((p) => p.id === created.id) || mapProductCatalogRow(created, await loadProductGroupLabels());
   return { product: createdDto, groups: catalog.groups };
@@ -2265,7 +2265,7 @@ export async function updateProductCatalogItem(
     },
   });
 
-  bumpDomainRevisions(['leads', 'design'], 'product_catalog_updated');
+  bumpDomainRevisions(['leads', 'reports', 'tracking', 'design'], 'product_catalog_updated');
   const catalog = await listProductCatalogWithGroups(true);
   const updatedDto = catalog.products.find((p) => p.id === updated.id) || mapProductCatalogRow(updated, await loadProductGroupLabels());
   return { product: updatedDto, groups: catalog.groups };

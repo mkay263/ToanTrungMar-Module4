@@ -25,6 +25,22 @@ function resolveTargetDatabase() {
   return { explicitPostgresUrl, targetDbUrl };
 }
 
+function ensureSqliteParentDir(dbUrl) {
+  if (!dbUrl || !dbUrl.startsWith('file:')) return;
+  let filePath = dbUrl.startsWith('file://')
+    ? dbUrl.slice('file://'.length)
+    : dbUrl.slice('file:'.length);
+  if (/^\/[a-zA-Z]:/.test(filePath)) {
+    filePath = filePath.slice(1);
+  }
+  filePath = decodeURIComponent(filePath.split('?')[0] || '');
+  if (!filePath || filePath === ':memory:') return;
+  const resolved = path.isAbsolute(filePath)
+    ? filePath
+    : path.resolve(__dirname, '../prisma', filePath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+}
+
 function createMigratePrismaClient() {
   const { explicitPostgresUrl, targetDbUrl } = resolveTargetDatabase();
   process.env.DATABASE_URL = targetDbUrl;
@@ -39,6 +55,7 @@ function createMigratePrismaClient() {
       }),
     };
   }
+  ensureSqliteParentDir(targetDbUrl);
   const { PrismaClient } = require('@prisma/client');
   return {
     isPostgres: false,

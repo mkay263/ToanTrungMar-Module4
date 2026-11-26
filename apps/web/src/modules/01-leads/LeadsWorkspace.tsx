@@ -646,7 +646,7 @@ export function LeadsWorkspace() {
     let lastFetchMs = Date.now();
     void fetchLeads(false);
 
-    const unsubscribe = subscribeDataSync(['leads', 'design', 'tracking'], () => {
+    const unsubscribe = subscribeDataSync(['leads', 'design', 'tracking', 'auth', 'websites'], () => {
       lastFetchMs = Date.now();
       void fetchLeads(true);
     });

@@ -5,7 +5,7 @@ import {
   WebhookLeadIntakeSchema,
   hasBaPermission,
 } from '@toantrung/contracts';
-import { jsonError, jsonSuccess } from '../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../core/http';
 import {
   requireAuthenticatedSession,
   requirePermissionSession,
@@ -57,6 +57,7 @@ export async function GET(req: Request) {
       const adsScope =
         rawAdsScope === 'all' ? 'all' : rawAdsScope === 'website' ? 'website' : undefined;
       const compare = url.searchParams.get('compare') === '1';
+      const bypassCache = url.searchParams.get('refresh') === '1';
       const m02 = await getM02TrafficInteractionSpec({
         websiteId,
         preset,
@@ -68,6 +69,7 @@ export async function GET(req: Request) {
         adsPageSize,
         adsScope,
         compare,
+        bypassCache,
       });
       return jsonSuccess(m02);
     }
@@ -97,6 +99,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requirePermissionSession(req, 'TRACKING_ADS_OPTIMIZE');
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'tracking_post', auth.user.id, 30, 60_000);
+  if (limited) return limited;
 
   try {
     const raw = (await req.json()) as Record<string, unknown>;
@@ -132,7 +136,7 @@ export async function POST(req: Request) {
         );
       }
       const res = await resolveLeadReconciliationAlert(auth.user, parsed.data);
-      bumpDomainRevisions(['tracking', 'reports'], 'resolve_reconciliation');
+      bumpDomainRevisions(['tracking', 'leads', 'ads', 'reports'], 'resolve_reconciliation');
       return jsonSuccess({ id: res.id, status: res.status });
     }
 
@@ -165,7 +169,7 @@ export async function POST(req: Request) {
       }
       const res = await ingestWebhookLeadWithErrorProtection(parsed.data);
       if (!res.deduplicated) {
-        bumpDomainRevisions(['leads', 'tracking', 'reports', 'notifications'], 'simulate_webhook');
+        bumpDomainRevisions(['leads', 'tracking', 'ads', 'reports', 'notifications'], 'simulate_webhook');
       }
       return jsonSuccess(res, res.deduplicated ? 200 : 201);
     }

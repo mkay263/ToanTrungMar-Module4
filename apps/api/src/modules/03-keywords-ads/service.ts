@@ -92,6 +92,7 @@ export async function refreshKeywordDerivedCacheFromCanonicalMetrics(options?: {
     const allMetrics = norms.length > 0
       ? await prisma.platformDailyMetric.findMany({
           where: {
+            grain: 'keyword',
             keywordTextNorm: { in: norms },
             metricDate: { gte: startStr, lte: endStr },
             id: { gt: 1000 },
@@ -109,9 +110,8 @@ export async function refreshKeywordDerivedCacheFromCanonicalMetrics(options?: {
     const updates = keywords.map((kw) => {
       const metrics = metricsByNorm.get(kw.keywordNorm) || [];
       if (metrics.length > 0) {
-        const adsClicks = metrics
-          .filter((m) => m.platform === 'google_ads')
-          .reduce((acc, m) => acc + m.clicks, 0);
+        const adsRows = metrics.filter((m) => m.platform === 'google_ads');
+        const adsClicks = adsRows.reduce((acc, m) => acc + m.clicks, 0);
         const gscRows = metrics.filter((m) => m.platform === 'search_console');
         const organicClicks = gscRows.reduce((acc, m) => acc + m.clicks, 0);
         const posRows = gscRows.filter((m) => m.avgPosition !== null);
@@ -123,8 +123,8 @@ export async function refreshKeywordDerivedCacheFromCanonicalMetrics(options?: {
         return prisma.seoKeyword.update({
           where: { id: kw.id },
           data: {
-            cachedAdsClicks: adsClicks || kw.cachedAdsClicks,
-            cachedOrganicClicks: organicClicks || kw.cachedOrganicClicks,
+            cachedAdsClicks: adsRows.length > 0 ? adsClicks : kw.cachedAdsClicks,
+            cachedOrganicClicks: gscRows.length > 0 ? organicClicks : kw.cachedOrganicClicks,
             cachedAvgPosition: avgPosition,
             cacheWindowStartDate: startStr,
             cacheWindowEndDate: endStr,
@@ -159,7 +159,7 @@ export async function listKeywordsAndArticlesForUser(user: SessionUserDto): Prom
   const readOnly = isAdsReadOnlyRole(user.roleCode);
   const cached = await getOrComputeScopedCache<AdsWorkspacePayloadDto>({
     key: `ads-default:${readOnly ? 'ads-ro' : 'full'}`,
-    domains: ['ads', 'seo_articles', 'tracking'],
+    domains: ['ads', 'seo_articles', 'seo_reports', 'tracking', 'leads', 'websites'],
     ttlMs: 30_000,
     compute: async () => {
       const ninetyDaysAgoStr = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);

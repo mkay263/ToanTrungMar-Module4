@@ -899,7 +899,7 @@ export async function POST(request: Request) {
     });
 
     if (createdLeads.length > 0) {
-      bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'import_leads_xlsx');
+      bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads', 'notifications'], 'import_leads_xlsx');
     }
 
     return jsonSuccess({

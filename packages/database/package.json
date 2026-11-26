@@ -19,6 +19,7 @@
     "db:seed": "node scripts/seed.js",
     "db:seed:catalog": "node scripts/seed.js --catalog-only",
     "db:seed:demo": "node scripts/seed.js --demo",
-    "db:provision:admin": "node scripts/provision-admin.js"
+    "db:provision:admin": "node scripts/provision-admin.js",
+    "db:disable-demo-accounts": "node scripts/disable-demo-accounts.js"
   }
 }

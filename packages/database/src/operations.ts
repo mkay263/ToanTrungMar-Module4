@@ -500,7 +500,7 @@ export interface UpsertPlatformMetricInput {
   platform: 'google_ads' | 'ga4' | 'search_console' | 'fanpage' | 'google_trends';
   accountPropertyId: string;
   metricDate: string; // YYYY-MM-DD
-  grain: 'account' | 'campaign' | 'keyword' | 'page' | 'topic';
+  grain: 'account' | 'campaign' | 'ad_group' | 'keyword' | 'page' | 'topic';
   campaignExternalId?: string | null;
   keywordMatchType?: string | null;
   keywordRaw?: string | null;

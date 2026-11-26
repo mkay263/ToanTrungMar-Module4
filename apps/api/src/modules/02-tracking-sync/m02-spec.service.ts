@@ -28,10 +28,12 @@ import {
 } from './ga4-live-cache.service';
 import { getGoogleAdsLiveSnapshotNonBlocking } from './gads-live-cache.service';
 import {
+  classifyCampaignWebsiteAttribution,
   getCampaignFinalUrlsMapNonBlocking,
   getGoogleAdsApiConfig,
   getGoogleConnection,
 } from './google-oauth.service';
+import { mergeCanonicalAdsCampaignDailyMetrics } from '../../core/unified-ads-metrics';
 import { computeCostPerValidAdLead } from '../03-keywords-ads/m03-spec.service';
 import { getStoredTouchpoints } from './service';
 
@@ -190,7 +192,7 @@ export async function getM02TrafficInteractionSpec(params?: {
 
   const cached = await getOrComputeScopedCache<M02TrafficInteractionDto>({
     key: cacheKey,
-    domains: ['tracking', 'leads', 'websites'],
+    domains: ['tracking', 'ads', 'leads', 'websites'],
     ttlMs: 30_000,
     bypassCache: params?.bypassCache,
     compute: async () => {
@@ -342,9 +344,9 @@ export async function getM02TrafficInteractionSpec(params?: {
     params?.compare
       ? getGa4LiveSnapshotsForProperties(propIds, scope.prevStartDateStr, scope.prevEndDateStr, false)
       : Promise.resolve([]),
-    getGoogleAdsLiveSnapshotNonBlocking(scope.startDateStr, scope.endDateStr, false),
+    getGoogleAdsLiveSnapshotNonBlocking(scope.startDateStr, scope.endDateStr, Boolean(params?.bypassCache), 5500),
     params?.compare
-      ? getGoogleAdsLiveSnapshotNonBlocking(scope.prevStartDateStr, scope.prevEndDateStr, false)
+      ? getGoogleAdsLiveSnapshotNonBlocking(scope.prevStartDateStr, scope.prevEndDateStr, false, 2500)
       : Promise.resolve(null),
     getCampaignFinalUrlsMapNonBlocking(),
   ]);
@@ -968,35 +970,16 @@ export async function getM02TrafficInteractionSpec(params?: {
   const validScopedAdLeads = allScopedAdLeads.filter((l) => isL2Valid(l));
   const wonScopedAdLeads = validScopedAdLeads.filter((l) => l.pipelineStatus === 'won');
 
-  // Tổng hợp chiến dịch quảng cáo (không chia đều chi phí campaign cho nhiều website nếu thiếu dữ liệu phân bổ!)
-  const resolveCampaignDomain = (
-    campaignName: string,
-    utmSlug?: string | null,
-    pageUrlRaw?: string | null,
-  ): string | null => {
-    if (utmSlug === 'multi_website_unsplit') {
-      return null;
-    }
-    if (utmSlug && utmSlug.startsWith('domain:')) {
-      return utmSlug.slice('domain:'.length).toLowerCase();
-    }
-    if (pageUrlRaw) {
-      const matchedInUrl = scope.availableWebsites.filter((w) =>
-        pageUrlRaw.toLowerCase().includes(w.domain.toLowerCase()),
-      );
-      if (matchedInUrl.length > 1) return null;
-      if (matchedInUrl.length === 1) return matchedInUrl[0].domain;
-    }
-    const lower = (campaignName || '').toLowerCase();
-    const matchedNames: string[] = [];
-    if (lower.includes('bangdientu')) matchedNames.push('bangdientu.com.vn');
-    if (lower.includes('bangled')) matchedNames.push('bangled.vn');
-    if (lower.includes('manhinhled')) matchedNames.push('manhinhled.net.vn');
-    if (lower.includes('toantrung') || lower.includes('tđtt') || lower.includes('tdtt')) {
-      matchedNames.push('toantrung.com.vn');
-    }
-    return matchedNames.length === 1 ? matchedNames[0] : null;
-  };
+  // Tổng hợp chiến dịch quảng cáo từ nguồn sự thật duy nhất (mergeCanonicalAdsCampaignDailyMetrics)
+  // khớp 100% từng đồng với M03, M04 và Tổng quan trên cả "Tất cả website" lẫn lọc từng website.
+  const mergedAdsFacts = mergeCanonicalAdsCampaignDailyMetrics({
+    dbRows: campaignRowsFromDb,
+    gadsLiveSnap,
+    realAdsCatalog,
+    finalUrlsMap,
+    startDateStr: scope.startDateStr,
+    endDateStr: scope.endDateStr,
+  });
 
   const campAggMap = new Map<
     string,
@@ -1010,6 +993,8 @@ export async function getM02TrafficInteractionSpec(params?: {
       clicks: number;
       conversionsMicros: bigint;
       mappedWebsite: string | null;
+      utmSlug: string | null;
+      urlHints: Set<string>;
       dailyMap: Map<
         string,
         { costMicros: bigint; impressions: number; clicks: number; conversionsMicros: bigint }
@@ -1017,49 +1002,38 @@ export async function getM02TrafficInteractionSpec(params?: {
     }
   >();
 
-  for (const m of campaignRowsFromDb) {
-    const cid = m.campaignExternalId || String(m.campaignId || 'unmapped');
-    const cname = m.campaign?.campaignName || m.campaignExternalId || 'Chiến dịch chưa đặt tên';
+  for (const f of mergedAdsFacts) {
+    const cid = f.campaignExternalId;
     const cur = campAggMap.get(cid) || {
       campaignId: cid,
-      campaignName: cname,
-      status: m.campaign ? (m.campaign.isActive ? 'ENABLED' : 'PAUSED') : 'ENABLED',
-      channelType: m.platform,
+      campaignName: f.campaign.campaignName,
+      status: f.status,
+      channelType: f.platform,
       costMicros: 0n,
       impressions: 0,
       clicks: 0,
       conversionsMicros: 0n,
-      mappedWebsite: resolveCampaignDomain(
-        cname,
-        m.campaign?.utmCampaignSlug,
-        m.pageUrlRaw,
-      ),
+      mappedWebsite: null,
+      utmSlug: f.campaign.utmCampaignSlug,
+      urlHints: new Set<string>(finalUrlsMap[cid] || []),
       dailyMap: new Map(),
     };
-    cur.costMicros += m.spendMicros ?? 0n;
-    cur.impressions += m.impressions || 0;
-    cur.clicks += m.clicks || 0;
-    cur.conversionsMicros += m.conversionsMicros ?? 0n;
-    if (m.metricDate) {
-      const dHit = cur.dailyMap.get(m.metricDate) || {
-        costMicros: 0n,
-        impressions: 0,
-        clicks: 0,
-        conversionsMicros: 0n,
-      };
-      dHit.costMicros += m.spendMicros ?? 0n;
-      dHit.impressions += m.impressions || 0;
-      dHit.clicks += m.clicks || 0;
-      dHit.conversionsMicros += m.conversionsMicros ?? 0n;
-      cur.dailyMap.set(m.metricDate, dHit);
-    }
-    if (!cur.mappedWebsite) {
-      cur.mappedWebsite = resolveCampaignDomain(
-        cname,
-        m.campaign?.utmCampaignSlug,
-        m.pageUrlRaw,
-      );
-    }
+    cur.costMicros += f.spendMicros;
+    cur.impressions += f.impressions;
+    cur.clicks += f.clicks;
+    cur.conversionsMicros += f.conversionsMicros;
+    if (f.pageUrlRaw) cur.urlHints.add(f.pageUrlRaw);
+    const dHit = cur.dailyMap.get(f.metricDate) || {
+      costMicros: 0n,
+      impressions: 0,
+      clicks: 0,
+      conversionsMicros: 0n,
+    };
+    dHit.costMicros += f.spendMicros;
+    dHit.impressions += f.impressions;
+    dHit.clicks += f.clicks;
+    dHit.conversionsMicros += f.conversionsMicros;
+    cur.dailyMap.set(f.metricDate, dHit);
     campAggMap.set(cid, cur);
   }
 
@@ -1075,63 +1049,21 @@ export async function getM02TrafficInteractionSpec(params?: {
         impressions: 0,
         clicks: 0,
         conversionsMicros: 0n,
-        mappedWebsite: resolveCampaignDomain(camp.campaignName, camp.utmCampaignSlug, null),
+        mappedWebsite: null,
+        utmSlug: camp.utmCampaignSlug,
+        urlHints: new Set<string>(finalUrlsMap[cid] || []),
         dailyMap: new Map(),
       });
     }
   }
 
-  // Hợp nhất dữ liệu live theo ngày từ Google Ads API (lấp đầy cả các kỳ >30 ngày trước và tránh cộng trùng)
-  if (gadsLiveSnap && gadsLiveSnap.campaignDaily.length > 0) {
-    for (const d of gadsLiveSnap.campaignDaily) {
-      const cid = d.campaignId;
-      const catalogMatch = realAdsCatalog.find(
-        (rc) => rc.campaignCode.replace(/^GADS_/, '') === cid,
-      );
-      const cur = campAggMap.get(cid) || {
-        campaignId: cid,
-        campaignName: d.campaignName,
-        status: d.status || 'ENABLED',
-        channelType: 'google_ads',
-        costMicros: 0n,
-        impressions: 0,
-        clicks: 0,
-        conversionsMicros: 0n,
-        mappedWebsite: resolveCampaignDomain(
-          d.campaignName,
-          catalogMatch?.utmCampaignSlug,
-          (finalUrlsMap[cid] || [])[0] || null,
-        ),
-        dailyMap: new Map(),
-      };
-      cur.campaignName = d.campaignName || cur.campaignName;
-      cur.status = d.status || cur.status;
-      cur.dailyMap.set(d.date, {
-        costMicros: BigInt(Math.round(d.cost * 1_000_000)),
-        impressions: d.impressions,
-        clicks: d.clicks,
-        conversionsMicros: BigInt(Math.round(d.conversions * 1_000_000)),
-      });
-      campAggMap.set(cid, cur);
-    }
-
-    for (const cur of campAggMap.values()) {
-      if (cur.dailyMap.size === 0) continue;
-      let sumCost = 0n;
-      let sumImpr = 0;
-      let sumClk = 0;
-      let sumConv = 0n;
-      for (const dm of cur.dailyMap.values()) {
-        sumCost += dm.costMicros;
-        sumImpr += dm.impressions;
-        sumClk += dm.clicks;
-        sumConv += dm.conversionsMicros;
-      }
-      cur.costMicros = sumCost;
-      cur.impressions = sumImpr;
-      cur.clicks = sumClk;
-      cur.conversionsMicros = sumConv;
-    }
+  for (const cur of campAggMap.values()) {
+    const attr = classifyCampaignWebsiteAttribution(
+      cur.campaignName,
+      Array.from(cur.urlHints),
+      cur.utmSlug,
+    );
+    cur.mappedWebsite = attr.status === 'SINGLE_WEBSITE' ? attr.domain : null;
   }
 
   // Đối soát Lead CRM theo tên chiến dịch / utmCampaign / campaignId
@@ -1255,8 +1187,16 @@ export async function getM02TrafficInteractionSpec(params?: {
     hasOAuthAdsConnected ||
     realAdsCatalog.length > 0 ||
     campaignRowsFromDb.length > 0;
+  const scopedCostMicrosTotal = campaignList.reduce(
+    (s, c) => s + (campAggMap.get(c.campaignId)?.costMicros ?? 0n),
+    0n,
+  );
+  const scopedConvMicrosTotal = campaignList.reduce(
+    (s, c) => s + (campAggMap.get(c.campaignId)?.conversionsMicros ?? 0n),
+    0n,
+  );
   const adsTotalCost = hasConnectedAdsData
-    ? Number(campaignList.reduce((s, c) => s + c.cost, 0).toFixed(0))
+    ? Number((Number(scopedCostMicrosTotal) / 1_000_000).toFixed(0))
     : null;
   const adsTotalImpr = hasConnectedAdsData
     ? campaignList.reduce((s, c) => s + c.impressions, 0)
@@ -1265,7 +1205,7 @@ export async function getM02TrafficInteractionSpec(params?: {
     ? campaignList.reduce((s, c) => s + c.clicks, 0)
     : null;
   const adsTotalConv = hasConnectedAdsData
-    ? Number(campaignList.reduce((s, c) => s + c.conversions, 0).toFixed(2))
+    ? Number((Number(scopedConvMicrosTotal) / 1_000_000).toFixed(2))
     : null;
   const adsCtrPct =
     adsTotalClicks !== null && adsTotalImpr !== null && adsTotalImpr > 0
@@ -1411,56 +1351,197 @@ export async function getM02TrafficInteractionSpec(params?: {
   }
 
   const activeCampaignsCount = campaignList.filter((c) => c.status === 'ENABLED').length;
+  const isGoogleOAuthError = Boolean(
+    googleOAuthConn?.connected &&
+      !googleOAuthConn.isSandboxDemo &&
+      (googleOAuthConn.connectionStatus === 'EXPIRED' ||
+        googleOAuthConn.connectionStatus === 'PERMISSION_ERROR' ||
+        googleOAuthConn.connectionStatus === 'SYNC_ERROR'),
+  );
+  const includedCampaignNames = new Set(
+    campaignList.map((c) => c.campaignName.trim().toLowerCase()),
+  );
+  const filterByScopedCampaign = (campaignName: string) =>
+    effectiveAdsAllWebsites ||
+    !scope.selectedWebsite ||
+    includedCampaignNames.has(campaignName.trim().toLowerCase());
 
-  const liveOrDbAdGroups =
+  const aggregatedDbAdGroups = (() => {
+    const map = new Map<
+      string,
+      {
+        adGroupId: string;
+        adGroupName: string;
+        campaignName: string;
+        cost: number;
+        impressions: number;
+        clicks: number;
+        conversions: number;
+      }
+    >();
+    for (const r of adGroupRowsFromDb) {
+      const agName = r.keywordRaw || r.campaignExternalId || 'Nhóm quảng cáo';
+      const campName = r.campaign?.campaignName || r.campaignName || r.campaignExternalId || 'Chiến dịch';
+      const agKey = `${campName.toLowerCase()}::${(r.pagePathNorm || agName).toLowerCase()}`;
+      const cur = map.get(agKey) || {
+        adGroupId: r.pageUrlRaw || `ag-${r.id}`,
+        adGroupName: agName,
+        campaignName: campName,
+        cost: 0,
+        impressions: 0,
+        clicks: 0,
+        conversions: 0,
+      };
+      cur.cost += microsToUnitNumber(r.spendMicros);
+      cur.impressions += r.impressions || 0;
+      cur.clicks += r.clicks || 0;
+      cur.conversions += conversionsMicrosToNumber(r.conversionsMicros);
+      map.set(agKey, cur);
+    }
+    return Array.from(map.values())
+      .map((item) => ({
+        ...item,
+        cost: Math.round(item.cost),
+        conversions: Number(item.conversions.toFixed(2)),
+        cpa: item.conversions > 0 ? Number((item.cost / item.conversions).toFixed(0)) : null,
+      }))
+      .sort((a, b) => b.cost - a.cost || b.clicks - a.clicks)
+      .slice(0, 60);
+  })();
+
+  const aggregatedDbKeywords = (() => {
+    const map = new Map<
+      string,
+      {
+        keywordText: string;
+        matchType: string;
+        adGroupName: string;
+        campaignName: string;
+        impressions: number;
+        clicks: number;
+        cost: number;
+        conversions: number;
+      }
+    >();
+    for (const r of keywordRowsFromDb) {
+      const kwText = r.keywordRaw || r.keywordTextNorm || 'Từ khóa quảng cáo';
+      const matchType = r.keywordMatchType || 'BROAD';
+      const agName = r.pageUrlRaw || r.campaignExternalId || 'Nhóm quảng cáo';
+      const campName = r.campaign?.campaignName || r.campaignName || r.campaignExternalId || 'Chiến dịch';
+      const key = `${campName.toLowerCase()}::${agName.toLowerCase()}::${kwText.toLowerCase()}::${matchType}`;
+      const cur = map.get(key) || {
+        keywordText: kwText,
+        matchType,
+        adGroupName: agName,
+        campaignName: campName,
+        impressions: 0,
+        clicks: 0,
+        cost: 0,
+        conversions: 0,
+      };
+      cur.impressions += r.impressions || 0;
+      cur.clicks += r.clicks || 0;
+      cur.cost += microsToUnitNumber(r.spendMicros);
+      cur.conversions += conversionsMicrosToNumber(r.conversionsMicros);
+      map.set(key, cur);
+    }
+    return Array.from(map.values())
+      .map((item) => ({
+        ...item,
+        cost: Math.round(item.cost),
+        conversions: Number(item.conversions.toFixed(2)),
+        ctrPct:
+          item.impressions > 0
+            ? Number(((item.clicks / item.impressions) * 100).toFixed(2))
+            : null,
+      }))
+      .sort((a, b) => b.cost - a.cost || b.clicks - a.clicks)
+      .slice(0, 100);
+  })();
+
+  const liveOrDbAdGroups = (
     gadsLiveSnap && gadsLiveSnap.adGroups.length > 0
       ? gadsLiveSnap.adGroups
-      : adGroupRowsFromDb.slice(0, 30).map((r, idx) => {
-          const cost = microsToUnitNumber(r.spendMicros);
-          const conv = conversionsMicrosToNumber(r.conversionsMicros);
-          return {
-            adGroupId: `ag-${r.id}-${idx + 1}`,
-            adGroupName: r.keywordRaw || r.campaignExternalId || 'Nhóm quảng cáo',
-            campaignName: r.campaign?.campaignName || r.campaignExternalId || 'Chiến dịch',
-            cost,
-            impressions: r.impressions || 0,
-            clicks: r.clicks || 0,
-            conversions: conv,
-            cpa: conv > 0 ? Number((cost / conv).toFixed(0)) : null,
-          };
-        });
+      : aggregatedDbAdGroups
+  ).filter((ag) => filterByScopedCampaign(ag.campaignName));
 
-  const liveOrDbKeywords =
+  const liveOrDbKeywords = (
     gadsLiveSnap && gadsLiveSnap.keywords.length > 0
       ? gadsLiveSnap.keywords
-      : keywordRowsFromDb.slice(0, 50).map((r) => {
-          const cost = microsToUnitNumber(r.spendMicros);
-          const impr = r.impressions || 0;
-          const clk = r.clicks || 0;
-          return {
-            keywordText: r.keywordRaw || r.keywordTextNorm || 'Từ khóa quảng cáo',
-            matchType: r.keywordMatchType || 'BROAD',
-            adGroupName: r.campaignExternalId || 'Nhóm quảng cáo',
-            campaignName: r.campaign?.campaignName || 'Chiến dịch',
-            impressions: impr,
-            clicks: clk,
-            ctrPct: impr > 0 ? Number(((clk / impr) * 100).toFixed(2)) : null,
-            cost,
-            conversions: conversionsMicrosToNumber(r.conversionsMicros),
-          };
-        });
+      : aggregatedDbKeywords
+  ).filter((kw) => filterByScopedCampaign(kw.campaignName));
+
+  const scopedSearchTerms = (gadsLiveSnap?.searchTerms || []).filter((st) =>
+    filterByScopedCampaign(st.campaignName),
+  );
+  const scopedLandingPages = (gadsLiveSnap?.landingPages || []).filter((lp) => {
+    if (effectiveAdsAllWebsites || !scope.selectedWebsite) return true;
+    return (
+      matchesWebsiteDomain(lp.url, scope.selectedWebsite) ||
+      includedCampaignNames.has(lp.campaignName.trim().toLowerCase())
+    );
+  });
+
+  const periodRangeLabel =
+    scope.startDateStr === scope.endDateStr
+      ? `ngày ${scope.startDateStr}`
+      : `kỳ ${scope.startDateStr} → ${scope.endDateStr}`;
+  const isSingleTodayRange = scope.isTodayIncluded && scope.totalCalendarDays === 1;
+  const websiteSuffix =
+    !effectiveAdsAllWebsites && scope.selectedWebsite
+      ? ` cho website ${scope.selectedWebsite.domain}`
+      : '';
+  const todayHint = isSingleTodayRange
+    ? ' (hôm nay chưa phát sinh lượt nhấp/chi tiêu Ads — bạn có thể chọn Hôm qua, 7 ngày hoặc 30 ngày để xem dữ liệu đã chạy)'
+    : '';
+
+  const breakdownsDataState: NonNullable<M02AdsSectionDto['breakdowns']['dataState']> =
+    !hasConnectedAdsData
+      ? 'UNCONFIGURED'
+      : isGoogleOAuthError
+        ? 'AUTH_ERROR'
+        : !gadsLiveSnap
+          ? 'SYNCING'
+          : scopedLandingPages.length === 0 &&
+              scopedSearchTerms.length === 0 &&
+              (adsTotalClicks ?? 0) === 0
+            ? 'NO_ACTIVITY_IN_PERIOD'
+            : 'READY';
+
+  const buildBreakdownNote = (
+    entityLabel: string,
+    rowCount: number,
+  ): string | null => {
+    if (rowCount > 0) return null;
+    if (!hasConnectedAdsData) {
+      return `Chưa kết nối tài khoản Google Ads nên chưa tải được dữ liệu ${entityLabel}.`;
+    }
+    if (isGoogleOAuthError) {
+      return `Phiên OAuth Google Ads đang gặp sự cố (${googleOAuthConn?.connectionStatus}). Vui lòng vào Cài đặt → Tích hợp Google để kết nối lại.`;
+    }
+    if (!gadsLiveSnap) {
+      return `Đang đồng bộ dữ liệu ${entityLabel} từ Google Ads API cho ${periodRangeLabel}. Vui lòng bấm "Tải lại dữ liệu" sau vài giây.`;
+    }
+    return `Chưa phát sinh dữ liệu ${entityLabel} trong ${periodRangeLabel}${websiteSuffix}${todayHint}. Kết nối Google Ads vẫn đang hoạt động bình thường.`;
+  };
 
   const adsSection: M02AdsSectionDto = {
-    status: hasConnectedAdsData ? 'CONNECTED' : 'UNCONFIGURED',
-    statusMessage: hasConnectedAdsData
-      ? !effectiveAdsAllWebsites && unattributedAccountCampaignCount > 0 && scope.selectedWebsite
-        ? `Có ${unattributedAccountCampaignCount} chiến dịch cấp tài khoản chưa gắn riêng cho ${scope.selectedWebsite.domain}; chọn "Tất cả website" để xem tổng chi phí cấp tài khoản.`
-        : adsTotalCost === 0
-          ? `Đã kết nối tài khoản Google Ads v26 (${campaignList.length} chiến dịch trong phạm vi; hiện đang tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn).`
-          : effectiveAdsAllWebsites
-            ? `Đang tổng hợp ${activeCampaignsCount} chiến dịch đang chạy (trên tổng ${campaignList.length} chiến dịch) của toàn bộ website kèm link đích.`
-            : 'Đã đồng bộ chỉ số chiến dịch Google Ads v26 và đối soát Lead CRM.'
-      : 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads. Vào Cài đặt → Tích hợp Google để kết nối trực tiếp qua OAuth.',
+    status: !hasConnectedAdsData
+      ? 'UNCONFIGURED'
+      : isGoogleOAuthError
+        ? 'ERROR'
+        : 'CONNECTED',
+    statusMessage: !hasConnectedAdsData
+      ? 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads. Vào Cài đặt → Tích hợp Google để kết nối trực tiếp qua OAuth.'
+      : isGoogleOAuthError
+        ? `Kết nối OAuth Google Ads đang báo lỗi (${googleOAuthConn?.connectionStatus}). Vào Cài đặt → Tích hợp Google để kết nối lại.`
+        : !effectiveAdsAllWebsites && unattributedAccountCampaignCount > 0 && scope.selectedWebsite
+          ? `Có ${unattributedAccountCampaignCount} chiến dịch cấp tài khoản chưa gắn riêng cho ${scope.selectedWebsite.domain}; chọn "Tất cả website" để xem tổng chi phí cấp tài khoản.`
+          : adsTotalCost === 0
+            ? `Đã kết nối tài khoản Google Ads v26 (${campaignList.length} chiến dịch trong phạm vi; hiện đang tạm dừng hoặc phát sinh 0 ₫ chi tiêu trong kỳ chọn).`
+            : effectiveAdsAllWebsites
+              ? `Đang tổng hợp ${activeCampaignsCount} chiến dịch đang chạy (trên tổng ${campaignList.length} chiến dịch) của toàn bộ website kèm link đích.`
+              : 'Đã đồng bộ chỉ số chiến dịch Google Ads v26 và đối soát Lead CRM.',
     currencyCode: 'VND',
     adsScopeMode: effectiveAdsAllWebsites ? 'ALL_WEBSITES' : 'SELECTED_WEBSITE',
     activeCampaignsCount,
@@ -1489,14 +1570,15 @@ export async function getM02TrafficInteractionSpec(params?: {
     breakdowns: {
       adGroups: liveOrDbAdGroups,
       keywords: liveOrDbKeywords,
-      searchTerms: gadsLiveSnap?.searchTerms || [],
-      landingPages: gadsLiveSnap?.landingPages || [],
+      searchTerms: scopedSearchTerms,
+      landingPages: scopedLandingPages,
       timeSchedule: gadsLiveSnap?.timeSchedule || [],
-      keywordAvailabilityNote: hasConnectedAdsData
-        ? liveOrDbKeywords.length === 0
-          ? 'Chưa có dữ liệu cấp từ khóa quảng cáo trong kỳ đang chọn (hoặc OAuth Google cần Kết nối lại để kéo dữ liệu mới).'
-          : null
-        : 'Chưa kết nối tài khoản Google Ads nên chưa tải được nhóm quảng cáo, từ khóa, cụm từ tìm kiếm và trang đích.',
+      dataState: breakdownsDataState,
+      fetchedAt: gadsLiveSnap?.fetchedAt || null,
+      adGroupAvailabilityNote: buildBreakdownNote('nhóm quảng cáo', liveOrDbAdGroups.length),
+      landingPageAvailabilityNote: buildBreakdownNote('trang đích Google Ads', scopedLandingPages.length),
+      searchTermAvailabilityNote: buildBreakdownNote('cụm từ tìm kiếm Google Ads', scopedSearchTerms.length),
+      keywordAvailabilityNote: buildBreakdownNote('từ khóa quảng cáo', liveOrDbKeywords.length),
       devices: gadsLiveSnap?.devices || [],
       regions: [],
     },

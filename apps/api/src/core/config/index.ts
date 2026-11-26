@@ -26,6 +26,10 @@ export function getSessionSecret(env: NodeJS.ProcessEnv = process.env): string {
   return configured || 'toantrung-v2-local-dev-ephemeral-secret';
 }
 
+export function getConfiguredWebhookSecret(env: NodeJS.ProcessEnv = process.env): string {
+  return (env.WEBHOOK_SECRET || env.WEBHOOK_SHARED_SECRET || '').trim();
+}
+
 export function validateRuntimeSecrets(env: NodeJS.ProcessEnv = process.env): {
   ok: true;
   environment: string;

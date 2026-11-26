@@ -73,17 +73,11 @@ function getStore(): GlobalServerCacheStore {
   return globalStore.__toantrungServerCacheV2;
 }
 
+const VN_UTC_OFFSET_MS = 7 * 60 * 60 * 1000;
+
 export function getVietnamDateKey(date: Date = new Date()): string {
-  try {
-    return new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Ho_Chi_Minh',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(date);
-  } catch {
-    return new Date(date.getTime() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
-  }
+  // Asia/Ho_Chi_Minh is fixed UTC+07:00 year-round (no DST); avoids 50-80ms cold Intl ICU initialization on hot SSE path.
+  return new Date(date.getTime() + VN_UTC_OFFSET_MS).toISOString().slice(0, 10);
 }
 
 export function getDomainRevisionsSnapshot(): {

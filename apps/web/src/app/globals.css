@@ -21,6 +21,11 @@
 
 html {
   font-family: var(--font-unified);
+  scrollbar-gutter: stable;
+}
+
+.overflow-x-auto {
+  contain: layout style;
 }
 
 body {
@@ -58,12 +63,17 @@ textarea,
 }
 
 /* Nâng sàn các cỡ chữ siêu nhỏ bằng rem để đồng bộ độ dễ đọc và tôn trọng tỷ lệ trình duyệt */
-.text-\[10px\] {
+.text-\[7\.5px\],
+.text-\[8\.5px\],
+.text-\[9px\],
+.text-\[10px\],
+.text-\[10\.5px\] {
   font-size: 0.78125rem !important;
   line-height: 1.42 !important;
 }
 
-.text-\[11px\] {
+.text-\[11px\],
+.text-\[11\.5px\] {
   font-size: 0.84375rem !important;
   line-height: 1.45 !important;
 }
@@ -71,6 +81,17 @@ textarea,
 .text-\[13px\] {
   font-size: 0.9375rem !important;
   line-height: 1.5 !important;
+}
+
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
+}
+
+.responsive-table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  container-type: inline-size;
 }
 
 /* Realtime Live Motion & Pulse Animations */
@@ -139,6 +160,8 @@ dialog:modal {
 dialog::backdrop {
   overflow: hidden;
   overscroll-behavior: contain;
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(2px);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -149,5 +172,134 @@ dialog::backdrop {
   .animate-live-glow,
   .animate-sweep-15s {
     animation: none !important;
+  }
+}
+
+/* Native indeterminate <progress class="loading-spinner"> per modern web accessibility & motion guidance */
+@property --arc-start {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@property --arc-end {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+@property --progress-dash-animation {
+  syntax: "*";
+  inherits: false;
+  initial-value: , progress-dash 3s ease-in-out infinite;
+}
+
+progress.loading-spinner:indeterminate::-webkit-progress-bar {
+  display: none;
+  background: none;
+}
+
+progress.loading-spinner:indeterminate::-webkit-progress-value {
+  display: none;
+  background: none;
+}
+
+progress.loading-spinner:indeterminate::-moz-progress-bar {
+  display: none;
+  background: none;
+}
+
+progress.loading-spinner:indeterminate::slider-fill {
+  display: none;
+  background: none;
+}
+
+progress.loading-spinner:indeterminate {
+  --_from: calc(90deg + var(--arc-start, 0deg));
+  --_to: calc(90deg + var(--arc-end, 158deg));
+  --size: 40px;
+  --thickness: 3px;
+  --spinner-color: var(--brand-primary, #1553A2);
+  --track-color: #e2e8f0;
+  --spinner-duration: 1.5s;
+  --_used-spinner-duration: var(--spinner-duration);
+
+  position: relative;
+  display: inline-block;
+  width: var(--size);
+  height: var(--size);
+  border-radius: 50%;
+  appearance: none;
+  border: 0;
+  background: conic-gradient(
+      from var(--_from),
+      var(--spinner-color) calc(var(--_to) - var(--_from)),
+      transparent 0
+    )
+    var(--track-color);
+  animation:
+    progress-spin var(--_used-spinner-duration) linear infinite
+    var(--progress-dash-animation, );
+}
+
+progress.loading-spinner.loading-spinner-sm:indeterminate {
+  --size: 24px;
+  --thickness: 2.5px;
+}
+
+@supports (background-clip: border-area) {
+  progress.loading-spinner:indeterminate {
+    background-clip: border-area;
+    border: var(--thickness) solid transparent;
+    background-origin: border-box;
+  }
+}
+
+@supports not (background-clip: border-area) {
+  progress.loading-spinner:indeterminate {
+    --clip-boundary: calc(100% - var(--thickness));
+    mask-image: radial-gradient(
+      farthest-side,
+      transparent var(--clip-boundary),
+      black var(--clip-boundary)
+    );
+    border: 0;
+  }
+}
+
+@media (forced-colors: active) {
+  progress.loading-spinner:indeterminate {
+    forced-color-adjust: none;
+    --spinner-color: CanvasText;
+    --track-color: Canvas;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  progress.loading-spinner:indeterminate {
+    --_used-spinner-duration: 6s;
+    --progress-dash-animation: ;
+    --arc-end: 158deg;
+  }
+}
+
+@keyframes progress-spin {
+  to {
+    rotate: 1turn;
+  }
+}
+
+@keyframes progress-dash {
+  from {
+    --arc-start: 0deg;
+    --arc-end: 3deg;
+  }
+  50% {
+    --arc-start: 100deg;
+    --arc-end: 358deg;
+  }
+  to {
+    --arc-start: 360deg;
+    --arc-end: 363deg;
   }
 }

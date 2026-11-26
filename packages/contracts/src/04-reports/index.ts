@@ -204,5 +204,159 @@ export const ReportQuerySchema = z.object({
   preset: z.enum(REPORT_PRESETS).default('30d'),
   fromDate: z.string().optional(),
   toDate: z.string().optional(),
+  granularity: z.enum(['day', 'week', 'month', 'year', 'auto']).optional(),
 });
+
+export const M04_REPORT_GRANULARITIES = ['day', 'week', 'month', 'year'] as const;
+export type M04ReportGranularity = (typeof M04_REPORT_GRANULARITIES)[number];
+
+export interface M04PeriodBucketRowDto {
+  bucketKey: string;
+  bucketStart: string;
+  bucketEnd: string;
+  label: string;
+  receivedLeadCount: number;
+  validLeadCount: number;
+  quotedLeadCount: number;
+  wonLeadCount: number;
+  lostLeadCount: number;
+  adLeadCount: number;
+  adCost: number | null;
+  cpl: number | null;
+  winRatePct: number | null;
+  isPreliminary: boolean;
+}
+
+export interface M04PeriodBreakdownDto {
+  granularity: M04ReportGranularity;
+  granularityLabel: string;
+  timezone: string;
+  buckets: M04PeriodBucketRowDto[];
+  totals: {
+    receivedLeadCount: number;
+    validLeadCount: number;
+    quotedLeadCount: number;
+    wonLeadCount: number;
+    lostLeadCount: number;
+    adLeadCount: number;
+    adCost: number | null;
+    cpl: number | null;
+    winRatePct: number | null;
+  };
+}
+
+export type M04ProductCategoryGroup = 'led_screen' | 'electronic_board' | 'other' | 'unclassified';
+
+export interface M04ProductCatalogRowDto {
+  productId: number;
+  productCode: string;
+  productName: string;
+  categoryGroup: M04ProductCategoryGroup;
+  categoryLabel: string;
+  unit: string;
+  isUnclassifiedProduct: boolean;
+  leadCount: number;
+  validCount: number;
+  newLeadCount: number;
+  quotingCount: number;
+  quotedCount: number;
+  quoteSentCount: number;
+  overdueCount: number;
+  wonCount: number;
+  lostCount: number;
+  winRatePct: number | null;
+  shareOfClassifiedPct: number | null;
+  requestedDimensions: string[];
+}
+
+export interface M04ProductCategorySummaryDto {
+  categoryGroup: M04ProductCategoryGroup;
+  categoryLabel: string;
+  catalogProductCount: number;
+  activeProductCount: number;
+  leadCount: number;
+  validCount: number;
+  quotedCount: number;
+  overdueCount: number;
+  wonCount: number;
+  winRatePct: number | null;
+}
+
+export interface M04UnclassifiedProductHintDto {
+  hintKey: string;
+  suggestedProductCode: string | null;
+  suggestedProductName: string;
+  leadCount: number;
+  sampleProjects: string[];
+}
+
+export interface M04ExcelImportRowDto {
+  rowNumber: number;
+  rawProductCode: string;
+  rawProductName: string;
+  matchedProductId: number | null;
+  matchedProductCode: string | null;
+  matchedProductName: string | null;
+  categoryGroup: M04ProductCategoryGroup | null;
+  categoryLabel: string | null;
+  periodLabel: string;
+  importedLeadCount: number;
+  importedValidCount: number;
+  importedQuotedCount: number;
+  importedWonCount: number;
+  importedAdCost: number | null;
+  note: string;
+  crmLeadCount: number;
+  crmValidCount: number;
+  crmQuotedCount: number;
+  crmWonCount: number;
+  deltaLead: number;
+  deltaValid: number;
+  deltaQuoted: number;
+  deltaWon: number;
+  status: 'valid' | 'warning' | 'error';
+  message: string;
+}
+
+export interface M04ExcelImportPreviewDto {
+  fileName: string;
+  sheetName: string;
+  granularity: M04ReportGranularity;
+  scopePeriod: {
+    startDate: string;
+    endDate: string;
+    websiteId: string;
+    websiteLabel: string;
+  };
+  warnings: string[];
+  summary: {
+    totalRows: number;
+    validRows: number;
+    warningRows: number;
+    errorRows: number;
+    importedTotalLeads: number;
+    importedTotalWon: number;
+    crmTotalLeads: number;
+    crmTotalWon: number;
+  };
+  rows: M04ExcelImportRowDto[];
+}
+
+export interface M04ExcelImportBatchDto {
+  id: string;
+  fileName: string;
+  sheetName: string;
+  granularity: M04ReportGranularity;
+  periodLabel: string;
+  scopeStartDate: string;
+  scopeEndDate: string;
+  websiteId: string;
+  createdAt: string;
+  createdByUserId: number;
+  createdByName: string;
+  createdByRole: string;
+  warnings: string[];
+  summary: M04ExcelImportPreviewDto['summary'];
+  rows: M04ExcelImportRowDto[];
+}
 

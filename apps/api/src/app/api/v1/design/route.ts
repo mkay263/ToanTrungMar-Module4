@@ -8,7 +8,7 @@ import {
   type AiProviderId,
 } from '@toantrung/contracts';
 import { prisma } from '@toantrung/database';
-import { jsonError, jsonSuccess } from '../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../core/permissions';
 import { AiDesignProviderFactory } from '../../../../modules/05-ai-design/providers';
 import {
@@ -54,6 +54,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requireAuthenticatedSession(req);
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'design_post', auth.user.id, 30, 60_000);
+  if (limited) return limited;
 
   try {
     const raw = (await req.json()) as Record<string, unknown>;

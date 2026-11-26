@@ -30,7 +30,9 @@ export function useVirtualRows({
   enabledThreshold = 60,
 }: UseVirtualRowsOptions): VirtualRowsWindow {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
+  const rafRef = useRef<number | null>(null);
+  const pendingScrollTopRef = useRef<number>(0);
+  const [bucketIndex, setBucketIndex] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(560);
 
   const isVirtualized = totalCount > enabledThreshold;
@@ -41,7 +43,7 @@ export function useVirtualRows({
     if (!el) return;
     const measure = () => {
       const h = el.clientHeight;
-      if (h > 0) setViewportHeight(h);
+      if (h > 0) setViewportHeight((prev) => (Math.abs(prev - h) >= 24 ? h : prev));
     };
     measure();
     if (typeof ResizeObserver !== 'undefined') {
@@ -52,12 +54,26 @@ export function useVirtualRows({
     return undefined;
   }, [isVirtualized, totalCount]);
 
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null && typeof window !== 'undefined') {
+        window.cancelAnimationFrame(rafRef.current);
+      }
+    };
+  }, []);
+
   const handleScroll = useCallback(
     (e: React.UIEvent<HTMLDivElement>) => {
       if (!isVirtualized) return;
-      setScrollTop(e.currentTarget.scrollTop);
+      pendingScrollTopRef.current = e.currentTarget.scrollTop;
+      if (rafRef.current !== null) return;
+      rafRef.current = window.requestAnimationFrame(() => {
+        rafRef.current = null;
+        const nextBucket = Math.max(0, Math.floor(pendingScrollTopRef.current / rowHeight));
+        setBucketIndex((prev) => (prev === nextBucket ? prev : nextBucket));
+      });
     },
-    [isVirtualized],
+    [isVirtualized, rowHeight],
   );
 
   return useMemo(() => {
@@ -73,7 +89,7 @@ export function useVirtualRows({
       };
     }
 
-    const rawStart = Math.floor(scrollTop / rowHeight) - overscan;
+    const rawStart = bucketIndex - overscan;
     const startIndex = Math.max(0, Math.min(totalCount - 1, rawStart));
     const visibleCount = Math.ceil(viewportHeight / rowHeight) + overscan * 2;
     const endIndex = Math.max(startIndex, Math.min(totalCount, startIndex + visibleCount));
@@ -90,5 +106,5 @@ export function useVirtualRows({
       bottomSpacerHeight,
       handleScroll,
     };
-  }, [isVirtualized, totalCount, scrollTop, rowHeight, overscan, viewportHeight, handleScroll]);
+  }, [isVirtualized, totalCount, bucketIndex, rowHeight, overscan, viewportHeight, handleScroll]);
 }

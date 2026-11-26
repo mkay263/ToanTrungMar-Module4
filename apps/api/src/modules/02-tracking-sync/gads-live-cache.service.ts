@@ -4,7 +4,10 @@ import type {
   M02AdsSearchTermRowDto,
   M02AdsTimeScheduleRowDto,
 } from '@toantrung/contracts';
-import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
+import {
+  bumpDomainRevisions,
+  runWithConcurrency,
+} from '../../core/cache/server-data-cache';
 import {
   getGoogleAdsApiConfig,
   getGoogleConnection,
@@ -399,9 +402,16 @@ async function hydrateGadsFromDbIfNeeded(): Promise<void> {
         for (const [k, snap] of Object.entries(parsed)) {
           if (snap?.fetchedAt) {
             const age = now - new Date(snap.fetchedAt).getTime();
+            const looksPartiallyPoisoned =
+              (snap.campaignDaily?.length || 0) > 0 &&
+              (snap.landingPages?.length || 0) === 0 &&
+              (snap.keywords?.length || 0) === 0;
             if (Number.isFinite(age) && age < 30 * 24 * 60 * 60 * 1000) {
               store.memCache.set(k, {
-                expiresAt: age < GADS_CACHE_TTL_MS ? now + GADS_CACHE_TTL_MS - age : now - 1,
+                expiresAt:
+                  !looksPartiallyPoisoned && age < GADS_CACHE_TTL_MS
+                    ? now + GADS_CACHE_TTL_MS - age
+                    : now - 1,
                 data: snap,
               });
             }
@@ -466,26 +476,106 @@ async function runGaqlQuery(
   headers: Record<string, string>,
   query: string,
 ): Promise<Array<Record<string, unknown>> | null> {
-  for (const ver of ['v26', 'v25', 'v24']) {
-    try {
-      const res = await fetch(
-        `https://googleads.googleapis.com/${ver}/customers/${customerId}/googleAds:search`,
-        {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ query }),
-          signal: AbortSignal.timeout(10000),
-        },
-      );
-      if (res.status === 404) continue;
-      if (!res.ok) return null;
-      const json = (await res.json()) as { results?: Array<Record<string, unknown>> };
-      return json.results || [];
-    } catch {
+  const maxAttempts = 2;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let shouldRetry = false;
+    for (const ver of ['v26', 'v25', 'v24']) {
+      try {
+        const res = await fetch(
+          `https://googleads.googleapis.com/${ver}/customers/${customerId}/googleAds:search`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ query }),
+            signal: AbortSignal.timeout(20000),
+          },
+        );
+        if (res.status === 404) continue;
+        if (res.status === 429 || res.status >= 500) {
+          shouldRetry = true;
+          break;
+        }
+        if (!res.ok) return null;
+        const json = (await res.json()) as { results?: Array<Record<string, unknown>> };
+        return json.results || [];
+      } catch {
+        shouldRetry = true;
+        break;
+      }
+    }
+    if (!shouldRetry || attempt >= maxAttempts) {
       return null;
     }
+    await new Promise((r) => setTimeout(r, 700 * attempt));
   }
   return null;
+}
+
+export function mergeGoogleAdsSnapshotPreservingOnPartialFailure(params: {
+  customerId: string;
+  startDate: string;
+  endDate: string;
+  fetchedAt: string;
+  raw: {
+    daily: Array<Record<string, unknown>> | null;
+    adGroups: Array<Record<string, unknown>> | null;
+    keywords: Array<Record<string, unknown>> | null;
+    searchTerms: Array<Record<string, unknown>> | null;
+    landingPages: Array<Record<string, unknown>> | null;
+    devices: Array<Record<string, unknown>> | null;
+    timeSchedule: Array<Record<string, unknown>> | null;
+  };
+  prevSnap?: GoogleAdsLivePeriodSnapshot | null;
+}): { snapshot: GoogleAdsLivePeriodSnapshot; isPartial: boolean } | null {
+  const { raw, prevSnap } = params;
+  const allNull =
+    raw.daily === null &&
+    raw.adGroups === null &&
+    raw.keywords === null &&
+    raw.searchTerms === null &&
+    raw.landingPages === null &&
+    raw.devices === null &&
+    raw.timeSchedule === null;
+  if (allNull) return null;
+
+  const isPartial =
+    raw.daily === null ||
+    raw.adGroups === null ||
+    raw.keywords === null ||
+    raw.searchTerms === null ||
+    raw.landingPages === null ||
+    raw.devices === null ||
+    raw.timeSchedule === null;
+
+  return {
+    isPartial,
+    snapshot: {
+      customerId: params.customerId,
+      startDate: params.startDate,
+      endDate: params.endDate,
+      fetchedAt: params.fetchedAt,
+      campaignDaily:
+        raw.daily !== null ? parseGadsCampaignDailyRows(raw.daily) : (prevSnap?.campaignDaily ?? []),
+      adGroups:
+        raw.adGroups !== null ? parseGadsAdGroupRows(raw.adGroups) : (prevSnap?.adGroups ?? []),
+      keywords:
+        raw.keywords !== null ? parseGadsKeywordRows(raw.keywords) : (prevSnap?.keywords ?? []),
+      searchTerms:
+        raw.searchTerms !== null
+          ? parseGadsSearchTermRows(raw.searchTerms)
+          : (prevSnap?.searchTerms ?? []),
+      landingPages:
+        raw.landingPages !== null
+          ? parseGadsLandingPageRows(raw.landingPages)
+          : (prevSnap?.landingPages ?? []),
+      devices:
+        raw.devices !== null ? parseGadsDeviceRows(raw.devices) : (prevSnap?.devices ?? []),
+      timeSchedule:
+        raw.timeSchedule !== null
+          ? parseGadsTimeScheduleRows(raw.timeSchedule)
+          : (prevSnap?.timeSchedule ?? []),
+    },
+  };
 }
 
 async function fetchLiveGoogleAdsPeriod(
@@ -493,50 +583,73 @@ async function fetchLiveGoogleAdsPeriod(
   startDate: string,
   endDate: string,
   headers: Record<string, string>,
-): Promise<GoogleAdsLivePeriodSnapshot | null> {
-  const qCampaignDaily = `SELECT campaign.id, campaign.name, campaign.status, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`;
-  const qAdGroups = `SELECT ad_group.id, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM ad_group WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.cost_micros DESC LIMIT 80`;
-  const qKeywords = `SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM keyword_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.cost_micros DESC LIMIT 120`;
-  const qSearchTerms = `SELECT search_term_view.search_term, search_term_view.status, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM search_term_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.impressions DESC LIMIT 150`;
-  const qLandingPages = `SELECT landing_page_view.unexpanded_final_url, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM landing_page_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.clicks DESC LIMIT 100`;
-  const qDevices = `SELECT segments.device, metrics.impressions, metrics.clicks, metrics.cost_micros FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`;
-  const qTimeSchedule = `SELECT segments.day_of_week, segments.hour, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`;
+  prevSnap?: GoogleAdsLivePeriodSnapshot | null,
+): Promise<{ snapshot: GoogleAdsLivePeriodSnapshot; isPartial: boolean } | null> {
+  const queryItems: Array<{
+    key: 'daily' | 'adGroups' | 'keywords' | 'searchTerms' | 'landingPages' | 'devices' | 'timeSchedule';
+    query: string;
+  }> = [
+    {
+      key: 'daily',
+      query: `SELECT campaign.id, campaign.name, campaign.status, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`,
+    },
+    {
+      key: 'landingPages',
+      query: `SELECT landing_page_view.unexpanded_final_url, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM landing_page_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.clicks DESC LIMIT 100`,
+    },
+    {
+      key: 'searchTerms',
+      query: `SELECT search_term_view.search_term, search_term_view.status, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM search_term_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.impressions DESC LIMIT 150`,
+    },
+    {
+      key: 'adGroups',
+      query: `SELECT ad_group.id, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM ad_group WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.cost_micros DESC LIMIT 80`,
+    },
+    {
+      key: 'keywords',
+      query: `SELECT ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group.name, campaign.name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM keyword_view WHERE segments.date BETWEEN '${startDate}' AND '${endDate}' ORDER BY metrics.cost_micros DESC LIMIT 120`,
+    },
+    {
+      key: 'devices',
+      query: `SELECT segments.device, metrics.impressions, metrics.clicks, metrics.cost_micros FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`,
+    },
+    {
+      key: 'timeSchedule',
+      query: `SELECT segments.day_of_week, segments.hour, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '${startDate}' AND '${endDate}'`,
+    },
+  ];
 
-  const [resDaily, resAg, resKw, resSt, resLp, resDev, resTime] = await Promise.all([
-    runGaqlQuery(customerId, headers, qCampaignDaily),
-    runGaqlQuery(customerId, headers, qAdGroups),
-    runGaqlQuery(customerId, headers, qKeywords),
-    runGaqlQuery(customerId, headers, qSearchTerms),
-    runGaqlQuery(customerId, headers, qLandingPages),
-    runGaqlQuery(customerId, headers, qDevices),
-    runGaqlQuery(customerId, headers, qTimeSchedule),
-  ]);
+  const raw: {
+    daily: Array<Record<string, unknown>> | null;
+    adGroups: Array<Record<string, unknown>> | null;
+    keywords: Array<Record<string, unknown>> | null;
+    searchTerms: Array<Record<string, unknown>> | null;
+    landingPages: Array<Record<string, unknown>> | null;
+    devices: Array<Record<string, unknown>> | null;
+    timeSchedule: Array<Record<string, unknown>> | null;
+  } = {
+    daily: null,
+    adGroups: null,
+    keywords: null,
+    searchTerms: null,
+    landingPages: null,
+    devices: null,
+    timeSchedule: null,
+  };
 
-  if (
-    resDaily === null &&
-    resAg === null &&
-    resKw === null &&
-    resSt === null &&
-    resLp === null &&
-    resDev === null &&
-    resTime === null
-  ) {
-    return null;
-  }
+  // Giới hạn đồng thời 3 truy vấn GAQL để tránh Google Ads API throttle/timeout làm rỗng từng bảng con
+  await runWithConcurrency(queryItems, 3, async (item) => {
+    raw[item.key] = await runGaqlQuery(customerId, headers, item.query);
+  });
 
-  return {
+  return mergeGoogleAdsSnapshotPreservingOnPartialFailure({
     customerId,
     startDate,
     endDate,
     fetchedAt: new Date().toISOString(),
-    campaignDaily: parseGadsCampaignDailyRows(resDaily || []),
-    adGroups: parseGadsAdGroupRows(resAg || []),
-    keywords: parseGadsKeywordRows(resKw || []),
-    searchTerms: parseGadsSearchTermRows(resSt || []),
-    landingPages: parseGadsLandingPageRows(resLp || []),
-    devices: parseGadsDeviceRows(resDev || []),
-    timeSchedule: parseGadsTimeScheduleRows(resTime || []),
-  };
+    raw,
+    prevSnap,
+  });
 }
 
 function triggerGadsRefreshSingleflight(
@@ -557,15 +670,18 @@ function triggerGadsRefreshSingleflight(
 
   const p = (async () => {
     try {
-      const fresh = await fetchLiveGoogleAdsPeriod(customerId, startDate, endDate, headers);
-      if (fresh) {
+      const prevSnap = store.memCache.get(key)?.data || null;
+      const merged = await fetchLiveGoogleAdsPeriod(customerId, startDate, endDate, headers, prevSnap);
+      if (merged) {
         store.backoffUntil.delete(key);
         store.memCache.delete(key);
-        store.memCache.set(key, { expiresAt: Date.now() + GADS_CACHE_TTL_MS, data: fresh });
+        // Nếu có truy vấn con bị lỗi cục bộ (partial), rút ngắn TTL còn 30s để tự phục hồi sớm
+        const ttl = merged.isPartial ? 30_000 : GADS_CACHE_TTL_MS;
+        store.memCache.set(key, { expiresAt: Date.now() + ttl, data: merged.snapshot });
         pruneGadsMemCache();
         schedulePersistGadsCache();
         bumpDomainRevisions(['tracking', 'ads', 'reports'], 'gads_live_snapshot_refreshed');
-        return fresh;
+        return merged.snapshot;
       }
       const prevFails = (store.backoffUntil.get(key)?.failures || 0) + 1;
       store.backoffUntil.set(key, {
@@ -586,6 +702,7 @@ export async function getGoogleAdsLiveSnapshotNonBlocking(
   startDate: string,
   endDate: string,
   forceBlocking = false,
+  waitOnColdMissMs = 0,
 ): Promise<GoogleAdsLivePeriodSnapshot | null> {
   if (!startDate || !endDate) return null;
   await hydrateGadsFromDbIfNeeded();
@@ -633,8 +750,26 @@ export async function getGoogleAdsLiveSnapshotNonBlocking(
   };
 
   if (!forceBlocking) {
+    if (cached?.data) {
+      void refreshFn();
+      return cached.data;
+    }
+    if (waitOnColdMissMs > 0) {
+      const pending = refreshFn();
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      try {
+        const timeoutPromise = new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), waitOnColdMissMs);
+          timer.unref?.();
+        });
+        const result = await Promise.race([pending, timeoutPromise]);
+        return result ?? store.memCache.get(key)?.data ?? null;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
     void refreshFn();
-    return cached?.data || null;
+    return null;
   }
 
   return refreshFn();

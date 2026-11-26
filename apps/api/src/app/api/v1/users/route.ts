@@ -1,5 +1,5 @@
 import { CreateUserSchema, DeleteUserSchema, UpdateUserSchema } from '@toantrung/contracts';
-import { getClientIp, jsonError, jsonSuccess } from '../../../../core/http';
+import { enforceMutationRateLimit, getClientIp, jsonError, jsonSuccess } from '../../../../core/http';
 import { requireAdminSession, requireAuthenticatedSession } from '../../../../core/permissions';
 import {
   AuthServiceError,
@@ -29,6 +29,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requireAdminSession(req);
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'users_post', auth.user.id, 30, 60_000);
+  if (limited) return limited;
 
   let body: unknown;
   try {

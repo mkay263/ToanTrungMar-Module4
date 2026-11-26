@@ -1,4 +1,5 @@
 import { TrackingTouchpointSchema } from '@toantrung/contracts';
+import { getConfiguredWebhookSecret } from '../../../../../core/config';
 import { checkRateLimit, getClientIp, jsonError, jsonSuccess, safeSecretEquals } from '../../../../../core/http';
 import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { recordTrackingTouchpoint } from '../../../../../modules/02-tracking-sync/service';
@@ -10,7 +11,7 @@ export async function POST(req: Request) {
       return jsonError('TOUCHPOINT_RATE_LIMITED', 'Vượt quá giới hạn tần suất ghi nhận điểm chạm.', 429);
     }
 
-    const configuredSecret = process.env.WEBHOOK_SECRET?.trim();
+    const configuredSecret = getConfiguredWebhookSecret();
     const providedSecret = req.headers.get('x-webhook-secret')?.trim();
     if (!configuredSecret && process.env.NODE_ENV === 'production') {
       return jsonError(

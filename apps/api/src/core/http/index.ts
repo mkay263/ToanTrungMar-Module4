@@ -64,6 +64,53 @@ export function getClientIp(req: Request): string {
   return cleaned || '127.0.0.1';
 }
 
+export function resolvePublicOrigin(req: Request, env: NodeJS.ProcessEnv = process.env): string {
+  const url = new URL(req.url);
+  const forwardedHost = req.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const hostHeader = forwardedHost || req.headers.get('host')?.trim() || '';
+  const forwardedProto = req.headers.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+  const proto =
+    forwardedProto === 'https' || forwardedProto === 'http'
+      ? forwardedProto
+      : url.protocol.replace(':', '');
+
+  if (hostHeader && !/^0\.0\.0\.0(?::\d+)?$/.test(hostHeader)) {
+    return `${proto}://${hostHeader}`;
+  }
+
+  const configuredBase = (env.PUBLIC_WEBHOOK_BASE_URL || env.RENDER_EXTERNAL_URL || '').trim();
+  if (configuredBase) {
+    try {
+      return new URL(configuredBase).origin;
+    } catch {
+      // Fallback to request URL origin
+    }
+  }
+
+  return url.origin;
+}
+
+export function enforceMutationRateLimit(
+  req: Request,
+  scope: string,
+  actorKey: string | number,
+  maxRequests = 30,
+  windowMs = 60_000,
+): NextResponse<ApiErrorPayload> | null {
+  const ip = getClientIp(req);
+  const key = `mut:${scope}:${actorKey}:${ip}`;
+  if (!checkRateLimit(key, maxRequests, windowMs)) {
+    const res = jsonError(
+      'RATE_LIMITED',
+      'Thao tác gửi quá nhanh. Vui lòng đợi một lát rồi thử lại.',
+      429,
+    );
+    res.headers.set('Retry-After', String(Math.max(1, Math.ceil(windowMs / 1000))));
+    return res;
+  }
+  return null;
+}
+
 export function jsonSuccess<T, M = Record<string, unknown>>(
   data: T,
   status = 200,

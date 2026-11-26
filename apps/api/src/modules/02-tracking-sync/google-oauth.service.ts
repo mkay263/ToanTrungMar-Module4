@@ -10,7 +10,7 @@ import type {
   SelectGoogleResourcesDto,
 } from '@toantrung/contracts';
 import { encryptSecret, decryptSecret, maskSecret } from '../../core/security/vault';
-import { getSessionSecret } from '../../core/config';
+import { APP_CONFIG, getSessionSecret } from '../../core/config';
 import { safeSecretEquals } from '../../core/http';
 import { getCanonicalDateRange, countInclusiveCalendarDays } from '../../core/reporting-dates';
 import { bumpDomainRevisions } from '../../core/cache/server-data-cache';
@@ -145,7 +145,7 @@ async function mergeAndPersistCampaignFinalUrls(
 }
 
 function getRealtimeConfigPath(): string {
-  const dir = path.join(process.cwd(), 'config');
+  const dir = path.join(APP_CONFIG.getStorageRoot(), 'config');
   if (!fs.existsSync(dir)) {
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -2475,6 +2475,7 @@ async function syncRealGoogleAds(
 
   let synced = 0;
   const domainByCampaignId = new Map<string, string | null>();
+  const campaignDbIdByExtId = new Map<string, number>();
   for (const row of catalogData.results || []) {
     const extId = String(row.campaign?.id || '').trim();
     const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
@@ -2499,7 +2500,7 @@ async function syncRealGoogleAds(
       ? BigInt(String(row.campaignBudget.amountMicros))
       : null;
 
-    await prisma.campaign.upsert({
+    const upsertedCamp = await prisma.campaign.upsert({
       where: {
         uq_campaign_platform_account_code: {
           platform: 'google_ads',
@@ -2523,6 +2524,7 @@ async function syncRealGoogleAds(
         utmCampaignSlug: slugToPersist,
       },
     });
+    campaignDbIdByExtId.set(extId, upsertedCamp.id);
     synced += 1;
   }
 
@@ -2599,6 +2601,8 @@ async function syncRealGoogleAds(
       },
     });
 
+    campaignDbIdByExtId.set(extId, campRecord.id);
+
     const impressions = Number(row.metrics?.impressions || 0);
     const clicks = Number(row.metrics?.clicks || 0);
     const spendMicros = BigInt(String(row.metrics?.costMicros || '0'));
@@ -2612,6 +2616,7 @@ async function syncRealGoogleAds(
       grain: 'campaign',
       campaignId: campRecord.id,
       campaignExternalId: extId,
+      campaignName: campName,
       impressions,
       clicks,
       spendMicros,
@@ -2619,6 +2624,172 @@ async function syncRealGoogleAds(
       isFinalized: false,
     });
     synced += 1;
+  }
+
+  // Step C: Sync daily Ad Group performance metrics (grain = 'ad_group') for durable DB fallback in M02
+  try {
+    const agGaql = `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM ad_group WHERE segments.date BETWEEN '${startStr}' AND '${endStr}' AND metrics.impressions > 0 ORDER BY metrics.cost_micros DESC LIMIT 2000`;
+    const agRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({ query: agGaql }),
+    });
+    if (agRes.ok) {
+      const agData = (await agRes.json()) as {
+        results?: Array<{
+          campaign?: { id?: string; name?: string };
+          adGroup?: { id?: string; name?: string };
+          segments?: { date?: string };
+          metrics?: {
+            impressions?: string | number;
+            clicks?: string | number;
+            costMicros?: string | number;
+            conversions?: number;
+          };
+        }>;
+      };
+      for (const row of agData.results || []) {
+        const extId = String(row.campaign?.id || '').trim();
+        const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
+        const agId = String(row.adGroup?.id || '').trim();
+        const agName = String(row.adGroup?.name || `Nhóm QC #${agId}`).trim();
+        const metricDate = String(row.segments?.date || '').trim();
+        if (!extId || !agName || !metricDate) continue;
+
+        const impressions = Number(row.metrics?.impressions || 0);
+        const clicks = Number(row.metrics?.clicks || 0);
+        const spendMicros = BigInt(String(row.metrics?.costMicros || '0'));
+        const conversionsMicros = BigInt(Math.round(Number(row.metrics?.conversions || 0) * 1_000_000));
+
+        await upsertPlatformMetricIdempotent(prisma, {
+          platform: 'google_ads',
+          accountPropertyId: targetCustomerId,
+          metricDate,
+          grain: 'ad_group',
+          campaignId: campaignDbIdByExtId.get(extId) ?? null,
+          campaignExternalId: extId,
+          campaignName: campName,
+          keywordMatchType: 'AD_GROUP',
+          keywordRaw: agName,
+          pageUrlRaw: agId || agName,
+          impressions,
+          clicks,
+          spendMicros,
+          conversionsMicros,
+          isFinalized: false,
+        });
+        synced += 1;
+      }
+    }
+  } catch {
+    // Non-fatal: campaign metrics already persisted
+  }
+
+  // Step D: Sync daily Keyword performance metrics (grain = 'keyword') -> platform_daily_metrics + seo_keywords.cachedAdsClicks
+  try {
+    const kwGaql = `SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, segments.date, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM keyword_view WHERE segments.date BETWEEN '${startStr}' AND '${endStr}' AND metrics.impressions > 0 ORDER BY metrics.clicks DESC, metrics.impressions DESC LIMIT 2500`;
+    const kwRes = await fetchGoogleAdsWithFallback(`customers/${targetCustomerId}/googleAds:search`, {
+      method: 'POST',
+      headers: baseHeaders,
+      body: JSON.stringify({ query: kwGaql }),
+    });
+    if (kwRes.ok) {
+      const kwData = (await kwRes.json()) as {
+        results?: Array<{
+          campaign?: { id?: string; name?: string };
+          adGroup?: { id?: string; name?: string };
+          adGroupCriterion?: { keyword?: { text?: string; matchType?: string } };
+          segments?: { date?: string };
+          metrics?: {
+            impressions?: string | number;
+            clicks?: string | number;
+            costMicros?: string | number;
+            conversions?: number;
+          };
+        }>;
+      };
+
+      const aggByKeywordNorm = new Map<
+        string,
+        { keyword: string; clicks: number; impressions: number }
+      >();
+
+      for (const row of kwData.results || []) {
+        const extId = String(row.campaign?.id || '').trim();
+        const campName = String(row.campaign?.name || `Chiến dịch #${extId}`).trim();
+        const agName = String(row.adGroup?.name || row.adGroup?.id || 'Nhóm quảng cáo').trim();
+        const kwText = String(row.adGroupCriterion?.keyword?.text || '').trim();
+        const matchType = String(row.adGroupCriterion?.keyword?.matchType || 'BROAD')
+          .trim()
+          .toUpperCase();
+        const metricDate = String(row.segments?.date || '').trim();
+        if (!extId || !kwText || !metricDate) continue;
+
+        const impressions = Number(row.metrics?.impressions || 0);
+        const clicks = Number(row.metrics?.clicks || 0);
+        const spendMicros = BigInt(String(row.metrics?.costMicros || '0'));
+        const conversionsMicros = BigInt(Math.round(Number(row.metrics?.conversions || 0) * 1_000_000));
+
+        await upsertPlatformMetricIdempotent(prisma, {
+          platform: 'google_ads',
+          accountPropertyId: targetCustomerId,
+          metricDate,
+          grain: 'keyword',
+          campaignId: campaignDbIdByExtId.get(extId) ?? null,
+          campaignExternalId: extId,
+          campaignName: campName,
+          keywordMatchType: matchType,
+          keywordRaw: kwText,
+          pageUrlRaw: agName,
+          impressions,
+          clicks,
+          spendMicros,
+          conversionsMicros,
+          isFinalized: false,
+        });
+        synced += 1;
+
+        const norm = kwText.toLowerCase().replace(/\s+/g, ' ');
+        const cur = aggByKeywordNorm.get(norm) || { keyword: kwText, clicks: 0, impressions: 0 };
+        cur.clicks += clicks;
+        cur.impressions += impressions;
+        aggByKeywordNorm.set(norm, cur);
+      }
+
+      // Đưa các từ khóa Google Ads có click thực tế vào bảng seo_keywords để M03 hiển thị song song Ads + SEO
+      const now = new Date();
+      for (const [norm, agg] of aggByKeywordNorm.entries()) {
+        if (agg.clicks <= 0) continue;
+        try {
+          await prisma.seoKeyword.upsert({
+            where: { keywordNorm: norm },
+            update: {
+              cachedAdsClicks: agg.clicks,
+              cacheWindowStartDate: startStr,
+              cacheWindowEndDate: endStr,
+              cacheRefreshedAt: now,
+            },
+            create: {
+              keyword: agg.keyword,
+              keywordNorm: norm,
+              cachedSearchVolume: agg.impressions,
+              cachedAdsClicks: agg.clicks,
+              cachedOrganicClicks: 0,
+              cachedAvgPosition: null,
+              cacheSourceAccountKey: `google_ads:${targetCustomerId}`,
+              cacheWindowStartDate: startStr,
+              cacheWindowEndDate: endStr,
+              cacheRefreshedAt: now,
+              trendDirection: agg.clicks >= 10 ? 'rising' : 'stable',
+            },
+          });
+        } catch {
+          // non-fatal keyword upsert
+        }
+      }
+    }
+  } catch {
+    // Non-fatal: campaign metrics already persisted
   }
 
   return { success: true, synced };

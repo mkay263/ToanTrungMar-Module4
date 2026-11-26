@@ -1133,7 +1133,8 @@ export async function warmAllDashboardDataInBackground(): Promise<void> {
       warmGscInspectionInBackground(baseScope.availableWebsites, token),
       (async () => {
         try {
-          await runWithConcurrency(presetScopes, 2, async (sc) => {
+          // Chạy tuần tự từng kỳ (concurrency=1) để tránh quá tải Google Ads GAQL gây timeout từng bảng con
+          await runWithConcurrency(presetScopes, 1, async (sc) => {
             await getGoogleAdsLiveSnapshotNonBlocking(sc.startDateStr, sc.endDateStr, true);
           });
         } catch {

@@ -28,6 +28,7 @@ import {
   type DesignAssetVersionItemDto,
   type DesignBriefDto,
   type DesignChatMessageDto,
+  type DesignPromptPreviewDto,
   type DesignRequestItemDto,
   type DesignStatus,
   type DesignTaskCode,
@@ -38,6 +39,7 @@ import {
   type LedScreenInstanceDto,
   type LedScreenShapeType,
   type MarketingBriefSubmitDto,
+  type PreparePromptPreviewDto,
   type ProjectPhotoItemDto,
   type QuadCoordinatesDto,
   type RegenerateDesignDraftDto,
@@ -459,6 +461,8 @@ function mapDesignRequestRowToDto(
       effectivePrompt?: string | null;
       actualWidthPx?: number | null;
       actualHeightPx?: number | null;
+      statelessBranching?: boolean;
+      omittedSiblingVersionsCount?: number;
     } = {};
     if (v.parametersJson) {
       try {
@@ -536,6 +540,14 @@ function mapDesignRequestRowToDto(
         : [],
       sourceVersionId: parsedVerParams.sourceVersionId ?? null,
       effectivePrompt: parsedVerParams.effectivePrompt ?? v.promptUsed ?? null,
+      statelessBranching:
+        parsedVerParams.statelessBranching !== undefined
+          ? Boolean(parsedVerParams.statelessBranching)
+          : undefined,
+      omittedSiblingVersionsCount:
+        typeof parsedVerParams.omittedSiblingVersionsCount === 'number'
+          ? parsedVerParams.omittedSiblingVersionsCount
+          : undefined,
     };
   });
 
@@ -3255,6 +3267,17 @@ export async function processChatDesignRequest(
           ? 'AI_PLUS_LAYOUT'
           : 'CLOUD_AI';
 
+    const statelessBranchingEnabled = input.statelessBranching !== false;
+    const omittedHistoryMessagesCount = statelessBranchingEnabled
+      ? (currentMeta.chatMessages || []).length
+      : 0;
+    const omittedSiblingVersionsCount =
+      statelessBranchingEnabled && sourceVersionObj
+        ? existing.assetVersions.filter(
+            (v) => v.versionNumber > sourceVersionObj.versionNumber
+          ).length
+        : 0;
+
     const createdVersion = await createDesignAssetVersionSafe(requestId, (versionNumber) => ({
       designRequestId: requestId,
       versionNumber,
@@ -3267,6 +3290,10 @@ export async function processChatDesignRequest(
         regeneratedFromVersion: existing.version,
         sourceOrigin: sourceImageOrigin,
         generationOrigin,
+        statelessBranching: statelessBranchingEnabled,
+        promptApproved: Boolean(input.promptApproved),
+        omittedHistoryMessagesCount,
+        omittedSiblingVersionsCount,
         taskCode: effectiveTaskCode,
         taskId: runningJob.jobId,
         inputAssetIds: resolvedInputAssetIds,
@@ -3316,6 +3343,15 @@ export async function processChatDesignRequest(
     const extraNotices: string[] = [];
     if (providerResult.fallbackNotice) {
       extraNotices.push(`• ⚠️ ${providerResult.fallbackNotice}`);
+    }
+    if (statelessBranchingEnabled && sourceVersionObj) {
+      const siblingPart =
+        omittedSiblingVersionsCount > 0
+          ? ` & ${omittedSiblingVersionsCount} bản nhánh sau`
+          : '';
+      extraNotices.push(
+        `• 🌿 Rẽ nhánh sạch từ v${sourceVersionObj.versionNumber}: Chỉ gửi Ảnh v${sourceVersionObj.versionNumber} + Lệnh mới (đã bỏ qua ${omittedHistoryMessagesCount} tin nhắn cũ${siblingPart} để tiết kiệm token & tránh xung đột lệnh).`
+      );
     }
     if (dbType === 'banner') {
       if (bannerResizeExplanation) extraNotices.push(`• 📐 ${bannerResizeExplanation}`);
@@ -4374,6 +4410,232 @@ export async function retryLastFailedDesignGeneration(
     asyncMode,
     idempotencyKey: `retry-design-${requestId}-${existing.version}-${Date.now()}`,
   });
+}
+
+/**
+ * Phương án 1 + Phương án 2 (Tiết kiệm Token M05):
+ * Chuẩn hóa ý tưởng thô thành Prompt Preview có cấu trúc (chỉ dùng text LLM rẻ hoặc local 0-token),
+ * TUYỆT ĐỐI KHÔNG gọi Image Generation API cho đến khi người dùng bấm Duyệt & Gọi API tạo ảnh.
+ * Đồng thời thống kê số tin nhắn cũ & phiên bản rẽ nhánh bị bỏ qua (Stateless Version Branching)
+ * và hạn mức tạo ảnh Cloud mềm của dự án.
+ */
+export async function preparePromptPreviewForDesign(
+  actor: SessionUserDto,
+  requestId: number,
+  input: PreparePromptPreviewDto
+): Promise<DesignPromptPreviewDto> {
+  await assertCanAccessDesignProject(actor, requestId);
+
+  const rawPrompt = (input.prompt || '').trim();
+  if (!rawPrompt) {
+    throw new Error('Vui lòng nhập ý tưởng hoặc câu lệnh chỉnh sửa.');
+  }
+
+  const piiCheck = containsCustomerPiiInPrompt(rawPrompt);
+  if (piiCheck.hasPii) {
+    throw new Error(
+      `ZERO_PII_BLOCKED: ${piiCheck.reason || 'Phát hiện thông tin cá nhân khách hàng (SĐT/Email/CCCD) trong nội dung prompt. Vui lòng xóa trước khi gửi tới AI.'}`
+    );
+  }
+
+  const existing = await prisma.designRequest.findUnique({
+    where: { id: requestId },
+    include: {
+      assetVersions: { orderBy: { versionNumber: 'desc' } },
+    },
+  });
+  if (!existing) {
+    throw new Error('Không tìm thấy dự án thiết kế.');
+  }
+
+  const currentMeta = parseProjectMetadata(existing.installPositionJson);
+  const photosList = currentMeta.photos || [];
+  const activePhotoObj =
+    (input.selectedPhotoId
+      ? photosList.find((p) => p.id === input.selectedPhotoId)
+      : undefined) ||
+    photosList.find((p) => p.selected) ||
+    photosList[0] ||
+    null;
+
+  const requestedParentVerId = input.parentVersionId ?? input.sourceVersionId ?? null;
+  const sourceVersionObj = requestedParentVerId
+    ? existing.assetVersions.find((v) => v.id === requestedParentVerId) || null
+    : null;
+
+  const sourceOrigin: 'version' | 'survey_photo' | 'none' = sourceVersionObj
+    ? 'version'
+    : activePhotoObj
+      ? 'survey_photo'
+      : 'none';
+
+  const sourceLabel = sourceVersionObj
+    ? `Phiên bản v${sourceVersionObj.versionNumber}`
+    : activePhotoObj
+      ? `Ảnh hiện trạng (${activePhotoObj.name || 'Chính'})`
+      : 'Khởi tạo mới từ Prompt';
+
+  const statelessBranching = input.statelessBranching !== false;
+  const omittedHistoryMessagesCount = statelessBranching
+    ? (currentMeta.chatMessages || []).length
+    : 0;
+  const omittedSiblingVersionsCount =
+    statelessBranching && sourceVersionObj
+      ? existing.assetVersions.filter((v) => v.versionNumber > sourceVersionObj.versionNumber).length
+      : 0;
+
+  const isBannerWorkflow =
+    input.taskCode === 'banner_generate' ||
+    DAO_TAO_ANH_POSTER_REGEX.test(rawPrompt) ||
+    existing.requestType === 'banner';
+  const workflow: 'perspective_3d' | 'banner' = isBannerWorkflow ? 'banner' : 'perspective_3d';
+
+  const cleanIdea = rawPrompt
+    .replace(DAO_TAO_ANH_POSTER_REGEX, '')
+    .replace(DAO_TAO_ANH_REGEX, '')
+    .trim() || rawPrompt;
+
+  const widthM = currentMeta.screenWidthM ?? 4.8;
+  const heightM = currentMeta.screenHeightM ?? 2.7;
+  const pitch = currentMeta.pixelPitch || 'P2.5 Indoor';
+  const screenStyle = currentMeta.screenStyle || 'flat';
+  const aspectRatio = input.aspectRatio || existing.aspectRatio || '16:9';
+  const bannerW = input.designBrief?.outputWidthPx || currentMeta.bannerWidthPx || 1536;
+  const bannerH = input.designBrief?.outputHeightPx || currentMeta.bannerHeightPx || 1024;
+
+  const designSpecsSummary =
+    workflow === 'banner'
+      ? `Banner/Poster ${bannerW}×${bannerH}px (${aspectRatio})`
+      : `Màn hình LED ${pitch} · ${widthM}m × ${heightM}m (${screenStyle === 'curved' ? 'Cong' : screenStyle === 'corner_90' ? 'Góc 90°' : 'Phẳng'}) · Tỷ lệ ${aspectRatio}`;
+
+  // Count successful Cloud image renders used in this project (soft quota guardrail = 5)
+  const cloudRendersUsedInProject = await prisma.aiUsageLog.count({
+    where: {
+      designRequestId: requestId,
+      status: 'success',
+      taskType: { not: 'chat' },
+    },
+  });
+  const projectSoftQuotaLimit = 5;
+  const quotaWarning =
+    cloudRendersUsedInProject >= projectSoftQuotaLimit
+      ? `Dự án đã dùng ${cloudRendersUsedInProject}/${projectSoftQuotaLimit} lượt tạo ảnh Cloud. Hãy rà kỹ Prompt bên dưới hoặc giữ chế độ Nháp 1K để tránh lãng phí token.`
+      : null;
+
+  // Build deterministic zero-token structured prompt fallback
+  const buildLocalStructuredPrompt = (): string => {
+    const prefix = workflow === 'banner' ? '@TaoAnhPoster:' : '@TaoAnh:';
+    const anchorClause = sourceVersionObj
+      ? `Giữ nguyên bố cục cốt lõi từ ${sourceLabel}, chỉ áp dụng đúng thay đổi mới:`
+      : workflow === 'banner'
+        ? `Thiết kế ấn phẩm quảng cáo Toàn Trung LED (${bannerW}×${bannerH}px, tỷ lệ ${aspectRatio}), bố cục gọn gàng, chữ rõ nét, ánh sáng thương hiệu hiện đại:`
+        : `Phối cảnh lắp đặt ${designSpecsSummary}, giữ nguyên kiến trúc hiện trạng, ánh sáng phản chiếu tự nhiên, không sai lệch tỷ lệ màn hình:`;
+    return `${prefix} ${anchorClause} ${cleanIdea}`;
+  };
+
+  let refinedPrompt = buildLocalStructuredPrompt();
+  let refinerSource: 'gemini_text' | 'local_structured' = 'local_structured';
+  let estimatedTextTokens = 0;
+
+  // Optional cheap text-only refinement using gemini-2.5-flash (ZERO image API call!)
+  const { config: aiCatalogCfg } = AiDesignProviderFactory.getCatalog();
+  const geminiCred = resolveEffectiveProviderCredential('google_imagen', aiCatalogCfg);
+  const shouldCallGeminiText =
+    Boolean(geminiCred.apiKey) &&
+    process.env.NODE_ENV !== 'test' &&
+    !process.env.DISABLE_GEMINI_PROMPT_REFINER;
+
+  if (shouldCallGeminiText && geminiCred.apiKey) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 7000);
+    try {
+      const systemPrompt = [
+        'Bạn là Chuyên gia tối ưu Prompt thiết kế hình ảnh LED Toàn Trung.',
+        'Nhiệm vụ: Viết lại ý tưởng thô của người dùng thành 1 câu lệnh ngắn gọn, sắc nét, tự đầy đủ ngữ cảnh (tối đa 75 từ tiếng Việt) để gửi sang API tạo ảnh.',
+        'Quy tắc bắt buộc:',
+        '- KHÔNG hỏi ngược lại, KHÔNG giải thích dài dòng, KHÔNG tạo markdown bullet.',
+        '- Giữ đúng tiền tố lệnh gốc (' + (workflow === 'banner' ? '@TaoAnhPoster:' : '@TaoAnh:') + ').',
+        '- Không bịa thông tin khách hàng/PII, giữ nguyên thông số kỹ thuật: ' + designSpecsSummary + '.',
+        sourceVersionObj
+          ? `- Đang rẽ nhánh chỉnh sửa trực tiếp từ ${sourceLabel}: chỉ giữ đúng yêu cầu sửa đổi mới, không nhắc lại lỗi các phiên bản trước.`
+          : '- Mô tả rõ bố cục, ánh sáng, chất liệu màn hình LED sắc nét, chuyên nghiệp.',
+      ].join('\n');
+
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(geminiCred.apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: `${systemPrompt}\n\nÝ tưởng thô: ${cleanIdea}` }],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.35,
+              maxOutputTokens: 220,
+            },
+          }),
+        }
+      );
+      if (resp.ok) {
+        const json = (await resp.json()) as {
+          candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
+          usageMetadata?: { totalTokenCount?: number };
+        };
+        const candidateText = json.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+        if (candidateText && candidateText.length >= 12 && !containsCustomerPiiInPrompt(candidateText).hasPii) {
+          const normalized = candidateText.replace(/^["'`]+|["'`]+$/g, '').trim();
+          const hasTag = DAO_TAO_ANH_REGEX.test(normalized) || DAO_TAO_ANH_POSTER_REGEX.test(normalized);
+          refinedPrompt = hasTag
+            ? normalized
+            : `${workflow === 'banner' ? '@TaoAnhPoster:' : '@TaoAnh:'} ${normalized}`;
+          refinerSource = 'gemini_text';
+          estimatedTextTokens =
+            json.usageMetadata?.totalTokenCount ||
+            Math.max(60, Math.round((systemPrompt.length + cleanIdea.length + refinedPrompt.length) / 3.5));
+        }
+      }
+    } catch {
+      // Gracefully keep deterministic local_structured prompt (0 tokens)
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const quality: 'draft' | 'high_quality' = input.quality === 'high_quality' ? 'high_quality' : 'draft';
+  const estimatedImageCostUsd =
+    input.providerId === 'local_sandbox'
+      ? '$0.00 (Local Studio)'
+      : quality === 'high_quality'
+        ? '~$0.08 – $0.12 / ảnh Final'
+        : '~$0.02 – $0.04 / ảnh Nháp 1K';
+
+  return {
+    requestId,
+    rawInstruction: rawPrompt,
+    refinedPrompt,
+    workflow,
+    quality,
+    modelId: input.modelId || 'gemini-2.5-flash-image',
+    sourceOrigin,
+    sourceVersionId: sourceVersionObj?.id ?? null,
+    sourceVersionNumber: sourceVersionObj?.versionNumber ?? null,
+    sourceLabel,
+    statelessBranching,
+    omittedHistoryMessagesCount,
+    omittedSiblingVersionsCount,
+    designSpecsSummary,
+    estimatedTextTokens,
+    estimatedImageCostUsd,
+    cloudRendersUsedInProject,
+    projectSoftQuotaLimit,
+    quotaWarning,
+    refinerSource,
+  };
 }
 
 export {

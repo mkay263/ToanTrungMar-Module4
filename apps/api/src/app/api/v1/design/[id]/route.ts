@@ -7,6 +7,7 @@ import {
   ChatDesignRequestSchema,
   GenerateLedScreenContentRequestSchema,
   LedQuickInstallRequestSchema,
+  PreparePromptPreviewSchema,
   RegenerateDesignDraftSchema,
   UpdateDesignProjectSchema,
 } from '@toantrung/contracts';
@@ -27,6 +28,7 @@ import {
   ForbiddenDesignProjectAccessError,
   generateLedScreenContent,
   getDesignProjectForUser,
+  preparePromptPreviewForDesign,
   processChatDesignRequest,
   regenerateDesignDraftByAi,
   retryLastFailedDesignGeneration,
@@ -101,6 +103,7 @@ export async function PATCH(
     }
 
     const aiDesignOnlyActions = new Set([
+      'prepare_prompt_preview',
       'retry_last_failed',
       'chat_edit',
       'approve_version',
@@ -137,6 +140,19 @@ export async function PATCH(
       const statusCode =
         res && typeof res === 'object' && 'accepted' in res && res.accepted ? 202 : 200;
       return jsonSuccess(res, statusCode);
+    }
+
+    if (action === 'prepare_prompt_preview') {
+      const parsed = PreparePromptPreviewSchema.safeParse(raw);
+      if (!parsed.success) {
+        return jsonError(
+          'VALIDATION_ERROR',
+          parsed.error.issues[0]?.message || 'Yêu cầu chuẩn hóa Prompt không hợp lệ.',
+          400
+        );
+      }
+      const res = await preparePromptPreviewForDesign(auth.user, requestId, parsed.data);
+      return jsonSuccess(res);
     }
 
     if (action === 'chat_edit') {

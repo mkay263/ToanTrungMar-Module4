@@ -2,7 +2,7 @@ import {
   CreateSeoKeywordSchema,
   GenerateSeoDraftByAiSchema,
 } from '@toantrung/contracts';
-import { jsonError, jsonSuccess } from '../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../core/http';
 import { requirePermissionSession } from '../../../../core/permissions';
 import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
@@ -52,6 +52,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requirePermissionSession(req, 'AI_MARKETING_SEO');
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'ads_post', auth.user.id, 30, 60_000);
+  if (limited) return limited;
 
   try {
     const raw = (await req.json()) as Record<string, unknown>;
@@ -63,7 +65,7 @@ export async function POST(req: Request) {
         return jsonError('VALIDATION_ERROR', 'Mã từ khóa cần xoá không hợp lệ.', 400);
       }
       await deleteSeoKeywordById(auth.user, kwId);
-      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'delete_seo_keyword');
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports', 'tracking'], 'delete_seo_keyword');
       return jsonSuccess({ deletedId: kwId });
     }
 
@@ -109,7 +111,7 @@ export async function POST(req: Request) {
             ? raw.recommendedPublishWindow.trim()
             : undefined,
       });
-      bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'upsert_seo_keyword');
+      bumpDomainRevisions(['ads', 'seo_articles', 'reports', 'tracking'], 'upsert_seo_keyword');
       return jsonSuccess({ id: created.id, keyword: created.keyword }, 201);
     }
 
@@ -123,7 +125,7 @@ export async function POST(req: Request) {
     }
 
     const article = await generateSeoArticleDraftByAi(auth.user, parsed.data);
-    bumpDomainRevisions(['ads', 'seo_articles', 'reports'], 'generate_seo_draft');
+    bumpDomainRevisions(['ads', 'seo_articles', 'reports', 'tracking'], 'generate_seo_draft');
     return jsonSuccess({ id: article.id, title: article.title }, 201);
   } catch (err) {
     return jsonError(

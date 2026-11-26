@@ -1,3 +1,11 @@
+import type {
+  M04PeriodBreakdownDto,
+  M04ProductCatalogRowDto,
+  M04ProductCategoryGroup,
+  M04ProductCategorySummaryDto,
+  M04UnclassifiedProductHintDto,
+} from '../04-reports';
+
 export interface WebsiteConfigItemDto {
   websiteId: string;
   shortName: string;
@@ -292,6 +300,11 @@ export interface M02AdsSectionDto {
     searchTerms?: M02AdsSearchTermRowDto[];
     landingPages?: M02AdsLandingPageRowDto[];
     timeSchedule?: M02AdsTimeScheduleRowDto[];
+    dataState?: 'READY' | 'SYNCING' | 'NO_ACTIVITY_IN_PERIOD' | 'AUTH_ERROR' | 'UNCONFIGURED';
+    fetchedAt?: string | null;
+    adGroupAvailabilityNote?: string | null;
+    landingPageAvailabilityNote?: string | null;
+    searchTermAvailabilityNote?: string | null;
     keywordAvailabilityNote: string | null;
     devices: Array<{ device: string; cost: number; clicks: number; impressions: number }>;
     regions: Array<{ region: string; cost: number; clicks: number; impressions: number }>;
@@ -617,6 +630,7 @@ export interface M04ResultsReportDto {
     adCost?: number | null;
     isMissingDay?: boolean;
   }>;
+  periodBreakdown?: M04PeriodBreakdownDto;
   previousTimeSeries?: Array<{
     bucketStart: string;
     label: string;
@@ -726,13 +740,28 @@ export interface M04ResultsReportDto {
     }>;
     byProduct: Array<{
       productId: number;
+      productCode?: string;
       productName: string;
+      categoryGroup?: M04ProductCategoryGroup;
+      categoryLabel?: string;
+      unit?: string;
       isUnclassifiedProduct?: boolean;
       leadCount: number;
       validCount: number;
+      newLeadCount?: number;
+      quotingCount?: number;
       quotedCount: number;
+      quoteSentCount?: number;
+      overdueCount?: number;
       wonCount: number;
+      lostCount?: number;
+      winRatePct?: number | null;
+      shareOfClassifiedPct?: number | null;
+      requestedDimensions?: string[];
     }>;
+    byProductCatalog?: M04ProductCatalogRowDto[];
+    productCategorySummaries?: M04ProductCategorySummaryDto[];
+    unclassifiedProductHints?: M04UnclassifiedProductHintDto[];
     pendingActionLeads: PaginatedTableDto<{
       leadId: number;
       leadCode: string;

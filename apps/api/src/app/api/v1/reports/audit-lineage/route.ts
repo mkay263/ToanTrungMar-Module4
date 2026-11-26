@@ -80,6 +80,7 @@ export async function GET(req: Request) {
           await Promise.all([
             prisma.platformDailyMetric.findMany({
               where: {
+                grain: { in: ['account', 'campaign'] },
                 metricDate: { gte: ago7dStr },
                 OR: [{ spendMicros: { gt: 0 } }, { clicks: { gt: 15 } }],
               },

@@ -1,7 +1,12 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 const { seedCatalogOnly } = require('./seed');
+
+const defaultDbFile = path.resolve(__dirname, '../prisma/independent_v2.db').replace(/\\/g, '/');
+const defaultDbUrl = defaultDbFile.startsWith('/') ? `file://${defaultDbFile}` : `file:${defaultDbFile}`;
 
 const FORBIDDEN_DEFAULT_PASSWORDS = new Set([
   'toantrung@2026',
@@ -16,6 +21,22 @@ function hashPassword(password) {
   return `scrypt$${salt}$${derived}`;
 }
 
+function ensureSqliteParentDir(dbUrl) {
+  if (!dbUrl || !dbUrl.startsWith('file:')) return;
+  let filePath = dbUrl.startsWith('file://')
+    ? dbUrl.slice('file://'.length)
+    : dbUrl.slice('file:'.length);
+  if (/^\/[a-zA-Z]:/.test(filePath)) {
+    filePath = filePath.slice(1);
+  }
+  filePath = decodeURIComponent(filePath.split('?')[0] || '');
+  if (!filePath || filePath === ':memory:') return;
+  const resolved = path.isAbsolute(filePath)
+    ? filePath
+    : path.resolve(__dirname, '../prisma', filePath);
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
+}
+
 function getPrismaClient() {
   const explicitPg =
     process.env.DATABASE_URL && /^postgres(ql)?:\/\//i.test(process.env.DATABASE_URL)
@@ -25,12 +46,22 @@ function getPrismaClient() {
         : null;
 
   if (explicitPg) {
+    process.env.PG_DATABASE_URL = explicitPg;
     const { PrismaClient } = require('../generated/postgres-client');
     return new PrismaClient({ datasources: { db: { url: explicitPg } } });
   }
 
+  const targetDbUrl =
+    process.env.DATABASE_URL &&
+    process.env.DATABASE_URL !== 'file:./independent_v2.db' &&
+    process.env.DATABASE_URL !== 'file:./dev.db'
+      ? process.env.DATABASE_URL
+      : defaultDbUrl;
+
+  process.env.DATABASE_URL = targetDbUrl;
+  ensureSqliteParentDir(targetDbUrl);
   const { PrismaClient } = require('@prisma/client');
-  return new PrismaClient();
+  return new PrismaClient({ datasources: { db: { url: targetDbUrl } } });
 }
 
 async function provisionAdminFromEnv(options = {}) {

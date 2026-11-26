@@ -17,7 +17,9 @@ import {
 } from '../../core/website-catalog';
 import { getOrComputeScopedCache } from '../../core/cache/server-data-cache';
 import {
+  classifyCampaignWebsiteAttribution,
   classifyGscDateBySourceMetadata,
+  getCampaignFinalUrlsMapNonBlocking,
   getGoogleAdsApiConfig,
   getGoogleConnection,
   getGscDataStateMetadataMap,
@@ -26,6 +28,8 @@ import {
   getCachedGscSiteStatus,
   getGa4LiveSnapshotsForProperties,
 } from '../02-tracking-sync/ga4-live-cache.service';
+import { getGoogleAdsLiveSnapshotNonBlocking } from '../02-tracking-sync/gads-live-cache.service';
+import { mergeCanonicalAdsCampaignDailyMetrics } from '../../core/unified-ads-metrics';
 import { getGscLiveSnapshotsForSites } from './gsc-live-cache.service';
 import {
   getGoogleTrendsExploreExtras,
@@ -82,16 +86,25 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     bypassCache: params?.bypassCache,
     compute: async () => {
       const checkedAt = new Date().toISOString();
-      const [googleConn, adsCfg, realAdsCatalogCount] = await Promise.all([
+      const [googleConn, adsCfg, realAdsCatalog] = await Promise.all([
     getGoogleConnection(),
     getGoogleAdsApiConfig(),
-    prisma.campaign.count({
+    prisma.campaign.findMany({
       where: {
         platform: 'google_ads',
         NOT: [{ accountExternalId: 'default' }, { accountExternalId: { startsWith: 'GA4-' } }],
       },
+      select: {
+        id: true,
+        campaignCode: true,
+        campaignName: true,
+        platform: true,
+        isActive: true,
+        utmCampaignSlug: true,
+      },
     }),
   ]);
+  const realAdsCatalogCount = realAdsCatalog.length;
   const hasAdsToken =
     Boolean(adsCfg?.developerToken) ||
     Boolean(
@@ -122,6 +135,9 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     liveTrendsSnap,
     serpApiKey,
     trendsExtras,
+    rawAdsCampaignMetrics,
+    gadsLiveSnap,
+    finalUrlsMap,
   ] = await Promise.all([
     gscSites.length > 0
       ? prisma.platformDailyMetric.findMany({
@@ -223,6 +239,38 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     getGoogleTrendsLiveSnapshot(false).catch(() => null),
     getSerpApiTrendsKey().catch(() => null),
     getGoogleTrendsExploreExtras().catch(() => null),
+    prisma.platformDailyMetric.findMany({
+      where: {
+        platform: { in: ['google_ads', 'facebook_ads', 'facebook'] },
+        grain: 'campaign',
+        metricDate: { gte: scope.startDateStr, lte: scope.endDateStr },
+        NOT: [
+          { accountPropertyId: { startsWith: 'GA4-' } },
+          { campaignExternalId: { startsWith: 'ga4_' } },
+          { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
+        ],
+      },
+      select: {
+        platform: true,
+        campaignExternalId: true,
+        metricDate: true,
+        spendMicros: true,
+        impressions: true,
+        clicks: true,
+        conversionsMicros: true,
+        pageUrlRaw: true,
+        campaign: {
+          select: {
+            campaignName: true,
+            campaignCode: true,
+            utmCampaignSlug: true,
+            isActive: true,
+          },
+        },
+      },
+    }),
+    getGoogleAdsLiveSnapshotNonBlocking(scope.startDateStr, scope.endDateStr, false),
+    getCampaignFinalUrlsMapNonBlocking(),
   ]);
 
   let organicSessionsFromGa4: number | null = null;
@@ -906,6 +954,162 @@ export async function getM03AdsSeoDashboardSpec(params?: {
     hasPreliminaryGsc = true;
   }
 
+  // Đồng bộ 1 nguồn số liệu Google Ads thống nhất với M02, M04 và Tổng quan
+  const mergedAdsFacts = mergeCanonicalAdsCampaignDailyMetrics({
+    dbRows: rawAdsCampaignMetrics,
+    gadsLiveSnap,
+    realAdsCatalog,
+    finalUrlsMap,
+    startDateStr: scope.startDateStr,
+    endDateStr: scope.endDateStr,
+  });
+  const scopedAdsFacts = !scope.selectedWebsite
+    ? mergedAdsFacts
+    : mergedAdsFacts.filter((f) => {
+        const attr = classifyCampaignWebsiteAttribution(
+          f.campaign.campaignName,
+          f.finalUrls,
+          f.campaign.utmCampaignSlug,
+        );
+        return (
+          attr.status === 'SINGLE_WEBSITE' &&
+          attr.domain &&
+          matchesWebsiteDomain(attr.domain, scope.selectedWebsite)
+        );
+      });
+
+  const adsCampMap = new Map<
+    string,
+    {
+      campaignId: string;
+      campaignName: string;
+      status: string;
+      channelType: string;
+      spendMicros: bigint;
+      impressions: number;
+      clicks: number;
+      conversionsMicros: bigint;
+    }
+  >();
+  const adsDayMap = new Map<string, { spendMicros: bigint; clicks: number; conversionsMicros: bigint }>();
+  for (const f of scopedAdsFacts) {
+    const cid = f.campaignExternalId;
+    const cur = adsCampMap.get(cid) || {
+      campaignId: cid,
+      campaignName: f.campaign.campaignName,
+      status: f.status,
+      channelType: f.platform,
+      spendMicros: 0n,
+      impressions: 0,
+      clicks: 0,
+      conversionsMicros: 0n,
+    };
+    cur.spendMicros += f.spendMicros;
+    cur.impressions += f.impressions;
+    cur.clicks += f.clicks;
+    cur.conversionsMicros += f.conversionsMicros;
+    adsCampMap.set(cid, cur);
+
+    const dCur = adsDayMap.get(f.metricDate) || { spendMicros: 0n, clicks: 0, conversionsMicros: 0n };
+    dCur.spendMicros += f.spendMicros;
+    dCur.clicks += f.clicks;
+    dCur.conversionsMicros += f.conversionsMicros;
+    adsDayMap.set(f.metricDate, dCur);
+  }
+
+  const hasScopedAdsData = scopedAdsFacts.length > 0;
+  const unifiedAdSpendMicros = scopedAdsFacts.reduce((s, f) => s + f.spendMicros, 0n);
+  const unifiedAdCost = hasScopedAdsData
+    ? Number((Number(unifiedAdSpendMicros) / 1_000_000).toFixed(0))
+    : hasAdsToken && !scope.selectedWebsite
+      ? 0
+      : null;
+  const unifiedAdImpr = hasScopedAdsData
+    ? scopedAdsFacts.reduce((s, f) => s + f.impressions, 0)
+    : hasAdsToken && !scope.selectedWebsite
+      ? 0
+      : null;
+  const unifiedAdClicks = hasScopedAdsData
+    ? scopedAdsFacts.reduce((s, f) => s + f.clicks, 0)
+    : hasAdsToken && !scope.selectedWebsite
+      ? 0
+      : null;
+  const unifiedAdConv = hasScopedAdsData
+    ? Number(
+        (
+          Number(scopedAdsFacts.reduce((s, f) => s + f.conversionsMicros, 0n)) / 1_000_000
+        ).toFixed(2),
+      )
+    : hasAdsToken && !scope.selectedWebsite
+      ? 0
+      : null;
+  const unifiedAdCtrPct =
+    unifiedAdClicks !== null && unifiedAdImpr !== null && unifiedAdImpr > 0
+      ? Number(((unifiedAdClicks / unifiedAdImpr) * 100).toFixed(2))
+      : null;
+  const unifiedAvgCpc =
+    unifiedAdCost !== null && unifiedAdClicks !== null && unifiedAdClicks > 0
+      ? Math.round(unifiedAdCost / unifiedAdClicks)
+      : null;
+  const unifiedAvgCpm =
+    unifiedAdCost !== null && unifiedAdImpr !== null && unifiedAdImpr > 0
+      ? Math.round((unifiedAdCost / unifiedAdImpr) * 1000)
+      : null;
+  const unifiedCostPerConv =
+    unifiedAdCost !== null && unifiedAdConv !== null && unifiedAdConv > 0
+      ? Math.round(unifiedAdCost / unifiedAdConv)
+      : null;
+
+  const adsLeadCountByCamp = new Map<string, number>();
+  for (const l of validAdLeads) {
+    const ck = (l.tracking?.utmCampaign || l.tracking?.campaignName || '').trim().toLowerCase();
+    if (!ck) continue;
+    adsLeadCountByCamp.set(ck, (adsLeadCountByCamp.get(ck) || 0) + 1);
+  }
+
+  const unifiedCampaignRows = Array.from(adsCampMap.values())
+    .map((c) => {
+      const cost = Number((Number(c.spendMicros) / 1_000_000).toFixed(0));
+      const conv = Number((Number(c.conversionsMicros) / 1_000_000).toFixed(2));
+      const matchedLeads =
+        adsLeadCountByCamp.get(c.campaignName.trim().toLowerCase()) ||
+        adsLeadCountByCamp.get(c.campaignId.trim().toLowerCase()) ||
+        0;
+      return {
+        campaignId: c.campaignId,
+        campaignName: c.campaignName,
+        status: c.status,
+        channelType: c.channelType,
+        cost,
+        impressions: c.impressions,
+        clicks: c.clicks,
+        ctrPct: c.impressions > 0 ? Number(((c.clicks / c.impressions) * 100).toFixed(2)) : null,
+        cpc: c.clicks > 0 ? Math.round(cost / c.clicks) : null,
+        conversions: conv,
+        validLeadCount: matchedLeads,
+        cpl: computeCostPerValidAdLead(cost, matchedLeads),
+      };
+    })
+    .sort((a, b) => b.cost - a.cost || b.clicks - a.clicks);
+
+  const unifiedAdDailySeries = seoDailySeries.map((pt) => {
+    const hit = adsDayMap.get(pt.date);
+    if (!hit) {
+      return {
+        date: pt.date,
+        cost: hasAdsToken ? 0 : null,
+        clicks: hasAdsToken ? 0 : null,
+        conversions: hasAdsToken ? 0 : null,
+      };
+    }
+    return {
+      date: pt.date,
+      cost: Number((Number(hit.spendMicros) / 1_000_000).toFixed(0)),
+      clicks: hit.clicks,
+      conversions: Number((Number(hit.conversionsMicros) / 1_000_000).toFixed(2)),
+    };
+  });
+
   return {
     scope: {
       websiteId: scope.websiteId,
@@ -916,7 +1120,7 @@ export async function getM03AdsSeoDashboardSpec(params?: {
       timezone: scope.timezone,
       isTodayIncluded: scope.isTodayIncluded,
       cohortDefinition:
-        'Dữ liệu tìm kiếm tự nhiên (Search Console cấp site), lưu lượng tìm kiếm tự nhiên (GA4) và bài viết SEO trong kỳ',
+        'Dữ liệu tìm kiếm tự nhiên (Search Console cấp site), lưu lượng tự nhiên (GA4) và Quảng cáo Google Ads đồng bộ cùng phạm vi với M02 & M04',
       previousStartDate: scope.prevStartDateStr,
       previousEndDate: scope.prevEndDateStr,
     },
@@ -956,37 +1160,48 @@ export async function getM03AdsSeoDashboardSpec(params?: {
           ? `Có ${websiteFormLeadsWithoutUtm.length} Lead biểu mẫu từ website chưa gắn tham số UTM/nguồn tìm kiếm nên không tự cộng vào "Lead từ tìm kiếm tự nhiên".`
           : null,
     },
-    version: `m03-${scope.websiteId}-${scope.startDateStr}-${scope.endDateStr}-${totalClicks ?? 'null'}`,
+    version: `m03-${scope.websiteId}-${scope.startDateStr}-${scope.endDateStr}-${totalClicks ?? 'null'}-${unifiedAdCost ?? 'null'}`,
     ads: {
       status: hasAdsToken ? 'CONNECTED' : 'UNCONFIGURED',
       statusMessage: hasAdsToken
-        ? 'Đã kết nối tài khoản Google Ads v26 qua OAuth. Xem chi tiết chiến dịch và chi tiêu tại mục Chiến dịch → Quảng cáo.'
+        ? 'Đã đồng bộ số liệu Google Ads thống nhất với M02 (Chiến dịch) và M04 (Báo cáo).'
         : 'Chưa kết nối tài khoản Google OAuth có quyền Google Ads. Vui lòng xem chi tiết kết nối tại mục Cài đặt hoặc Chiến dịch.',
       currencyCode: 'VND',
       metrics: {
-        adCost: null,
-        adImpressions: null,
-        adClicks: null,
-        adCtrPct: null,
-        averageCpc: null,
-        averageCpm: null,
-        adConversions: null,
-        costPerConversion: null,
+        adCost: unifiedAdCost,
+        adImpressions: unifiedAdImpr,
+        adClicks: unifiedAdClicks,
+        adCtrPct: unifiedAdCtrPct,
+        averageCpc: unifiedAvgCpc,
+        averageCpm: unifiedAvgCpm,
+        adConversions: unifiedAdConv,
+        costPerConversion: unifiedCostPerConv,
         validAdLeadCount: validAdLeads.length,
-        costPerValidAdLead: computeCostPerValidAdLead(null, validAdLeads.length),
+        costPerValidAdLead: computeCostPerValidAdLead(unifiedAdCost, validAdLeads.length),
       },
       charts: {
-        adDailySeries: [],
-        topCampaigns: [],
+        adDailySeries: unifiedAdDailySeries,
+        topCampaigns: unifiedCampaignRows.slice(0, 8),
       },
       tables: {
-        campaigns: paginateArray([], params?.page || 1, params?.pageSize || 20),
-        adGroups: [],
-        keywords: [],
+        campaigns: paginateArray(unifiedCampaignRows, params?.page || 1, params?.pageSize || 20),
+        adGroups: gadsLiveSnap?.adGroups || [],
+        keywords: (gadsLiveSnap?.keywords || []).map((k) => ({
+          keyword: k.keywordText,
+          matchType: k.matchType,
+          adGroupName: k.adGroupName,
+          campaignName: k.campaignName,
+          impressions: k.impressions,
+          clicks: k.clicks,
+          ctrPct: k.ctrPct,
+          cost: k.cost,
+          conversions: k.conversions,
+          cpa: k.conversions > 0 ? Math.round(k.cost / k.conversions) : null,
+        })),
         keywordAvailabilityNote: hasAdsToken
           ? null
           : 'Chưa kết nối tài khoản quảng cáo.',
-        deviceBreakdown: [],
+        deviceBreakdown: gadsLiveSnap?.devices || [],
         geoBreakdown: [],
       },
     },

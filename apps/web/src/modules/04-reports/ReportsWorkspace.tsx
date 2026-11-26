@@ -8,6 +8,7 @@ import {
   UI_VOCABULARY,
   formatSafePeriodComparison,
   hasBaPermission,
+  type M04ReportGranularity,
   type M04ResultsReportDto,
   type ReportsDashboardDto,
   type WebsiteConfigItemDto,
@@ -35,6 +36,7 @@ import {
   Search,
   Send,
   Sparkles,
+  Upload,
   Users,
   X,
 } from 'lucide-react';
@@ -52,6 +54,10 @@ import {
   type VerticalNavItem,
 } from '@/components/common/VerticalSectionNav';
 import { ReportsPerformanceChart } from './ReportsPerformanceChart';
+import { PeriodBreakdownBar } from './PeriodBreakdownBar';
+import { PeriodBreakdownTable } from './PeriodBreakdownTable';
+import { ProductCatalogBreakdownPanel } from './ProductCatalogBreakdownPanel';
+import { ReportExcelImportModal } from './ReportExcelImportModal';
 import {
   FunnelAnomalyGuardStrip,
   KpiAuditLineageDrawer,
@@ -208,6 +214,11 @@ export function ReportsWorkspace() {
   const [showPrevPeriod, setShowPrevPeriod] = useState<boolean>(
     () => loadRouteState<{ showPrevPeriod?: boolean }>('reports')?.showPrevPeriod ?? true,
   );
+  const [granularity, setGranularity] = useState<M04ReportGranularity>(
+    () => loadRouteState<{ granularity?: M04ReportGranularity }>('reports')?.granularity || 'day',
+  );
+  const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
+  const [importBatchesCount, setImportBatchesCount] = useState<number>(0);
   const [rightCardMode, setRightCardMode] = useState<'channel' | 'pipeline'>('channel');
 
   // Công cụ chia nhanh chỉ số A ÷ B kiểu Excel trong Đối chiếu nguồn
@@ -275,6 +286,7 @@ export function ReportsWorkspace() {
       view: 'spec',
       websiteId: scope.websiteId || 'all',
       preset: scope.preset || '7D',
+      granularity,
       pendingPage: String(pendingPage),
       pageSize: '20',
     });
@@ -283,7 +295,7 @@ export function ReportsWorkspace() {
       params.set('to', scope.to);
     }
     return `/api/v1/reports?${params.toString()}`;
-  }, [scope, pendingPage]);
+  }, [scope, pendingPage, granularity]);
 
   const activeQueryUrlRef = useRef<string>(queryUrl);
   activeQueryUrlRef.current = queryUrl;
@@ -443,7 +455,7 @@ export function ReportsWorkspace() {
     }
 
     const unsubscribe = subscribeDataSync(
-      ['reports', 'leads', 'tracking', 'ads', 'design', 'websites'],
+      ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'seo_reports', 'design', 'websites', 'auth'],
       () => {
         void loadReports({ forceFresh: true, silent: true });
       },
@@ -553,6 +565,7 @@ export function ReportsWorkspace() {
     const params = new URLSearchParams({
       websiteId: scope.websiteId || 'all',
       preset: start && end ? 'custom' : scope.preset || '30d',
+      granularity,
     });
     if (start) params.set('fromDate', start);
     if (end) params.set('toDate', end);
@@ -920,7 +933,7 @@ export function ReportsWorkspace() {
         },
         {
           id: 'products',
-          label: 'Nhu cầu sản phẩm',
+          label: '25 Mặt hàng Toàn Trung',
           icon: Package,
           badge: classifiedProductRows.length > 0 ? classifiedProductRows.length : null,
         },
@@ -1013,6 +1026,19 @@ export function ReportsWorkspace() {
               <>
                 <button
                   type="button"
+                  onClick={() => setImportModalOpen(true)}
+                  className="h-8 px-3 rounded-lg border border-blue-200 bg-blue-50/75 hover:bg-blue-100/75 text-xs font-semibold text-[#0F275C] inline-flex items-center gap-1.5"
+                >
+                  <Upload className="h-3.5 w-3.5 text-[#1553A2]" />
+                  <span>Import Excel</span>
+                  {importBatchesCount > 0 && (
+                    <span className="rounded-full bg-[#1553A2] text-white px-1.5 py-0.2 text-[10px] font-bold tabular-nums">
+                      {importBatchesCount}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
                   onClick={handleExportExcel}
                   className="h-8 px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 inline-flex items-center gap-1.5"
                 >
@@ -1032,6 +1058,30 @@ export function ReportsWorkspace() {
           </div>
         }
       />
+
+      {activeSection !== 'shared_files' && (
+        <PeriodBreakdownBar
+          granularity={granularity}
+          scope={scope}
+          resolvedStartDate={data?.scope.startDate}
+          resolvedEndDate={data?.scope.endDate}
+          onChangeGranularity={(next) => {
+            setGranularity(next);
+            saveRouteState('reports', {
+              ...(loadRouteState<Record<string, unknown>>('reports') || {}),
+              granularity: next,
+            });
+          }}
+          onApplyRange={(patch, nextGran) => {
+            setGranularity(nextGran);
+            saveRouteState('reports', {
+              ...(loadRouteState<Record<string, unknown>>('reports') || {}),
+              granularity: nextGran,
+            });
+            updateScope(patch);
+          }}
+        />
+      )}
 
       {error && (
         <div className="rounded-[12px] border border-red-200 bg-red-50 p-3 text-xs text-red-800 flex items-center gap-2">
@@ -1389,6 +1439,10 @@ export function ReportsWorkspace() {
                       </div>
                     </div>
                   </div>
+
+                  {data.periodBreakdown && (
+                    <PeriodBreakdownTable periodBreakdown={data.periodBreakdown} />
+                  )}
 
                   {/* Điểm cần chú ý & Hành động */}
                   <div className="rounded-[16px] border border-slate-200 bg-white p-4 shadow-xs space-y-3">
@@ -2260,136 +2314,41 @@ export function ReportsWorkspace() {
                 </div>
               )}
 
-              {/* ======================= PHÂN MỤC 4: NHU CẦU SẢN PHẨM ======================= */}
+              {/* ======================= PHÂN MỤC 4: NHU CẦU 25 MẶT HÀNG TOÀN TRUNG ======================= */}
               {activeSection === 'products' && (
-                <div className="space-y-4">
-                  <section className="rounded-[16px] border border-slate-200 bg-white p-4 shadow-xs space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h2 className="text-sm font-bold text-[#0F172A]">
-                        Phân bố nhu cầu theo dòng sản phẩm
-                      </h2>
-                      {data.charts.multiProductNote && (
-                        <span className="text-xs text-slate-500">
-                          {data.charts.multiProductNote}
-                        </span>
-                      )}
-                    </div>
-                    {classifiedProductRows.length === 0 ? (
-                      <p className="text-xs text-slate-500 py-4">
-                        Chưa có Lead gắn dòng sản phẩm trong kỳ đang chọn.
-                      </p>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2.5">
-                        {classifiedProductRows.slice(0, 10).map((p) => {
-                          const wPct = Math.max(4, Math.round((p.leadCount / maxProductLead) * 100));
-                          return (
-                            <div key={p.productId} className="space-y-1">
-                              <div className="flex items-center justify-between text-xs">
-                                <span className="font-medium text-slate-800 truncate pr-2">
-                                  {p.productName}
-                                </span>
-                                <span className="font-semibold text-slate-900 tabular-nums shrink-0">
-                                  {p.leadCount} lượt hỏi ·{' '}
-                                  <span className="text-emerald-700">{p.wonCount} chốt</span>
-                                </span>
-                              </div>
-                              <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
-                                <div
-                                  className="h-full rounded-full bg-[#1E3A8A]"
-                                  style={{ width: `${wPct}%` }}
-                                />
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </section>
-
-                  <section className="rounded-[16px] border border-slate-200 bg-white shadow-xs overflow-hidden">
-                    <MktSpreadsheetCalcBar
-                      title={`Chi tiết theo dòng sản phẩm (${data.tables.byProduct.length})`}
-                      excelMode={quickCalc.excelMode}
-                      onToggleExcelMode={quickCalc.toggleExcelMode}
-                      stats={quickCalc.stats}
-                      onClear={quickCalc.clearSelection}
-                    />
-                    <div tabIndex={0} role="region" aria-label="Bảng nhu cầu sản phẩm" className="overflow-x-auto">
-                      <table className="w-full text-xs text-left tabular-nums border-separate border-spacing-0 [&_td]:border-r [&_td]:border-b [&_td]:border-slate-200/80 [&_th]:border-r [&_th]:border-b [&_th]:border-slate-200">
-                        <thead className="bg-slate-100 text-slate-600 uppercase border-b border-slate-200">
-                          <tr className="bg-slate-200/75 text-[10px] font-mono font-bold text-slate-500 select-none">
-                            {['A', 'B', 'C', 'D', 'E', 'F'].map((l) => (
-                              <th key={`prod-col-${l}`} scope="col" className="py-1 px-2 text-center">{l}</th>
-                            ))}
-                          </tr>
-                          <tr>
-                            <th className="px-4 py-2.5">Sản phẩm</th>
-                            <th className="px-3 py-2.5 text-right">Lead quan tâm</th>
-                            <th className="px-3 py-2.5 text-right">Hợp lệ</th>
-                            <th className="px-3 py-2.5 text-right">Đã báo giá</th>
-                            <th className="px-3 py-2.5 text-right">Chốt</th>
-                            <th className="px-4 py-2.5 text-right">Tỷ lệ chốt</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100">
-                          {data.tables.byProduct.length === 0 ? (
-                            <tr>
-                              <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
-                                Chưa có dữ liệu sản phẩm trong phạm vi đang chọn.
-                              </td>
-                            </tr>
-                          ) : (
-                            data.tables.byProduct.map((p) => {
-                              const winPctNum =
-                                p.validCount > 0 ? Number(((p.wonCount / p.validCount) * 100).toFixed(1)) : null;
-                              const winPct = winPctNum !== null ? `${winPctNum}%` : '—';
-                              return (
-                                <tr
-                                  key={`${p.productId}-${p.productName}`}
-                                  className="odd:bg-white even:bg-slate-50/40 hover:bg-blue-50/30"
-                                >
-                                  <td className="px-4 py-2.5 font-medium text-slate-800">
-                                    {p.productName}
-                                  </td>
-                                  <td
-                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:lead`, 'Lead quan tâm', p.leadCount)}
-                                    className={`px-3 py-2.5 text-right ${quickCalc.cellClass(`prod:${p.productId}:lead`)}`}
-                                  >
-                                    {p.leadCount}
-                                  </td>
-                                  <td
-                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:valid`, 'Hợp lệ', p.validCount)}
-                                    className={`px-3 py-2.5 text-right font-semibold text-indigo-700 ${quickCalc.cellClass(`prod:${p.productId}:valid`)}`}
-                                  >
-                                    {p.validCount}
-                                  </td>
-                                  <td
-                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:quoted`, 'Đã báo giá', p.quotedCount)}
-                                    className={`px-3 py-2.5 text-right ${quickCalc.cellClass(`prod:${p.productId}:quoted`)}`}
-                                  >
-                                    {p.quotedCount}
-                                  </td>
-                                  <td
-                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:won`, 'Chốt', p.wonCount)}
-                                    className={`px-3 py-2.5 text-right font-semibold text-emerald-700 ${quickCalc.cellClass(`prod:${p.productId}:won`)}`}
-                                  >
-                                    {p.wonCount}
-                                  </td>
-                                  <td
-                                    onClick={() => quickCalc.toggleCell(`prod:${p.productId}:win`, 'Tỷ lệ chốt', winPctNum)}
-                                    className={`px-4 py-2.5 text-right text-slate-600 ${quickCalc.cellClass(`prod:${p.productId}:win`)}`}
-                                  >
-                                    {winPct}
-                                  </td>
-                                </tr>
-                              );
-                            })
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </section>
-                </div>
+                <ProductCatalogBreakdownPanel
+                  catalogRows={
+                    data.tables.byProductCatalog && data.tables.byProductCatalog.length > 0
+                      ? data.tables.byProductCatalog
+                      : data.tables.byProduct.map((p) => ({
+                          productId: p.productId,
+                          productCode: p.productCode || (p.isUnclassifiedProduct ? 'CHUA_GAN_MA' : `SP_${p.productId}`),
+                          productName: p.productName,
+                          categoryGroup: p.categoryGroup || (p.isUnclassifiedProduct ? 'unclassified' : 'other'),
+                          categoryLabel: p.categoryLabel || (p.isUnclassifiedProduct ? 'Chưa gắn mã sản phẩm' : 'Khác'),
+                          unit: p.unit || 'bộ',
+                          isUnclassifiedProduct: Boolean(p.isUnclassifiedProduct),
+                          leadCount: p.leadCount,
+                          validCount: p.validCount,
+                          newLeadCount: p.newLeadCount ?? 0,
+                          quotingCount: p.quotingCount ?? 0,
+                          quotedCount: p.quotedCount,
+                          quoteSentCount: p.quoteSentCount ?? 0,
+                          overdueCount: p.overdueCount ?? 0,
+                          wonCount: p.wonCount,
+                          lostCount: p.lostCount ?? 0,
+                          winRatePct:
+                            p.winRatePct ??
+                            (p.validCount > 0 ? Number(((p.wonCount / p.validCount) * 100).toFixed(1)) : null),
+                          shareOfClassifiedPct: p.shareOfClassifiedPct ?? null,
+                          requestedDimensions: p.requestedDimensions ?? [],
+                        }))
+                  }
+                  categorySummaries={data.tables.productCategorySummaries || []}
+                  unclassifiedHints={data.tables.unclassifiedProductHints || []}
+                  multiProductNote={data.charts.multiProductNote}
+                  leadsDrilldownHref={buildLeadsDrilldownHref({})}
+                />
               )}
             </>
           ) : null}
@@ -2555,6 +2514,20 @@ export function ReportsWorkspace() {
         fromDate={data?.scope.startDate}
         toDate={data?.scope.endDate}
       />
+
+      {canExport && (
+        <ReportExcelImportModal
+          open={importModalOpen}
+          onClose={() => setImportModalOpen(false)}
+          csrfToken={user?.csrfToken}
+          websiteId={scope.websiteId || 'all'}
+          preset={scope.preset || '30D'}
+          fromDate={data?.scope.startDate || scope.from}
+          toDate={data?.scope.endDate || scope.to}
+          granularity={granularity}
+          onBatchesChanged={setImportBatchesCount}
+        />
+      )}
     </div>
   );
 }

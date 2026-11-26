@@ -1,6 +1,6 @@
 import { hasBaPermission } from '@toantrung/contracts';
 import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
-import { jsonError, jsonSuccess } from '../../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../../core/http';
 import {
   requireAuthenticatedSession,
   requirePermissionSession,
@@ -58,6 +58,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requireAuthenticatedSession(req);
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'gmail_sync_post', auth.user.id, 20, 60_000);
+  if (limited) return limited;
   if (
     !hasBaPermission(auth.user.roleCode, 'LEAD_CREATE') &&
     auth.user.roleCode !== 'MKT_LEAD'

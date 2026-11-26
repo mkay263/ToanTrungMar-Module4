@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { prisma } from '@toantrung/database';
 import { APP_CONFIG } from '../../../../../core/config';
-import { getClientIp, jsonError, jsonSuccess } from '../../../../../core/http';
+import { enforceMutationRateLimit, getClientIp, jsonError, jsonSuccess } from '../../../../../core/http';
 import { logServerEvent, summarizeError } from '../../../../../core/logging/logger';
 import { requireAdminSession } from '../../../../../core/permissions';
 import { updateBrandingMetadata } from '../../../../../core/storage/branding.service';
@@ -232,6 +232,8 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const auth = await requireAdminSession(req);
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'settings_backup_post', auth.user.id, 10, 60_000);
+  if (limited) return limited;
 
   let body: {
     action?: 'save_company_profile' | 'create_backup';

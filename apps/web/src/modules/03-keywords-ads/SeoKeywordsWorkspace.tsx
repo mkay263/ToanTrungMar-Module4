@@ -343,7 +343,7 @@ export function SeoKeywordsWorkspace() {
     }
 
     const unsubscribe = subscribeDataSync(
-      ['ads', 'seo_articles', 'seo_reports', 'tracking', 'websites'],
+      ['ads', 'seo_articles', 'seo_reports', 'tracking', 'leads', 'websites'],
       () => {
         void fetchDashboard({ forceFresh: true, silent: true });
       },

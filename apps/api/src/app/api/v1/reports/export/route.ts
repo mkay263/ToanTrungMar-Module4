@@ -14,11 +14,14 @@ export async function GET(request: Request) {
     const toDate = url.searchParams.get('to') ?? url.searchParams.get('toDate') ?? undefined;
     const formatParam = url.searchParams.get('format');
     const format = formatParam === 'csv' ? 'csv' : 'xlsx';
+    const granularity = url.searchParams.get('granularity');
+    const mode = url.searchParams.get('mode') === 'template' ? 'template' : 'report';
 
     const { buffer, fileName, mimeType } = await generateScopedReportExportBuffer(
       auth.user,
-      { websiteId, preset, fromDate, toDate },
-      format
+      { websiteId, preset, fromDate, toDate, granularity },
+      format,
+      { mode, granularity },
     );
 
     return new Response(new Uint8Array(buffer), {

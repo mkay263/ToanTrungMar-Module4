@@ -1574,7 +1574,7 @@ async function runSyncLeadsFromGmailInternal(options?: {
   ]);
 
   if (summary.created > 0) {
-    bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'gmail_leads_synced');
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads', 'notifications'], 'gmail_leads_synced');
   }
 
   return {

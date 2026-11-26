@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@toantrung/database';
 import { hasBaPermission } from '@toantrung/contracts';
 import { jsonError, jsonSuccess } from '../../../../../../core/http';
+import { bumpDomainRevisions } from '../../../../../../core/cache/server-data-cache';
 import { requirePermissionSession } from '../../../../../../core/permissions';
 import { readPrivateBusinessFile } from '../../../../../../core/storage/private-files.service';
 import {
@@ -152,6 +153,7 @@ export async function PATCH(
       declaredMimeType: body.mimeType || null,
     });
 
+    bumpDomainRevisions(['leads', 'reports'], 'update_lead_attachment');
     return jsonSuccess({ id: updated.id, fileName: updated.fileName });
   } catch (err) {
     return jsonError(
@@ -187,6 +189,7 @@ export async function DELETE(
       actor: auth.user,
       attachmentId,
     });
+    bumpDomainRevisions(['leads', 'reports'], 'delete_lead_attachment');
     return jsonSuccess(deleted);
   } catch (err) {
     return jsonError(

@@ -1,5 +1,5 @@
 import { hasBaPermission } from '@toantrung/contracts';
-import { jsonError, jsonSuccess } from '../../../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import {
   syncAllGoogleDataAcrossModules,
@@ -13,6 +13,8 @@ export async function POST(req: Request) {
   try {
     const auth = await requireAuthenticatedSession(req, { requireCsrf: true });
     if (!auth.ok) return auth.response;
+    const limited = enforceMutationRateLimit(req, 'google_sync_post', auth.user.id, 10, 60_000);
+    if (limited) return limited;
 
     const canSync =
       hasBaPermission(auth.user.roleCode, 'TRACKING_ADS_OPTIMIZE') ||

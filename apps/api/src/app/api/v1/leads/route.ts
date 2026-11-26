@@ -1,6 +1,6 @@
 import { CreateManualLeadSchema } from '@toantrung/contracts';
 import { prisma } from '@toantrung/database';
-import { jsonError, jsonSuccess } from '../../../../core/http';
+import { enforceMutationRateLimit, jsonError, jsonSuccess } from '../../../../core/http';
 import { bumpDomainRevisions } from '../../../../core/cache/server-data-cache';
 import {
   requireAuthenticatedSession,
@@ -109,6 +109,8 @@ export async function PATCH(req: Request) {
 export async function POST(req: Request) {
   const auth = await requirePermissionSession(req, 'LEAD_CREATE');
   if (!auth.ok) return auth.response;
+  const limited = enforceMutationRateLimit(req, 'leads_post', auth.user.id, 60, 60_000);
+  if (limited) return limited;
 
   try {
     const raw = await req.json();
@@ -123,7 +125,7 @@ export async function POST(req: Request) {
     }
 
     const created = await createManualLead(auth.user, parsed.data);
-    bumpDomainRevisions(['leads', 'reports', 'tracking', 'notifications'], 'create_manual_lead');
+    bumpDomainRevisions(['leads', 'reports', 'tracking', 'ads', 'notifications'], 'create_manual_lead');
     return jsonSuccess({ id: created.id, leadCode: created.leadCode }, 201);
   } catch (err) {
     return jsonError(

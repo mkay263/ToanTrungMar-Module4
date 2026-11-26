@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { jsonError, jsonSuccess } from '../../../../../../core/http';
+import { jsonError, jsonSuccess, resolvePublicOrigin } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import {
   buildGoogleAuthorizeUrl,
@@ -23,7 +23,7 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const returnPath = sanitizeOAuthReturnPath(url.searchParams.get('returnPath'));
     const redirectMode = url.searchParams.get('redirect') === 'true';
-    const origin = url.origin;
+    const origin = resolvePublicOrigin(req);
 
     const result = await buildGoogleAuthorizeUrl(origin, returnPath);
 

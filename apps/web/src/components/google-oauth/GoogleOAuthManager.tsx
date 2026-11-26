@@ -16,6 +16,7 @@ import {
 import type { GoogleOAuthStatusDto, GoogleOAuthClientConfigDto } from '@toantrung/contracts';
 import { apiRequest } from '@/core/http/client';
 import { useSession } from '@/core/session/SessionContext';
+import { ConfirmDialog } from '@/core/components/ui/ModalDialog';
 
 interface GoogleOAuthManagerProps {
   compact?: boolean;
@@ -38,6 +39,7 @@ export function GoogleOAuthManager({
 
   // Config modal
   const [showConfigModal, setShowConfigModal] = useState(false);
+  const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const [clientIdInput, setClientIdInput] = useState('');
   const [clientSecretInput, setClientSecretInput] = useState('');
 
@@ -187,8 +189,11 @@ export function GoogleOAuthManager({
     }
   };
 
-  const handleDisconnect = async () => {
-    if (!confirm('Bạn có chắc chắn muốn ngắt kết nối tài khoản Google khỏi hệ thống?')) return;
+  const handleDisconnect = () => {
+    setShowDisconnectConfirm(true);
+  };
+
+  const confirmDisconnectGoogle = async () => {
     setBusy(true);
     setErrorMsg(null);
     try {
@@ -202,6 +207,7 @@ export function GoogleOAuthManager({
       });
       setStatus(res.status);
       setFeedbackMsg(res.message);
+      setShowDisconnectConfirm(false);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Lỗi ngắt kết nối Google.');
     } finally {
@@ -788,6 +794,18 @@ export function GoogleOAuthManager({
           </form>
         </div>
       )}
+
+      <ConfirmDialog
+        open={showDisconnectConfirm}
+        onClose={() => setShowDisconnectConfirm(false)}
+        onConfirm={confirmDisconnectGoogle}
+        title="Ngắt kết nối tài khoản Google"
+        message="Bạn có chắc chắn muốn ngắt kết nối tài khoản Google khỏi hệ thống? Các đồng bộ GA4, Search Console và Gmail Sync sẽ tạm dừng cho tới khi kết nối lại."
+        confirmLabel="Ngắt kết nối"
+        cancelLabel="Giữ kết nối"
+        variant="danger"
+        busy={busy}
+      />
     </div>
   );
 }

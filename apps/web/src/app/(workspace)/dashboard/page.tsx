@@ -287,7 +287,7 @@ export default function DashboardPage() {
 
     let syncDebounceTimer: number | null = null;
     const unsubscribe = subscribeDataSync(
-      ['reports', 'leads', 'tracking', 'ads', 'design', 'websites', 'notifications'],
+      ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'seo_reports', 'design', 'websites', 'auth', 'notifications'],
       (ev) => {
         const needsPersonal = ev.domains.some(
           (d) => d === 'leads' || d === 'notifications' || d === 'design',

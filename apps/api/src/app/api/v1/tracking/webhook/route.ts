@@ -1,5 +1,6 @@
 import { prisma } from '@toantrung/database';
 import { WebhookLeadIntakeSchema } from '@toantrung/contracts';
+import { getConfiguredWebhookSecret } from '../../../../../core/config';
 import { checkRateLimit, getClientIp, jsonError, jsonSuccess, safeSecretEquals } from '../../../../../core/http';
 import { bumpDomainRevisions } from '../../../../../core/cache/server-data-cache';
 import { ingestWebhookLeadWithErrorProtection } from '../../../../../modules/02-tracking-sync/service';
@@ -16,7 +17,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const configuredSecret = process.env.WEBHOOK_SECRET?.trim();
+    const configuredSecret = getConfiguredWebhookSecret();
     const providedSecret = req.headers.get('x-webhook-secret')?.trim();
     if (!configuredSecret && process.env.NODE_ENV === 'production') {
       return jsonError(
@@ -76,7 +77,7 @@ export async function POST(req: Request) {
 
     const res = await ingestWebhookLeadWithErrorProtection(parsed.data);
     if (!res.deduplicated) {
-      bumpDomainRevisions(['leads', 'tracking', 'reports', 'notifications'], 'webhook_lead_intake');
+      bumpDomainRevisions(['leads', 'tracking', 'ads', 'reports', 'notifications'], 'webhook_lead_intake');
     }
     return jsonSuccess(res, res.deduplicated ? 200 : 201);
   } catch (err) {

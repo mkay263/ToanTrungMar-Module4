@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { resolvePublicOrigin } from '../../../../../../core/http';
 import { requireAuthenticatedSession } from '../../../../../../core/permissions';
 import {
   handleGoogleOAuthCallback,
@@ -13,7 +14,7 @@ export async function GET(req: Request) {
   const code = url.searchParams.get('code');
   const stateStr = url.searchParams.get('state');
   const error = url.searchParams.get('error');
-  const origin = url.origin;
+  const origin = resolvePublicOrigin(req);
 
   const stateVerification = verifySignedOAuthState(stateStr);
   const returnPath = stateVerification.returnPath;

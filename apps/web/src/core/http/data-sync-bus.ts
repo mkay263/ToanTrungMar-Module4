@@ -21,7 +21,7 @@ export interface DataSyncEventPayload {
 export function inferDomainsFromApiPath(rawPath: string): SyncDomain[] {
   const path = rawPath.split('?')[0] || '';
   if (path.startsWith('/api/v1/leads')) {
-    return ['leads', 'reports', 'tracking', 'notifications', 'design'];
+    return ['leads', 'reports', 'tracking', 'ads', 'notifications', 'design'];
   }
   if (
     path.startsWith('/api/v1/tracking') ||
@@ -31,16 +31,16 @@ export function inferDomainsFromApiPath(rawPath: string): SyncDomain[] {
     return ['tracking', 'ads', 'reports', 'leads', 'websites'];
   }
   if (path.startsWith('/api/v1/ads/seo-reports')) {
-    return ['seo_reports', 'ads', 'seo_articles'];
+    return ['seo_reports', 'ads', 'seo_articles', 'reports'];
   }
   if (path.startsWith('/api/v1/ads/articles')) {
     return ['seo_articles', 'ads', 'reports'];
   }
   if (path.startsWith('/api/v1/ads')) {
-    return ['ads', 'seo_articles', 'seo_reports', 'reports'];
+    return ['ads', 'seo_articles', 'seo_reports', 'tracking', 'reports'];
   }
   if (path.startsWith('/api/v1/reports')) {
-    return ['reports'];
+    return ['reports', 'notifications'];
   }
   if (path.startsWith('/api/v1/design')) {
     return ['design', 'leads', 'reports', 'notifications'];
@@ -51,8 +51,8 @@ export function inferDomainsFromApiPath(rawPath: string): SyncDomain[] {
   if (path.startsWith('/api/v1/settings/branding') || path.startsWith('/api/v1/settings/backup')) {
     return ['branding'];
   }
-  if (path.startsWith('/api/v1/users')) {
-    return ['auth', 'leads', 'design'];
+  if (path.startsWith('/api/v1/users') || path.startsWith('/api/v1/profile')) {
+    return ['auth', 'leads', 'reports', 'design'];
   }
   if (path.startsWith('/api/v1/workers')) {
     return [
@@ -73,7 +73,7 @@ export function inferDomainsFromApiPath(rawPath: string): SyncDomain[] {
 export function inferReadDependenciesForApiPath(rawPath: string): SyncDomain[] {
   const path = rawPath.split('?')[0] || '';
   if (path.startsWith('/api/v1/leads')) {
-    return ['leads', 'design', 'auth'];
+    return ['leads', 'design', 'tracking', 'websites', 'auth'];
   }
   if (path.startsWith('/api/v1/tracking')) {
     return ['tracking', 'leads', 'ads', 'websites'];
@@ -82,21 +82,21 @@ export function inferReadDependenciesForApiPath(rawPath: string): SyncDomain[] {
     return ['seo_reports', 'ads', 'seo_articles', 'websites'];
   }
   if (path.startsWith('/api/v1/ads')) {
-    return ['ads', 'seo_articles', 'seo_reports', 'tracking', 'websites'];
+    return ['ads', 'seo_articles', 'seo_reports', 'tracking', 'leads', 'websites'];
   }
   if (path.startsWith('/api/v1/reports')) {
-    return ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'design', 'websites'];
+    return ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'seo_reports', 'design', 'websites', 'auth'];
   }
   if (path.startsWith('/api/v1/design')) {
-    return ['design', 'leads'];
+    return ['design', 'leads', 'auth'];
   }
   if (path.startsWith('/api/v1/notifications')) {
-    return ['notifications'];
+    return ['notifications', 'reports'];
   }
   if (path.startsWith('/api/v1/settings/branding')) {
     return ['branding'];
   }
-  if (path.startsWith('/api/v1/users')) {
+  if (path.startsWith('/api/v1/users') || path.startsWith('/api/v1/profile')) {
     return ['auth'];
   }
   return ['leads', 'tracking', 'ads', 'reports', 'design', 'notifications'];

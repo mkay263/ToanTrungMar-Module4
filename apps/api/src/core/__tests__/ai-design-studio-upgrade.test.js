@@ -434,6 +434,7 @@ const {
   ForbiddenDesignProjectAccessError,
   createDesignRequestWithAiDraft,
   addProjectPhoto,
+  preparePromptPreviewForDesign,
   processChatDesignRequest,
   getDesignProjectForUser,
   deleteDesignProject,
@@ -962,6 +963,100 @@ test('IX-13: Gửi trùng một yêu cầu (cùng idempotencyKey) không tạo h
 
     const detail = await getDesignProjectForUser(DESIGNER_ACTOR, proj.id);
     assert.equal(detail.project.assetVersions.length, 1, 'Chỉ được tạo đúng 1 version duy nhất khi gửi trùng idempotencyKey');
+  } finally {
+    await deleteDesignProject(DESIGNER_ACTOR, proj.id);
+  }
+});
+
+test('IX-15: Phương án 1 (Duyệt Prompt trước, 0 gọi API ảnh) & Phương án 2 (Rẽ nhánh sạch từ v1 bỏ qua v2 và lịch sử chat cũ)', async () => {
+  const W = 80;
+  const H = 60;
+  const photoBuf = encodeRgbToPng({ width: W, height: H, rgb: new Uint8Array(W * H * 3).fill(110) });
+
+  const proj = await createDesignRequestWithAiDraft(DESIGNER_ACTOR, {
+    designType: 'perspective_3d',
+    projectName: 'Test Token Saving M05 V4',
+    productId: 1,
+    ledModuleSpec: 'P2.5 Indoor',
+    screenWidthM: 4.8,
+    screenHeightM: 2.7,
+    aiPrompt: '[INIT_PROJECT] Test V4 Token Saving',
+    quality: 'draft',
+  });
+
+  try {
+    const p1 = await addProjectPhoto(DESIGNER_ACTOR, proj.id, {
+      photoName: 'Sảnh chính',
+      fileName: 'lobby.png',
+      mimeType: 'image/png',
+      base64Data: photoBuf.toString('base64'),
+    });
+
+    // 1. Create v1 and v2 so we can simulate branching back from v1 while skipping v2
+    const v1 = await processChatDesignRequest(DESIGNER_ACTOR, proj.id, {
+      prompt: '@taoanh Ghép màn LED P2.5 tông xanh dương showroom hiện đại',
+      providerId: 'local_sandbox',
+      selectedPhotoId: p1.id,
+      quality: 'draft',
+    });
+    assert.equal(v1.versionNumber, 1);
+
+    const v2 = await processChatDesignRequest(DESIGNER_ACTOR, proj.id, {
+      prompt: '@taoanh Đổi sang tông đỏ rực (bản thử nghiệm v2 không ưng ý)',
+      providerId: 'local_sandbox',
+      sourceVersionId: v1.versionId,
+      quality: 'draft',
+    });
+    assert.equal(v2.versionNumber, 2);
+
+    // 2. Zero-PII check on preparePromptPreviewForDesign
+    await assert.rejects(
+      () =>
+        preparePromptPreviewForDesign(DESIGNER_ACTOR, proj.id, {
+          prompt: '@taoanh Ghép màn LED liên hệ 0912345678',
+          quality: 'draft',
+          statelessBranching: true,
+        }),
+      /ZERO_PII_BLOCKED/
+    );
+
+    // 3. Phương án 1: Prepare prompt preview anchored to v1 (while v2 exists) -> MUST NOT create a new version!
+    const preview = await preparePromptPreviewForDesign(DESIGNER_ACTOR, proj.id, {
+      prompt: '@taoanh Giữ bố cục v1 nhưng đổi ánh sáng sang tông vàng ấm sang trọng',
+      quality: 'draft',
+      sourceVersionId: v1.versionId,
+      parentVersionId: v1.versionId,
+      statelessBranching: true,
+      providerId: 'local_sandbox',
+    });
+
+    assert.equal(preview.requestId, proj.id);
+    assert.equal(preview.sourceVersionId, v1.versionId);
+    assert.equal(preview.sourceVersionNumber, 1);
+    assert.equal(preview.statelessBranching, true);
+    assert.ok(preview.omittedHistoryMessagesCount >= 4, 'Phải báo đã cắt ít nhất 4 tin nhắn chat cũ');
+    assert.equal(preview.omittedSiblingVersionsCount, 1, 'Phải báo đã bỏ qua 1 bản nhánh sau (v2)');
+    assert.ok(preview.refinedPrompt.length > 10);
+    assert.equal(preview.projectSoftQuotaLimit, 5);
+
+    const afterPreview = await getDesignProjectForUser(DESIGNER_ACTOR, proj.id);
+    assert.equal(afterPreview.project.assetVersions.length, 2, 'Preview tuyệt đối không được gọi API tạo version mới');
+
+    // 4. Phương án 2: User approves preview -> creates v3 cleanly branched from v1 (skipping v2)
+    const v3 = await processChatDesignRequest(DESIGNER_ACTOR, proj.id, {
+      prompt: preview.refinedPrompt,
+      providerId: 'local_sandbox',
+      sourceVersionId: v1.versionId,
+      parentVersionId: v1.versionId,
+      quality: 'draft',
+      statelessBranching: true,
+      promptApproved: true,
+    });
+    assert.equal(v3.versionNumber, 3);
+    assert.equal(v3.sourceVersionId, v1.versionId);
+
+    const lastAssistantMsg = [...v3.chatMessages].reverse().find((m) => m.role === 'assistant');
+    assert.ok(lastAssistantMsg?.text?.includes('Rẽ nhánh sạch từ v1'), 'Phải ghi nhận thông báo rẽ nhánh sạch từ v1');
   } finally {
     await deleteDesignProject(DESIGNER_ACTOR, proj.id);
   }

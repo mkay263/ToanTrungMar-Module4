@@ -327,6 +327,8 @@ export interface DesignAssetVersionItemDto {
   referenceProductPhotoIds?: string[];
   sourceVersionId?: number | null;
   effectivePrompt?: string | null;
+  statelessBranching?: boolean;
+  omittedSiblingVersionsCount?: number;
 }
 
 export interface DesignRequestItemDto {
@@ -544,6 +546,8 @@ export const ChatDesignRequestSchema = z.object({
   disableLocalFallback: z.boolean().optional(),
   idempotencyKey: z.string().trim().max(120).optional(),
   asyncMode: z.boolean().optional(),
+  statelessBranching: z.boolean().optional(),
+  promptApproved: z.boolean().optional(),
 });
 
 export type ChatDesignRequestDto = z.infer<typeof ChatDesignRequestSchema>;
@@ -868,5 +872,47 @@ export interface LedPlacementRecipeDto {
   bezelThicknessPx: number;
   transparencyPct: number;
   createdAt: string;
+}
+
+// ================= V4: Token-Saving Prompt Approval & Stateless Version Branching =================
+
+export const PreparePromptPreviewSchema = z.object({
+  action: z.literal('prepare_prompt_preview').optional(),
+  prompt: z.string().trim().min(2, 'Vui lòng nhập ý tưởng hoặc yêu cầu chỉnh sửa.').max(2000),
+  taskCode: DesignTaskCodeSchema.optional(),
+  quality: z.enum(['draft', 'high_quality']).default('draft'),
+  sourceVersionId: z.coerce.number().int().positive().optional().nullable(),
+  parentVersionId: z.coerce.number().int().positive().optional().nullable(),
+  selectedPhotoId: z.string().trim().max(120).optional().nullable(),
+  aspectRatio: z.string().trim().max(30).optional().nullable(),
+  providerId: z.string().trim().optional(),
+  modelId: z.string().trim().max(120).optional(),
+  statelessBranching: z.boolean().default(true),
+  designBrief: DesignBriefSchema.optional().nullable(),
+});
+
+export type PreparePromptPreviewDto = z.infer<typeof PreparePromptPreviewSchema>;
+
+export interface DesignPromptPreviewDto {
+  requestId: number;
+  rawInstruction: string;
+  refinedPrompt: string;
+  workflow: 'perspective_3d' | 'banner';
+  quality: 'draft' | 'high_quality';
+  modelId: string;
+  sourceOrigin: 'version' | 'survey_photo' | 'none';
+  sourceVersionId: number | null;
+  sourceVersionNumber: number | null;
+  sourceLabel: string;
+  statelessBranching: boolean;
+  omittedHistoryMessagesCount: number;
+  omittedSiblingVersionsCount: number;
+  designSpecsSummary: string;
+  estimatedTextTokens: number;
+  estimatedImageCostUsd: string;
+  cloudRendersUsedInProject: number;
+  projectSoftQuotaLimit: number;
+  quotaWarning: string | null;
+  refinerSource: 'gemini_text' | 'local_structured';
 }
 

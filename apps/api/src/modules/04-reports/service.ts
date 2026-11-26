@@ -41,7 +41,14 @@ import {
 import { shouldAnonymizeLeadForRole } from '../01-leads/service';
 import { getUserCoverMap } from '../../core/auth/service';
 import { getGa4LiveSnapshotsForProperties } from '../02-tracking-sync/ga4-live-cache.service';
-import { getGoogleConnection } from '../02-tracking-sync/google-oauth.service';
+import { getGoogleAdsLiveSnapshotNonBlocking } from '../02-tracking-sync/gads-live-cache.service';
+import {
+  classifyCampaignWebsiteAttribution,
+  getCampaignFinalUrlsMapNonBlocking,
+  getGoogleConnection,
+} from '../02-tracking-sync/google-oauth.service';
+import { getGscLiveSnapshotsForSites } from '../03-keywords-ads/gsc-live-cache.service';
+import { mergeCanonicalAdsCampaignDailyMetrics } from '../../core/unified-ads-metrics';
 import { AiDesignProviderFactory } from '../05-ai-design/providers';
 
 function isAnonymizedViewerRole(roleCode: SessionUserDto['roleCode']): boolean {
@@ -271,7 +278,7 @@ export async function getScopedReportsDashboard(
 
   const cacheResult = await getOrComputeScopedCache({
     key: `m04-dash:${scopedUserKey}:${scope.websiteId}:${scope.presetLabelKey}:${fromDateStr}:${toDateStr}:${isCompact ? 'compact' : 'full'}`,
-    domains: ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'design', 'websites', 'auth'],
+    domains: ['reports', 'leads', 'tracking', 'ads', 'seo_articles', 'seo_reports', 'design', 'websites', 'auth'],
     ttlMs: 30_000,
     bypassCache: options?.bypassCache,
     compute: async () => {
@@ -284,6 +291,9 @@ export async function getScopedReportsDashboard(
       const allGa4PropIds = scope.availableWebsites
         .map((w) => w.ga4PropertyId)
         .filter((id): id is string => Boolean(id));
+      const allGscSites = scope.availableWebsites
+        .map((w) => w.gscSiteUrl)
+        .filter((url): url is string => Boolean(url));
 
       const [
         rawLeads,
@@ -291,7 +301,10 @@ export async function getScopedReportsDashboard(
         salesUsers,
         allProducts,
         userCoverMap,
-        metrics,
+        rawMetrics,
+        realAdsCatalog,
+        gadsLiveSnap,
+        finalUrlsMap,
         seoArticles,
         designRequests,
         aiLogAgg,
@@ -299,6 +312,7 @@ export async function getScopedReportsDashboard(
         openAlertsCount,
         siteTrafficMetrics,
         ga4LiveSnaps,
+        gscLiveSnaps,
         googleOAuthConn,
         gmailSyncSettings,
       ] = await Promise.all([
@@ -361,6 +375,7 @@ export async function getScopedReportsDashboard(
             NOT: [
               { accountPropertyId: { startsWith: 'GA4-' } },
               { campaignExternalId: { startsWith: 'ga4_' } },
+              { campaignExternalId: { startsWith: 'PERIOD_SNAPSHOT:' } },
             ],
           },
           include: {
@@ -368,10 +383,30 @@ export async function getScopedReportsDashboard(
               select: {
                 campaignName: true,
                 campaignCode: true,
+                utmCampaignSlug: true,
+                isActive: true,
               },
             },
           },
         }),
+        prisma.campaign.findMany({
+          where: {
+            platform: 'google_ads',
+            NOT: [{ accountExternalId: 'default' }, { accountExternalId: { startsWith: 'GA4-' } }],
+          },
+          select: {
+            id: true,
+            campaignCode: true,
+            campaignName: true,
+            platform: true,
+            isActive: true,
+            utmCampaignSlug: true,
+          },
+        }),
+        scope.isAllTime
+          ? Promise.resolve(null)
+          : getGoogleAdsLiveSnapshotNonBlocking(fromDateStr, toDateStr, false),
+        getCampaignFinalUrlsMapNonBlocking(),
         prisma.seoArticle.findMany({
           where: {
             createdAt: {
@@ -442,6 +477,9 @@ export async function getScopedReportsDashboard(
         scope.isAllTime
           ? Promise.resolve([])
           : getGa4LiveSnapshotsForProperties(allGa4PropIds, fromDateStr, toDateStr, false),
+        scope.isAllTime
+          ? Promise.resolve([])
+          : getGscLiveSnapshotsForSites(allGscSites, fromDateStr, toDateStr, false),
         getGoogleConnection(),
         prisma.systemSetting.findMany({
           where: { key: { in: ['gmail_lead_sync_config', 'gmail_sync_checkpoint'] } },
@@ -449,9 +487,21 @@ export async function getScopedReportsDashboard(
         }),
       ]);
 
+      const metrics = mergeCanonicalAdsCampaignDailyMetrics({
+        dbRows: rawMetrics,
+        gadsLiveSnap,
+        realAdsCatalog,
+        finalUrlsMap,
+        startDateStr: fromDateStr,
+        endDateStr: toDateStr,
+      });
+
       const latestSync = recentSyncLogs.find((s) => s.status === 'success' && s.completedAt) || null;
 
   const ga4SnapByProp = new Map(ga4LiveSnaps.map((s) => [s.propertyId, s]));
+  const gscSnapByNormDomain = new Map(
+    gscLiveSnaps.map((s) => [normalizeDomainKey(s.siteUrl), s]),
+  );
 
   // Tổng hợp đồng thời TẤT CẢ các website trên cùng 1 màn hình Tổng quan (không bắt bấm từng tab web)
   const matchedLeadIds = new Set<number>();
@@ -468,6 +518,7 @@ export async function getScopedReportsDashboard(
         )
       : [];
     const siteNormDomain = normalizeDomainKey(site.domain);
+    const liveGscSnap = siteNormDomain ? gscSnapByNormDomain.get(siteNormDomain) : undefined;
     const gscRows = siteTrafficMetrics.filter((m) => {
       if (m.platform !== 'search_console') return false;
       if (site.gscSiteUrl && m.accountPropertyId === site.gscSiteUrl) return true;
@@ -480,13 +531,17 @@ export async function getScopedReportsDashboard(
         : ga4Rows.reduce((s, r) => s + (r.pageViews || 0), 0)
       : null;
     const gscClicks =
-      site.gscSiteUrl || gscRows.length > 0
-        ? gscRows.reduce((s, r) => s + (r.clicks || 0), 0)
-        : null;
+      liveGscSnap && liveGscSnap.daily.length > 0
+        ? liveGscSnap.daily.reduce((s, d) => s + d.clicks, 0)
+        : site.gscSiteUrl || gscRows.length > 0
+          ? gscRows.reduce((s, r) => s + (r.clicks || 0), 0)
+          : null;
     const gscImpressions =
-      site.gscSiteUrl || gscRows.length > 0
-        ? gscRows.reduce((s, r) => s + (r.impressions || 0), 0)
-        : null;
+      liveGscSnap && liveGscSnap.daily.length > 0
+        ? liveGscSnap.daily.reduce((s, d) => s + d.impressions, 0)
+        : site.gscSiteUrl || gscRows.length > 0
+          ? gscRows.reduce((s, r) => s + (r.impressions || 0), 0)
+          : null;
 
     return {
       websiteId: site.websiteId,
@@ -788,18 +843,33 @@ export async function getScopedReportsDashboard(
     .filter((p) => p.inquiryCount > 0)
     .sort((a, b) => b.inquiryCount - a.inquiryCount);
 
-  const hasAdsMetrics = metrics.length > 0 && !scope.selectedWebsite;
+  const scopedAdsMetrics = !scope.selectedWebsite
+    ? metrics
+    : metrics.filter((m) => {
+        const attr = classifyCampaignWebsiteAttribution(
+          m.campaign.campaignName,
+          m.finalUrls,
+          m.campaign.utmCampaignSlug,
+        );
+        return (
+          attr.status === 'SINGLE_WEBSITE' &&
+          attr.domain &&
+          matchesWebsiteDomain(attr.domain, scope.selectedWebsite)
+        );
+      });
+
+  const hasAdsMetrics = scopedAdsMetrics.length > 0;
   const totalAdsSpendMicros = hasAdsMetrics
-    ? metrics.reduce((acc, m) => acc + (m.spendMicros ?? 0n), 0n)
+    ? scopedAdsMetrics.reduce((acc, m) => acc + (m.spendMicros ?? 0n), 0n)
     : 0n;
   const platformReportedConversions = hasAdsMetrics
     ? Number(
-        metrics
+        scopedAdsMetrics
           .reduce((acc, m) => acc + Number(m.conversionsMicros ?? 0n) / 1_000_000, 0)
           .toFixed(2),
       )
     : 0;
-  const effectiveLeadsFromAds = effectiveLeads.filter((l) => {
+  const effectiveLeadsFromAds = validLeads.filter((l) => {
     const ch = normalizeMarketingChannelDisplay({
       marketingSource: l.tracking?.marketingSource,
       utmSource: l.tracking?.utmSource,
@@ -829,30 +899,28 @@ export async function getScopedReportsDashboard(
     }
   >();
 
-  if (!scope.selectedWebsite) {
-    for (const m of metrics) {
-      const srcName =
-        m.platform === 'google_ads'
-          ? 'Google Ads'
-          : m.platform === 'facebook' || m.platform === 'facebook_ads'
-            ? 'Quảng cáo Facebook'
-            : m.platform;
-      const campName = m.campaign?.campaignName || 'Chiến dịch chưa đặt tên';
-      const key = `${srcName}::${campName}`;
-      const entry = sourceCampaignMap.get(key) ?? {
-        sourceName: srcName,
-        campaignName: campName,
-        spendMicros: 0n,
-        platformConversions: 0,
-        crmLeadsL1: 0,
-        crmValidL2: 0,
-        crmEffectiveL3: 0,
-        wonCount: 0,
-      };
-      entry.spendMicros += m.spendMicros ?? 0n;
-      entry.platformConversions += Number((Number(m.conversionsMicros ?? 0n) / 1_000_000).toFixed(2));
-      sourceCampaignMap.set(key, entry);
-    }
+  for (const m of scopedAdsMetrics) {
+    const srcName =
+      m.platform === 'google_ads'
+        ? 'Google Ads'
+        : m.platform === 'facebook' || m.platform === 'facebook_ads'
+          ? 'Quảng cáo Facebook'
+          : m.platform;
+    const campName = m.campaign?.campaignName || 'Chiến dịch chưa đặt tên';
+    const key = `${srcName}::${campName}`;
+    const entry = sourceCampaignMap.get(key) ?? {
+      sourceName: srcName,
+      campaignName: campName,
+      spendMicros: 0n,
+      platformConversions: 0,
+      crmLeadsL1: 0,
+      crmValidL2: 0,
+      crmEffectiveL3: 0,
+      wonCount: 0,
+    };
+    entry.spendMicros += m.spendMicros ?? 0n;
+    entry.platformConversions += Number((Number(m.conversionsMicros ?? 0n) / 1_000_000).toFixed(2));
+    sourceCampaignMap.set(key, entry);
   }
 
   for (const lead of leads) {
@@ -1236,8 +1304,15 @@ export async function generateScopedReportExportBuffer(
   user: SessionUserDto,
   rawQuery: unknown,
   format: 'xlsx' | 'csv' = 'xlsx',
+  options?: { mode?: 'report' | 'template'; granularity?: string | null },
 ): Promise<{ buffer: Buffer; fileName: string; mimeType: string }> {
   const qObj = (rawQuery && typeof rawQuery === 'object' ? rawQuery : {}) as Record<string, unknown>;
+  const reqGranularity =
+    options?.granularity ??
+    (typeof qObj.granularity === 'string' ? qObj.granularity : undefined);
+  const reqMode =
+    options?.mode ?? (qObj.mode === 'template' ? 'template' : 'report');
+
   const [dashboard, m04Spec] = await Promise.all([
     getScopedReportsDashboard(user, rawQuery),
     getM04ResultsReportSpec(user, {
@@ -1245,6 +1320,7 @@ export async function generateScopedReportExportBuffer(
       preset: typeof qObj.preset === 'string' ? qObj.preset.toUpperCase() : '30D',
       from: typeof qObj.fromDate === 'string' ? qObj.fromDate : typeof qObj.from === 'string' ? qObj.from : undefined,
       to: typeof qObj.toDate === 'string' ? qObj.toDate : typeof qObj.to === 'string' ? qObj.to : undefined,
+      granularity: reqGranularity,
     }),
   ]);
   const dateStamp = new Intl.DateTimeFormat('en-CA', {
@@ -1253,6 +1329,86 @@ export async function generateScopedReportExportBuffer(
     month: '2-digit',
     day: '2-digit',
   }).format(new Date());
+
+  const fullCatalogRows = m04Spec.tables.byProductCatalog || m04Spec.tables.byProduct || [];
+
+  if (reqMode === 'template') {
+    const periodTag = `${m04Spec.scope.startDate} → ${m04Spec.scope.endDate}`;
+    const templateBuffer = buildStandardXlsxBuffer([
+      {
+        name: 'MauImportSanPham',
+        title: `FILE MẪU IMPORT ĐỐI SOÁT 25 MẶT HÀNG TOÀN TRUNG (${periodTag})`,
+        metadata: [
+          { label: 'Kỳ đối chiếu mẫu', value: periodTag },
+          { label: 'Quy tắc BA', value: 'Giữ nguyên cột Mã SP (25 mã chuẩn) · Không nhập cột Doanh thu / ROAS (Q08)' },
+        ],
+        columns: [
+          { header: 'ma_san_pham', key: 'ma_san_pham', width: 22, type: 'string' },
+          { header: 'nhom_nganh', key: 'nhom_nganh', width: 20, type: 'string' },
+          { header: 'ten_san_pham', key: 'ten_san_pham', width: 34, type: 'string' },
+          { header: 'dvt', key: 'dvt', width: 10, type: 'string' },
+          { header: 'ky_bao_cao', key: 'ky_bao_cao', width: 22, type: 'string' },
+          { header: 'tong_lead', key: 'tong_lead', width: 14, type: 'number', summaryAgg: 'sum' },
+          { header: 'lead_hop_le', key: 'lead_hop_le', width: 14, type: 'number', summaryAgg: 'sum' },
+          { header: 'da_bao_gia', key: 'da_bao_gia', width: 14, type: 'number', summaryAgg: 'sum' },
+          { header: 'chot_thanh_cong', key: 'chot_thanh_cong', width: 16, type: 'number', summaryAgg: 'sum' },
+          { header: 'chi_phi_ads_vnd', key: 'chi_phi_ads_vnd', width: 20, type: 'currency', summaryAgg: 'sum' },
+          { header: 'ghi_chu', key: 'ghi_chu', width: 32, type: 'string' },
+        ],
+        rows: fullCatalogRows
+          .filter((p) => !p.isUnclassifiedProduct)
+          .map((p) => ({
+            ma_san_pham: p.productCode || `SP_${p.productId}`,
+            nhom_nganh: p.categoryLabel || '',
+            ten_san_pham: p.productName,
+            dvt: p.unit || 'bộ',
+            ky_bao_cao: periodTag,
+            tong_lead: p.leadCount,
+            lead_hop_le: p.validCount,
+            da_bao_gia: p.quotedCount,
+            chot_thanh_cong: p.wonCount,
+            chi_phi_ads_vnd: 0,
+            ghi_chu: '',
+          })),
+        summaryRow: {
+          ma_san_pham: 'TỔNG CỘNG',
+          nhom_nganh: '',
+          ten_san_pham: `${fullCatalogRows.filter((p) => !p.isUnclassifiedProduct).length} mặt hàng chuẩn`,
+          dvt: '',
+          ky_bao_cao: '',
+          tong_lead: fullCatalogRows.filter((p) => !p.isUnclassifiedProduct).reduce((s, p) => s + p.leadCount, 0),
+          lead_hop_le: fullCatalogRows.filter((p) => !p.isUnclassifiedProduct).reduce((s, p) => s + p.validCount, 0),
+          da_bao_gia: fullCatalogRows.filter((p) => !p.isUnclassifiedProduct).reduce((s, p) => s + p.quotedCount, 0),
+          chot_thanh_cong: fullCatalogRows.filter((p) => !p.isUnclassifiedProduct).reduce((s, p) => s + p.wonCount, 0),
+          chi_phi_ads_vnd: 0,
+          ghi_chu: '',
+        },
+        footerNotes: [
+          'Chỉnh sửa số liệu ở các cột số rồi tải tệp .xlsx này lên mục Import Excel trong Module 04 để hệ thống tự kiểm tra và đối chiếu chênh lệch với CRM.',
+        ],
+      },
+      {
+        name: 'HuongDanImport',
+        title: 'HƯỚNG DẪN ĐIỀN FILE MẪU IMPORT ĐỐI SOÁT MODULE 04',
+        columns: [
+          { header: 'Hạng mục', key: 'item', width: 28, type: 'string' },
+          { header: 'Quy định chuẩn', key: 'rule', width: 70, type: 'string' },
+        ],
+        rows: [
+          { item: '1. Mã sản phẩm (ma_san_pham)', rule: 'Dùng đúng 1 trong 25 mã sản phẩm Toàn Trung (LED_INDOOR, LED_OUTDOOR, BOARD_MARATHON...) hoặc CHUA_GAN_MA.' },
+          { item: '2. Kỳ báo cáo (ky_bao_cao)', rule: 'Ghi rõ ngày (YYYY-MM-DD), tuần (YYYY-Www), tháng (YYYY-MM), năm (YYYY) hoặc khoảng ngày.' },
+          { item: '3. Bảo mật & Q08', rule: 'Không đưa cột SĐT/Email khách hàng hay Doanh thu/Giá bán/ROAS vào file đối soát (hệ thống tự loại bỏ theo BA).' },
+          { item: '4. An toàn dữ liệu gốc', rule: 'Bản Import được lưu riêng vào kho đối soát M04 + AuditLog, không ghi đè dữ liệu Lead gốc của Module 01.' },
+        ],
+      },
+    ]);
+
+    return {
+      buffer: templateBuffer,
+      fileName: `Mau_Import_DoiSoat_25_SanPham_ToanTrung_${dateStamp}.xlsx`,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    };
+  }
 
   await prisma.auditLog.create({
     data: {
@@ -1265,6 +1421,7 @@ export async function generateScopedReportExportBuffer(
         websiteId: dashboard.websiteId || 'all',
         fromDate: dashboard.fromDate,
         toDate: dashboard.toDate,
+        granularity: m04Spec.periodBreakdown?.granularity || 'day',
         format,
         leadCount: dashboard.detailedLeads.length,
       }),
@@ -1424,6 +1581,86 @@ export async function generateScopedReportExportBuffer(
       ],
     },
     {
+      name: 'ChuoiThoiGian',
+      title: `CHUỖI SỐ LIỆU CHỐT KỲ (${m04Spec.periodBreakdown?.granularityLabel || 'Theo Ngày'}) — ${m04Spec.scope.websiteLabel}`,
+      metadata: [
+        { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate} (Asia/Ho_Chi_Minh)` },
+        { label: 'Cấp tổng hợp', value: m04Spec.periodBreakdown?.granularityLabel || 'Theo Ngày' },
+      ],
+      columns: [
+        { header: 'Mốc thời gian', key: 'label', width: 28, type: 'string' },
+        { header: 'Từ ngày', key: 'bucketStart', width: 13, type: 'string' },
+        { header: 'Đến ngày', key: 'bucketEnd', width: 13, type: 'string' },
+        { header: 'Tiếp nhận', key: 'receivedLeadCount', width: 13, type: 'number', summaryAgg: 'sum' },
+        { header: 'Hợp lệ', key: 'validLeadCount', width: 13, type: 'number', summaryAgg: 'sum' },
+        { header: 'Đã báo giá', key: 'quotedLeadCount', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'Chốt thành công', key: 'wonLeadCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'Tỷ lệ chốt (%)',
+          key: 'winRate',
+          width: 15,
+          type: 'percent',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonLeadCount}${rowNum}/${colLetters.validLeadCount}${rowNum},0)`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IFERROR(${colLetters.wonLeadCount}${summaryRowNum}/${colLetters.validLeadCount}${summaryRowNum},0)`,
+        },
+        { header: 'Chi phí Ads (VNĐ)', key: 'adCost', width: 20, type: 'currency', summaryAgg: 'sum' },
+        { header: 'Lead từ Ads', key: 'adLeadCount', width: 14, type: 'number', summaryAgg: 'sum' },
+        {
+          header: 'CPL Ads (VNĐ)',
+          key: 'cpl',
+          width: 18,
+          type: 'currency',
+          rowFormula: ({ rowNum, colLetters }) =>
+            `IF(${colLetters.adLeadCount}${rowNum}>0,ROUND(${colLetters.adCost}${rowNum}/${colLetters.adLeadCount}${rowNum},0),"")`,
+          summaryAgg: ({ summaryRowNum, colLetters }) =>
+            `IF(${colLetters.adLeadCount}${summaryRowNum}>0,ROUND(${colLetters.adCost}${summaryRowNum}/${colLetters.adLeadCount}${summaryRowNum},0),"")`,
+        },
+      ],
+      rows: (m04Spec.periodBreakdown?.buckets || []).map((b) => ({
+        label: b.isPreliminary ? `${b.label} (Chưa chốt)` : b.label,
+        bucketStart: b.bucketStart,
+        bucketEnd: b.bucketEnd,
+        receivedLeadCount: b.receivedLeadCount,
+        validLeadCount: b.validLeadCount,
+        quotedLeadCount: b.quotedLeadCount,
+        wonLeadCount: b.wonLeadCount,
+        winRate: b.validLeadCount > 0 ? Number((b.wonLeadCount / b.validLeadCount).toFixed(4)) : 0,
+        adCost: b.adCost ?? 0,
+        adLeadCount: b.adLeadCount,
+        cpl: b.cpl !== null ? Math.round(b.cpl) : null,
+      })),
+      summaryRow: {
+        label: 'TỔNG CỘNG KHỚP KỲ',
+        bucketStart: m04Spec.scope.startDate,
+        bucketEnd: m04Spec.scope.endDate,
+        receivedLeadCount: m04Spec.periodBreakdown?.totals.receivedLeadCount ?? 0,
+        validLeadCount: m04Spec.periodBreakdown?.totals.validLeadCount ?? 0,
+        quotedLeadCount: m04Spec.periodBreakdown?.totals.quotedLeadCount ?? 0,
+        wonLeadCount: m04Spec.periodBreakdown?.totals.wonLeadCount ?? 0,
+        winRate:
+          (m04Spec.periodBreakdown?.totals.validLeadCount ?? 0) > 0
+            ? Number(
+                (
+                  (m04Spec.periodBreakdown?.totals.wonLeadCount ?? 0) /
+                  (m04Spec.periodBreakdown?.totals.validLeadCount ?? 1)
+                ).toFixed(4),
+              )
+            : 0,
+        adCost: m04Spec.periodBreakdown?.totals.adCost ?? 0,
+        adLeadCount: m04Spec.periodBreakdown?.totals.adLeadCount ?? 0,
+        cpl:
+          m04Spec.periodBreakdown?.totals.cpl !== null &&
+          m04Spec.periodBreakdown?.totals.cpl !== undefined
+            ? Math.round(m04Spec.periodBreakdown.totals.cpl)
+            : null,
+      },
+      footerNotes: [
+        'Cộng tổng toàn bộ mốc thời gian khớp 100% với tổng số liệu kỳ đang lọc (múi giờ Asia/Ho_Chi_Minh UTC+7).',
+      ],
+    },
+    {
       name: 'KenhVaChienDich',
       title: `ĐỐI CHIẾU HIỆU QUẢ THEO CHIẾN DỊCH — ${m04Spec.scope.websiteLabel}`,
       metadata: [
@@ -1531,20 +1768,27 @@ export async function generateScopedReportExportBuffer(
     },
     {
       name: 'NhuCauSanPham',
-      title: `NHU CẦU THEO DÒNG SẢN PHẨM — ${m04Spec.scope.websiteLabel}`,
+      title: `PHÂN TÍCH ĐỦ 25 MẶT HÀNG TOÀN TRUNG — ${m04Spec.scope.websiteLabel}`,
       metadata: [
         { label: 'Kỳ báo cáo', value: `${m04Spec.scope.startDate} đến ${m04Spec.scope.endDate}` },
+        { label: 'Phân nhóm chuẩn', value: 'Màn hình LED (8) · Bảng điện tử (12) · Nhu cầu khác (5) + Tách riêng Chưa gắn mã' },
       ],
       columns: [
-        { header: 'Sản phẩm', key: 'productName', width: 32, type: 'string' },
-        { header: 'Lead quan tâm', key: 'leadCount', width: 16, type: 'number', summaryAgg: 'sum' },
-        { header: 'Lead hợp lệ', key: 'validCount', width: 15, type: 'number', summaryAgg: 'sum' },
-        { header: 'Đã báo giá', key: 'quotedCount', width: 15, type: 'number', summaryAgg: 'sum' },
-        { header: 'Chốt thành công', key: 'wonCount', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'Mã SP', key: 'productCode', width: 22, type: 'string' },
+        { header: 'Nhóm ngành', key: 'categoryLabel', width: 20, type: 'string' },
+        { header: 'Tên mặt hàng', key: 'productName', width: 34, type: 'string' },
+        { header: 'ĐVT', key: 'unit', width: 10, type: 'string' },
+        { header: 'Lead quan tâm', key: 'leadCount', width: 15, type: 'number', summaryAgg: 'sum' },
+        { header: 'Lead hợp lệ', key: 'validCount', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'Đang soạn BG', key: 'quotingCount', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'Đã báo giá', key: 'quotedCount', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'Quá hạn >7 ngày', key: 'overdueCount', width: 15, type: 'number', summaryAgg: 'sum' },
+        { header: 'Chốt thành công', key: 'wonCount', width: 15, type: 'number', summaryAgg: 'sum' },
+        { header: 'Thất bại', key: 'lostCount', width: 12, type: 'number', summaryAgg: 'sum' },
         {
           header: 'Tỷ lệ chốt (%)',
           key: 'winRate',
-          width: 16,
+          width: 15,
           type: 'percent',
           rowFormula: ({ rowNum, colLetters }) =>
             `IFERROR(${colLetters.wonCount}${rowNum}/${colLetters.validCount}${rowNum},0)`,
@@ -1552,22 +1796,37 @@ export async function generateScopedReportExportBuffer(
             `IFERROR(${colLetters.wonCount}${summaryRowNum}/${colLetters.validCount}${summaryRowNum},0)`,
         },
       ],
-      rows: (m04Spec.tables.byProduct || []).map((p) => ({
+      rows: fullCatalogRows.map((p) => ({
+        productCode: p.productCode || (p.isUnclassifiedProduct ? 'CHUA_GAN_MA' : `SP_${p.productId}`),
+        categoryLabel: p.categoryLabel || (p.isUnclassifiedProduct ? 'Chưa gắn mã sản phẩm' : ''),
         productName: p.productName,
+        unit: p.unit || 'bộ',
         leadCount: p.leadCount,
         validCount: p.validCount,
+        quotingCount: p.quotingCount ?? 0,
         quotedCount: p.quotedCount,
+        overdueCount: p.overdueCount ?? 0,
         wonCount: p.wonCount,
+        lostCount: p.lostCount ?? 0,
         winRate: p.validCount > 0 ? Number((p.wonCount / p.validCount).toFixed(4)) : 0,
       })),
       summaryRow: {
-        productName: 'TỔNG CỘNG SẢN PHẨM',
-        leadCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.leadCount, 0),
-        validCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.validCount, 0),
-        quotedCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.quotedCount, 0),
-        wonCount: (m04Spec.tables.byProduct || []).reduce((s, p) => s + p.wonCount, 0),
+        productCode: 'TỔNG CỘNG',
+        categoryLabel: '',
+        productName: `${fullCatalogRows.length} dòng (25 mã chuẩn + chưa phân loại)`,
+        unit: '',
+        leadCount: fullCatalogRows.reduce((s, p) => s + p.leadCount, 0),
+        validCount: fullCatalogRows.reduce((s, p) => s + p.validCount, 0),
+        quotingCount: fullCatalogRows.reduce((s, p) => s + (p.quotingCount ?? 0), 0),
+        quotedCount: fullCatalogRows.reduce((s, p) => s + p.quotedCount, 0),
+        overdueCount: fullCatalogRows.reduce((s, p) => s + (p.overdueCount ?? 0), 0),
+        wonCount: fullCatalogRows.reduce((s, p) => s + p.wonCount, 0),
+        lostCount: fullCatalogRows.reduce((s, p) => s + (p.lostCount ?? 0), 0),
         winRate: 0,
       },
+      footerNotes: [
+        'Dòng CHUA_GAN_MA tách riêng các hồ sơ chưa chọn mã sản phẩm trên lead_products để đảm bảo số liệu 25 mặt hàng chính xác tuyệt đối.',
+      ],
     },
     {
       name: 'ChiTietLead',
@@ -1605,6 +1864,34 @@ export async function generateScopedReportExportBuffer(
         pipelineStatusLabel: r.pipelineStatusLabel,
         noteOrReason: r.noteOrReason,
       })),
+    },
+    {
+      name: 'MauImportDoiSoat',
+      title: `MẪU ĐỐI SOÁT 25 MẶT HÀNG (SỬA SỐ LIỆU & IMPORT LẠI VÀO M04)`,
+      columns: [
+        { header: 'ma_san_pham', key: 'ma_san_pham', width: 22, type: 'string' },
+        { header: 'nhom_nganh', key: 'nhom_nganh', width: 20, type: 'string' },
+        { header: 'ten_san_pham', key: 'ten_san_pham', width: 34, type: 'string' },
+        { header: 'ky_bao_cao', key: 'ky_bao_cao', width: 24, type: 'string' },
+        { header: 'tong_lead', key: 'tong_lead', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'lead_hop_le', key: 'lead_hop_le', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'da_bao_gia', key: 'da_bao_gia', width: 14, type: 'number', summaryAgg: 'sum' },
+        { header: 'chot_thanh_cong', key: 'chot_thanh_cong', width: 16, type: 'number', summaryAgg: 'sum' },
+        { header: 'ghi_chu', key: 'ghi_chu', width: 30, type: 'string' },
+      ],
+      rows: fullCatalogRows
+        .filter((p) => !p.isUnclassifiedProduct)
+        .map((p) => ({
+          ma_san_pham: p.productCode || `SP_${p.productId}`,
+          nhom_nganh: p.categoryLabel || '',
+          ten_san_pham: p.productName,
+          ky_bao_cao: `${m04Spec.scope.startDate} → ${m04Spec.scope.endDate}`,
+          tong_lead: p.leadCount,
+          lead_hop_le: p.validCount,
+          da_bao_gia: p.quotedCount,
+          chot_thanh_cong: p.wonCount,
+          ghi_chu: '',
+        })),
     },
   ]);
 

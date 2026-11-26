@@ -10,6 +10,25 @@ import type { SessionUserDto } from '@toantrung/contracts';
 const REMEMBER_USER_KEY = 'tt_v2_remembered_identifier';
 const DEFAULT_HERO_IMAGE = '/brand/login-hero-led-building.jpg';
 
+function resolveSafePostLoginPath(): string {
+  if (typeof window === 'undefined') return '/dashboard';
+  try {
+    const rawNext = new URLSearchParams(window.location.search).get('next')?.trim() || '';
+    if (
+      rawNext &&
+      rawNext.startsWith('/') &&
+      !rawNext.startsWith('//') &&
+      !rawNext.startsWith('/login') &&
+      !rawNext.startsWith('/api')
+    ) {
+      return rawNext;
+    }
+  } catch {
+    // Fallback to default dashboard
+  }
+  return '/dashboard';
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const { user, branding, refreshSession, refreshUnreadCount } = useSession();
@@ -36,7 +55,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (user) {
-      router.replace('/dashboard');
+      router.replace(resolveSafePostLoginPath());
     }
   }, [user, router]);
 
@@ -67,7 +86,7 @@ export default function LoginPage() {
 
       await refreshSession();
       await refreshUnreadCount();
-      router.replace('/dashboard');
+      router.replace(resolveSafePostLoginPath());
     } catch (err) {
       if (err instanceof ApiClientError) {
         setErrorMessage(err.message);

@@ -392,11 +392,14 @@ export function TrackingWorkspace() {
   const loadData = useCallback(
     async (opts?: { manual?: boolean; silent?: boolean; signal?: AbortSignal }) => {
       const requestPath = apiPath;
+      const fetchPath = opts?.manual
+        ? `${requestPath}${requestPath.includes('?') ? '&' : '?'}refresh=1`
+        : requestPath;
       const seq = ++reqSeqRef.current;
       if (opts?.manual) setRefreshing(true);
       if (!opts?.silent) setErrorMsg(null);
       try {
-        const res = await apiRequest<M02TrafficInteractionDto>(requestPath, {
+        const res = await apiRequest<M02TrafficInteractionDto>(fetchPath, {
           signal: opts?.signal,
           skipCache: Boolean(opts?.manual || opts?.silent),
           onRevalidated: (fresh) => {
@@ -468,9 +471,9 @@ export function TrackingWorkspace() {
       businessTab: isAds ? 'ads' : 'traffic',
       trafficSubTab:
         activeSection === 'landing_pages' ||
-        activeSection === 'channels' ||
-        activeSection === 'actions' ||
-        activeSection === 'devices_geo'
+          activeSection === 'channels' ||
+          activeSection === 'actions' ||
+          activeSection === 'devices_geo'
           ? activeSection
           : 'landing_pages',
       adsScopeMode,
@@ -1093,11 +1096,10 @@ export function TrackingWorkspace() {
                     <button
                       type="button"
                       onClick={() => setLpCategoryFilter('all')}
-                      className={`px-2.5 py-1 rounded-lg font-semibold transition ${
-                        lpCategoryFilter === 'all'
+                      className={`px-2.5 py-1 rounded-lg font-semibold transition ${lpCategoryFilter === 'all'
                           ? 'bg-[#1A73E8] text-white'
                           : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
+                        }`}
                     >
                       Tất cả ({visibleLandingPageCount})
                     </button>
@@ -1108,17 +1110,15 @@ export function TrackingWorkspace() {
                           key={cat.categoryKey}
                           type="button"
                           onClick={() => setLpCategoryFilter(cat.categoryKey)}
-                          className={`px-2.5 py-1 rounded-lg font-semibold transition inline-flex items-center gap-1.5 ${
-                            lpCategoryFilter === cat.categoryKey
+                          className={`px-2.5 py-1 rounded-lg font-semibold transition inline-flex items-center gap-1.5 ${lpCategoryFilter === cat.categoryKey
                               ? 'bg-[#1A73E8] text-white'
                               : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                          }`}
+                            }`}
                         >
                           <span>{cat.categoryLabel}</span>
                           <span
-                            className={`tabular-nums text-[10px] px-1 rounded ${
-                              lpCategoryFilter === cat.categoryKey ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'
-                            }`}
+                            className={`tabular-nums text-[10px] px-1 rounded ${lpCategoryFilter === cat.categoryKey ? 'bg-white/20 text-white' : 'bg-emerald-50 text-emerald-700'
+                              }`}
                           >
                             {cat.newUsers !== null ? `${cat.newUsers} mới` : `${cat.sessions} phiên`}
                           </span>
@@ -1982,61 +1982,114 @@ export function TrackingWorkspace() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {(ads?.breakdowns.landingPages || []).length === 0 ? (
-                        <tr>
-                          <td colSpan={8} className="py-8 text-center text-slate-500">
-                            {ads?.breakdowns.keywordAvailabilityNote ||
-                              'Chưa có dữ liệu trang đích Google Ads trong phạm vi đang chọn.'}
-                          </td>
-                        </tr>
-                      ) : (
-                        (ads?.breakdowns.landingPages || [])
-                          .filter(
-                            (lp) =>
-                              !searchTerm ||
-                              lp.url.toLowerCase().includes(searchTerm) ||
-                              lp.campaignName.toLowerCase().includes(searchTerm),
-                          )
-                          .map((lp, idx) => (
-                            <tr key={`${lp.url}-${lp.campaignName}-${idx}`} className="hover:bg-slate-50/70">
-                              <th scope="row" className="py-2.5 px-4 font-mono text-[11px] font-medium text-slate-900 max-w-[340px]">
-                                <a
-                                  href={lp.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-[#1A73E8] hover:underline inline-flex items-center gap-1 max-w-full"
-                                  title={lp.url}
-                                >
-                                  <span className="truncate">{lp.url}</span>
-                                  <ExternalLink className="w-3 h-3 shrink-0" />
-                                </a>
-                              </th>
-                              <td className="py-2.5 px-3 text-slate-600 max-w-[220px] truncate" title={lp.campaignName}>
-                                {lp.campaignName}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
-                                {lp.clicks.toLocaleString('vi-VN')}
-                              </td>
-                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                                {lp.impressions.toLocaleString('vi-VN')}
-                              </td>
-                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                                {lp.ctrPct !== null ? `${lp.ctrPct.toFixed(2)}%` : '—'}
-                              </td>
-                              <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
-                                {lp.avgCpc !== null ? `${Math.round(lp.avgCpc).toLocaleString('vi-VN')} ₫` : '—'}
-                              </td>
-                              <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
-                                {Math.round(lp.cost).toLocaleString('vi-VN')} ₫
-                              </td>
-                              <td className="py-2.5 px-4 text-right text-slate-700 tabular-nums">
-                                {Number.isInteger(lp.conversions)
-                                  ? lp.conversions.toLocaleString('vi-VN')
-                                  : lp.conversions.toFixed(2)}
+                      {(() => {
+                        const rawLandingPages = ads?.breakdowns.landingPages || [];
+                        const filteredLandingPages = rawLandingPages.filter(
+                          (lp) =>
+                            !searchTerm ||
+                            lp.url.toLowerCase().includes(searchTerm) ||
+                            lp.campaignName.toLowerCase().includes(searchTerm),
+                        );
+                        if (rawLandingPages.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={8} className="py-8 px-4 text-center text-slate-600">
+                                <div role="status" aria-live="polite" className="max-w-xl mx-auto space-y-2.5">
+                                  <p>
+                                    {ads?.breakdowns.landingPageAvailabilityNote ||
+                                      'Chưa có dữ liệu trang đích Google Ads trong phạm vi đang chọn.'}
+                                  </p>
+                                  <div className="flex flex-wrap items-center justify-center gap-2">
+                                    {ads?.breakdowns.dataState === 'SYNCING' && (
+                                      <button
+                                        type="button"
+                                        onClick={() => void loadData({ manual: true })}
+                                        disabled={refreshing}
+                                        className="px-3 py-1.5 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-[#172E6E] disabled:opacity-60 transition"
+                                      >
+                                        {refreshing ? 'Đang tải lại…' : 'Tải lại dữ liệu'}
+                                      </button>
+                                    )}
+                                    {ads?.breakdowns.dataState === 'NO_ACTIVITY_IN_PERIOD' && (
+                                      <>
+                                        <button
+                                          type="button"
+                                          onClick={() => updateScope({ preset: 'YESTERDAY' })}
+                                          className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition"
+                                        >
+                                          Xem Hôm qua
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => updateScope({ preset: '7D' })}
+                                          className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition"
+                                        >
+                                          Xem 7 ngày
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => updateScope({ preset: '30D' })}
+                                          className="px-2.5 py-1 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-[#172E6E] transition"
+                                        >
+                                          Xem 30 ngày
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
                               </td>
                             </tr>
-                          ))
-                      )}
+                          );
+                        }
+                        if (filteredLandingPages.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={8} className="py-6 text-center text-slate-500">
+                                Không có URL trang đích nào khớp với từ khóa tìm kiếm &ldquo;{searchTerm}&rdquo;.
+                              </td>
+                            </tr>
+                          );
+                        }
+                        return filteredLandingPages.map((lp, idx) => (
+                          <tr key={`${lp.url}-${lp.campaignName}-${idx}`} className="hover:bg-slate-50/70">
+                            <th scope="row" className="py-2.5 px-4 font-mono text-[11px] font-medium text-slate-900 max-w-[340px]">
+                              <a
+                                href={lp.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-[#1A73E8] hover:underline inline-flex items-center gap-1 max-w-full"
+                                title={lp.url}
+                              >
+                                <span className="truncate">{lp.url}</span>
+                                <ExternalLink className="w-3 h-3 shrink-0" />
+                              </a>
+                            </th>
+                            <td className="py-2.5 px-3 text-slate-600 max-w-[220px] truncate" title={lp.campaignName}>
+                              {lp.campaignName}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-semibold tabular-nums">
+                              {lp.clicks.toLocaleString('vi-VN')}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                              {lp.impressions.toLocaleString('vi-VN')}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                              {lp.ctrPct !== null ? `${lp.ctrPct.toFixed(2)}%` : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right text-slate-600 tabular-nums">
+                              {lp.avgCpc !== null ? `${Math.round(lp.avgCpc).toLocaleString('vi-VN')} ₫` : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right font-semibold text-slate-900 tabular-nums">
+                              {Math.round(lp.cost).toLocaleString('vi-VN')} ₫
+                            </td>
+                            <td className="py-2.5 px-4 text-right text-slate-700 tabular-nums">
+                              {Number.isInteger(lp.conversions)
+                                ? lp.conversions.toLocaleString('vi-VN')
+                                : lp.conversions.toFixed(2)}
+                            </td>
+                          </tr>
+                        ));
+                      })()}
                     </tbody>
                   </table>
                 </div>
@@ -2084,9 +2137,50 @@ export function TrackingWorkspace() {
                     <tbody className="divide-y divide-slate-100">
                       {(ads?.breakdowns.searchTerms || []).length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="py-8 text-center text-slate-500">
-                            {ads?.breakdowns.keywordAvailabilityNote ||
-                              'Chưa có dữ liệu cụm từ tìm kiếm Google Ads trong phạm vi đang chọn.'}
+                          <td colSpan={8} className="py-8 px-4 text-center text-slate-600">
+                            <div role="status" aria-live="polite" className="max-w-xl mx-auto space-y-2.5">
+                              <p>
+                                {ads?.breakdowns.searchTermAvailabilityNote ||
+                                  'Chưa có dữ liệu cụm từ tìm kiếm Google Ads trong phạm vi đang chọn.'}
+                              </p>
+                              <div className="flex flex-wrap items-center justify-center gap-2">
+                                {ads?.breakdowns.dataState === 'SYNCING' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void loadData({ manual: true })}
+                                    disabled={refreshing}
+                                    className="px-3 py-1.5 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-[#172E6E] disabled:opacity-60 transition"
+                                  >
+                                    {refreshing ? 'Đang tải lại…' : 'Tải lại dữ liệu'}
+                                  </button>
+                                )}
+                                {ads?.breakdowns.dataState === 'NO_ACTIVITY_IN_PERIOD' && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateScope({ preset: 'YESTERDAY' })}
+                                      className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition"
+                                    >
+                                      Xem Hôm qua
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateScope({ preset: '7D' })}
+                                      className="px-2.5 py-1 rounded-lg border border-slate-300 bg-white text-slate-700 text-xs font-medium hover:bg-slate-50 transition"
+                                    >
+                                      Xem 7 ngày
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateScope({ preset: '30D' })}
+                                      className="px-2.5 py-1 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-[#172E6E] transition"
+                                    >
+                                      Xem 30 ngày
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
                           </td>
                         </tr>
                       ) : (
@@ -2104,13 +2198,12 @@ export function TrackingWorkspace() {
                               </th>
                               <td className="py-2.5 px-3">
                                 <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                                    st.status === 'ADDED'
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${st.status === 'ADDED'
                                       ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                                       : st.status === 'EXCLUDED'
                                         ? 'bg-rose-50 text-rose-700 border border-rose-200'
                                         : 'bg-slate-100 text-slate-600'
-                                  }`}
+                                    }`}
                                 >
                                   {st.status || 'Chưa thêm'}
                                 </span>
@@ -2167,7 +2260,7 @@ export function TrackingWorkspace() {
                     Nhóm quảng cáo ({ads?.breakdowns.adGroups.length ?? 0})
                   </h3>
                 </div>
-                <div className="overflow-x-auto">
+                <div tabIndex={0} role="region" aria-label="Bảng Nhóm quảng cáo Google Ads" className="overflow-x-auto">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
                       <tr>
@@ -2183,9 +2276,23 @@ export function TrackingWorkspace() {
                     <tbody className="divide-y divide-slate-100">
                       {(ads?.breakdowns.adGroups || []).length === 0 ? (
                         <tr>
-                          <td colSpan={7} className="py-8 text-center text-slate-500">
-                            {ads?.breakdowns.keywordAvailabilityNote ||
-                              'Chưa có dữ liệu nhóm quảng cáo chi tiết trong phạm vi đang chọn.'}
+                          <td colSpan={7} className="py-8 px-4 text-center text-slate-600">
+                            <div role="status" aria-live="polite" className="max-w-xl mx-auto space-y-2">
+                              <p>
+                                {ads?.breakdowns.adGroupAvailabilityNote ||
+                                  'Chưa có dữ liệu nhóm quảng cáo chi tiết trong phạm vi đang chọn.'}
+                              </p>
+                              {ads?.breakdowns.dataState === 'SYNCING' && (
+                                <button
+                                  type="button"
+                                  onClick={() => void loadData({ manual: true })}
+                                  disabled={refreshing}
+                                  className="px-3 py-1.5 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-[#172E6E] disabled:opacity-60 transition"
+                                >
+                                  {refreshing ? 'Đang tải lại…' : 'Tải lại dữ liệu'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ) : (
@@ -2234,7 +2341,7 @@ export function TrackingWorkspace() {
                     Từ khóa quảng cáo ({ads?.breakdowns.keywords.length ?? 0})
                   </h3>
                 </div>
-                <div className="overflow-x-auto">
+                <div tabIndex={0} role="region" aria-label="Bảng Từ khóa quảng cáo Google Ads" className="overflow-x-auto">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
                       <tr>
@@ -2251,9 +2358,23 @@ export function TrackingWorkspace() {
                     <tbody className="divide-y divide-slate-100">
                       {(ads?.breakdowns.keywords || []).length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="py-8 text-center text-slate-500">
-                            {ads?.breakdowns.keywordAvailabilityNote ||
-                              'Chưa có dữ liệu từ khóa chi tiết trong phạm vi đang chọn.'}
+                          <td colSpan={8} className="py-8 px-4 text-center text-slate-600">
+                            <div role="status" aria-live="polite" className="max-w-xl mx-auto space-y-2">
+                              <p>
+                                {ads?.breakdowns.keywordAvailabilityNote ||
+                                  'Chưa có dữ liệu từ khóa chi tiết trong phạm vi đang chọn.'}
+                              </p>
+                              {ads?.breakdowns.dataState === 'SYNCING' && (
+                                <button
+                                  type="button"
+                                  onClick={() => void loadData({ manual: true })}
+                                  disabled={refreshing}
+                                  className="px-3 py-1.5 rounded-lg bg-[#1E3A8A] text-white text-xs font-semibold hover:bg-[#172E6E] disabled:opacity-60 transition"
+                                >
+                                  {refreshing ? 'Đang tải lại…' : 'Tải lại dữ liệu'}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ) : (
@@ -2456,11 +2577,10 @@ export function TrackingWorkspace() {
                     {drawerCampaign.campaignName}
                   </h2>
                   <span
-                    className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${
-                      drawerCampaign.status === 'ENABLED'
+                    className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${drawerCampaign.status === 'ENABLED'
                         ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                         : 'bg-slate-100 text-slate-600 border border-slate-200'
-                    }`}
+                      }`}
                   >
                     {drawerCampaign.status === 'ENABLED' ? 'Đang chạy' : 'Tạm dừng'}
                   </span>
@@ -2547,8 +2667,8 @@ export function TrackingWorkspace() {
                   (ag) => ag.campaignName === drawerCampaign.campaignName,
                 ).length === 0 ? (
                   <p className="text-slate-500 bg-slate-50 border border-slate-200 rounded-xl p-3">
-                    {ads?.breakdowns.keywordAvailabilityNote ||
-                      'Nguồn hiện chưa trả dữ liệu phân rã nhóm quảng cáo / từ khóa / thiết bị / khu vực cho chiến dịch này.'}
+                    {ads?.breakdowns.adGroupAvailabilityNote ||
+                      'Chưa có dữ liệu nhóm quảng cáo phát sinh cho chiến dịch này trong kỳ đang chọn.'}
                   </p>
                 ) : (
                   <ul role="list" className="space-y-2">
